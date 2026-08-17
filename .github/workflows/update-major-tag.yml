@@ -1,0 +1,60 @@
+name: Update Action major tag
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  update-major-tag:
+    if: ${{ !fromJSON(inputs.plan).announcement_is_prerelease }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PLAN: ${{ inputs.plan }}
+      RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Point the compatibility tag at the release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(jq -er '
+            if (.releases | length) == 1 then
+              .releases[0].app_version
+            else
+              error("expected exactly one release")
+            end
+          ' <<<"$PLAN")
+          major=${version%%.*}
+          if [[ ! $major =~ ^(0|[1-9][0-9]*)$ ]]; then
+            echo "invalid release major: $major" >&2
+            exit 1
+          fi
+
+          major_tag="v${major}"
+          ref="refs/tags/v${major}"
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${major_tag}" >/dev/null 2>&1; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/refs/tags/${major_tag}" \
+              -f sha="$RELEASE_COMMIT" \
+              -F force=true \
+              >/dev/null
+          else
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="$ref" \
+              -f sha="$RELEASE_COMMIT" \
+              >/dev/null
+          fi
+
+          echo "updated ${major_tag} to ${RELEASE_COMMIT}"

@@ -1,4 +1,14 @@
 use std::collections::BTreeSet;
+use std::path::Path;
+
+/// One source snapshot supplied to an analysis entry point.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceFile<'source> {
+    /// Path used to select the language adapter and report findings.
+    pub path: &'source Path,
+    /// UTF-8 source text at this revision.
+    pub text: &'source str,
+}
 
 /// One required policy violation.
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -13,25 +23,75 @@ pub struct Finding {
     pub message: String,
 }
 
-/// Changed lines and deletion anchors used to select affected owners.
 #[derive(Debug, Clone, Default)]
-pub struct Selection {
-    /// Added or edited lines in the new source.
-    pub changed: BTreeSet<usize>,
-    /// New lines plus anchors for deletion-only hunks.
-    pub owners: BTreeSet<usize>,
+pub(crate) struct Selection {
+    pub(crate) owners: BTreeSet<OwnerSelection>,
+    all: bool,
 }
 
 impl Selection {
-    /// Select every physical line in `source`.
-    #[must_use]
-    pub fn all(source: &str) -> Self {
-        let lines: BTreeSet<_> = (1..=source.lines().count()).collect();
+    pub(crate) fn all() -> Self {
         Self {
-            changed: lines.clone(),
-            owners: lines,
+            owners: BTreeSet::new(),
+            all: true,
         }
     }
+
+    pub(crate) fn select_owner(&mut self, kind: OwnerKind, start_byte: usize, end_byte: usize) {
+        self.owners.insert(OwnerSelection {
+            kind,
+            start_byte,
+            end_byte,
+        });
+    }
+
+    pub(crate) fn selects_owner(
+        &self,
+        kind: OwnerKind,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> bool {
+        self.all
+            || self.owners.contains(&OwnerSelection {
+                kind,
+                start_byte,
+                end_byte,
+            })
+    }
+
+    pub(crate) fn project_into(&self, start_byte: usize, end_byte: usize) -> Self {
+        let owners = self
+            .owners
+            .iter()
+            .filter(|owner| start_byte <= owner.start_byte && owner.end_byte <= end_byte)
+            .map(|owner| OwnerSelection {
+                kind: owner.kind,
+                start_byte: owner.start_byte - start_byte,
+                end_byte: owner.end_byte - start_byte,
+            })
+            .collect();
+        Self {
+            owners,
+            all: self.all,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum OwnerKind {
+    File,
+    Function,
+    Type,
+    Leaf,
+    Template,
+    TomlKey,
+}
+
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct OwnerSelection {
+    pub(crate) kind: OwnerKind,
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
 }
 
 /// A source file could not be analyzed without guessing.
@@ -64,4 +124,10 @@ pub enum AnalysisError {
         /// Parser or lexer error.
         detail: String,
     },
+    /// Old/new owners or comments could not be paired uniquely.
+    #[error("ambiguous change: {0}")]
+    AmbiguousChange(String),
+    /// A language adapter violated the normalized ownership contract.
+    #[error("invalid analysis model: {0}")]
+    Invariant(String),
 }

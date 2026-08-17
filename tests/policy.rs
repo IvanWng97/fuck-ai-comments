@@ -1,7 +1,21 @@
-use std::collections::BTreeSet;
 use std::path::Path;
 
-use fuck_ai_comments::{AnalysisError, Selection, analyze_file};
+use fuck_ai_comments::{AnalysisError, Finding, SourceFile, analyze_all, analyze_change};
+
+fn analyze(path: &Path, source: &str) -> Result<Vec<Finding>, AnalysisError> {
+    analyze_all(SourceFile { path, text: source })
+}
+
+fn analyze_line_change(
+    path: &Path,
+    before: &str,
+    after: &str,
+) -> Result<Vec<Finding>, AnalysisError> {
+    analyze_change(
+        SourceFile { path, text: before },
+        SourceFile { path, text: after },
+    )
+}
 
 #[test]
 fn rust_short_function_rejects_ten_comment_lines() {
@@ -30,8 +44,7 @@ fn render() {
 }
 "#;
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -53,14 +66,85 @@ fn rust_leading_comments_belong_to_the_function() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
         "leading comments must not sit outside the function owner: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_comments_before_attributes_belong_to_the_function() {
+    let source = concat!(
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "#[inline]\n",
+        "fn work() {\n",
+        "    run();\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "outer attributes are part of the function declaration boundary: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_comments_inside_outer_attributes_belong_to_the_function() {
+    let source = concat!(
+        "#[allow(\n",
+        "    // first\n",
+        "    dead_code,\n",
+        "    /* second */\n",
+        "    unused_variables,\n",
+        "    // third\n",
+        "    unreachable_code,\n",
+        "    /* fourth */\n",
+        "    unused_mut\n",
+        ")]\n",
+        "fn work() {\n",
+        "    run();\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "an outer attribute's token tree is part of its function owner: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_docs_can_precede_outer_attributes() {
+    let source = concat!(
+        "/// First public contract detail.\n",
+        "/// Second public contract detail.\n",
+        "/// Third public contract detail.\n",
+        "/// Fourth public contract detail.\n",
+        "#[inline]\n",
+        "pub fn work() {\n",
+        "    run();\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "outer attributes must not detach rustdoc from public API: {findings:#?}"
     );
 }
 
@@ -76,12 +160,420 @@ fn rust_public_function_docs_are_not_narrative() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings.is_empty(),
         "public rustdoc belongs to the documentation contract: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_docs_inside_a_private_module_are_narrative() {
+    let source = concat!(
+        "mod internal {\n",
+        "    /// detail one\n",
+        "    /// detail two\n",
+        "    /// detail three\n",
+        "    /// detail four\n",
+        "    /// detail five\n",
+        "    /// detail six\n",
+        "    /// detail seven\n",
+        "    /// detail eight\n",
+        "    /// detail nine\n",
+        "    /// detail ten\n",
+        "    pub fn work() {}\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "private module ancestry must bound an item's public reachability: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_docs_inside_a_crate_visible_module_are_narrative() {
+    let source = concat!(
+        "pub(crate) mod internal {\n",
+        "    /// detail one\n",
+        "    /// detail two\n",
+        "    /// detail three\n",
+        "    /// detail four\n",
+        "    pub fn work() {}\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "pub(crate) module ancestry is not public API: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_docs_inside_nested_public_modules_are_exempt() {
+    let source = concat!(
+        "pub mod api {\n",
+        "    pub mod nested {\n",
+        "        /// detail one\n",
+        "        /// detail two\n",
+        "        /// detail three\n",
+        "        /// detail four\n",
+        "        /// detail five\n",
+        "        /// detail six\n",
+        "        /// detail seven\n",
+        "        /// detail eight\n",
+        "        /// detail nine\n",
+        "        /// detail ten\n",
+        "        pub fn work() {}\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "bare-pub items through a bare-pub inline module chain are public API: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_docs_inside_a_public_module_under_a_private_module_are_narrative() {
+    let source = concat!(
+        "mod internal {\n",
+        "    pub mod api {\n",
+        "        /// detail one\n",
+        "        /// detail two\n",
+        "        /// detail three\n",
+        "        /// detail four\n",
+        "        pub fn work() {}\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "every inline module ancestor must be bare pub: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_method_docs_on_a_private_type_are_narrative() {
+    let source = concat!(
+        "struct Hidden;\n",
+        "impl Hidden {\n",
+        "    /// detail one\n",
+        "    /// detail two\n",
+        "    /// detail three\n",
+        "    /// detail four\n",
+        "    pub fn work() {}\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "bare pub on an inherent method cannot outgrow its private type: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_method_docs_on_a_reachable_type_are_exempt() {
+    let source = concat!(
+        "pub mod api {\n",
+        "    pub struct Visible;\n",
+        "    impl Visible {\n",
+        "        /// detail one\n",
+        "        /// detail two\n",
+        "        /// detail three\n",
+        "        /// detail four\n",
+        "        /// detail five\n",
+        "        /// detail six\n",
+        "        /// detail seven\n",
+        "        /// detail eight\n",
+        "        /// detail nine\n",
+        "        /// detail ten\n",
+        "        pub fn work() {}\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a local public type through a public module chain proves method reachability: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_field_docs_on_a_private_type_are_narrative() {
+    let source = concat!(
+        "struct Hidden {\n",
+        "    /// detail one\n",
+        "    /// detail two\n",
+        "    /// detail three\n",
+        "    /// detail four\n",
+        "    pub value: usize,\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "bare pub on a field cannot outgrow its private type: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_field_docs_on_a_reachable_type_are_exempt() {
+    let source = concat!(
+        "pub mod api {\n",
+        "    pub struct Visible {\n",
+        "        /// detail one\n",
+        "        /// detail two\n",
+        "        /// detail three\n",
+        "        /// detail four\n",
+        "        pub value: usize,\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a public field of a reachable public type is public API: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_crate_root_inner_docs_are_exempt() {
+    let source = concat!(
+        "//! detail one\n",
+        "//! detail two\n",
+        "//! detail three\n",
+        "//! detail four\n",
+        "//! detail five\n",
+        "//! detail six\n",
+        "//! detail seven\n",
+        "//! detail eight\n",
+        "//! detail nine\n",
+        "//! detail ten\n",
+        "pub fn work() {}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "lib.rs inner docs describe the public crate root: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_arbitrary_file_inner_docs_are_narrative() {
+    let source = concat!(
+        "//! detail one\n",
+        "//! detail two\n",
+        "//! detail three\n",
+        "//! detail four\n",
+        "//! detail five\n",
+        "//! detail six\n",
+        "//! detail seven\n",
+        "//! detail eight\n",
+        "//! detail nine\n",
+        "pub fn work() {}\n",
+    );
+
+    let findings = analyze(Path::new("src/internal.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "a standalone module file cannot prove its own public reachability: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_enum_variant_docs_are_public_api_docs() {
+    let source = concat!(
+        "pub enum State {\n",
+        "    /// Waiting for work.\n",
+        "    Idle,\n",
+        "    /// Processing an item.\n",
+        "    Running,\n",
+        "    /// Finishing successfully.\n",
+        "    Complete,\n",
+        "    /// Stopped after an error.\n",
+        "    Failed,\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "public enum variants inherit their enum's API visibility: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_enum_variant_docs_require_public_module_ancestry() {
+    let source = concat!(
+        "mod internal {\n",
+        "    pub enum State {\n",
+        "        /// detail one\n",
+        "        /// detail two\n",
+        "        /// detail three\n",
+        "        /// detail four\n",
+        "        Hidden,\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "a public enum inside a private module is not public API: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_enum_variant_docs_in_nested_public_modules_are_exempt() {
+    let source = concat!(
+        "pub mod api {\n",
+        "    pub mod nested {\n",
+        "        pub enum State {\n",
+        "            /// detail one\n",
+        "            /// detail two\n",
+        "            /// detail three\n",
+        "            /// detail four\n",
+        "            Visible,\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "public enum variants inherit visibility through a public module chain: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_trait_member_docs_are_public_api_docs() {
+    let source = concat!(
+        "pub trait Worker {\n",
+        "    /// detail one\n",
+        "    /// detail two\n",
+        "    /// detail three\n",
+        "    /// detail four\n",
+        "    fn work(&self);\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "trait members inherit a reachable public trait's visibility: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_trait_member_docs_require_public_module_ancestry() {
+    let source = concat!(
+        "mod internal {\n",
+        "    pub trait Worker {\n",
+        "        /// detail one\n",
+        "        /// detail two\n",
+        "        /// detail three\n",
+        "        /// detail four\n",
+        "        fn work(&self);\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "a trait inside a private module cannot export member docs: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_inner_docs_in_an_inline_public_module_are_exempt() {
+    let source = concat!(
+        "pub mod api {\n",
+        "    //! detail one\n",
+        "    //! detail two\n",
+        "    //! detail three\n",
+        "    //! detail four\n",
+        "    //! detail five\n",
+        "    //! detail six\n",
+        "    //! detail seven\n",
+        "    //! detail eight\n",
+        "    //! detail nine\n",
+        "    pub fn work() {}\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "inner docs inherit a proven public inline-module chain: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_inner_docs_in_a_crate_visible_inline_module_are_narrative() {
+    let source = concat!(
+        "pub(crate) mod internal {\n",
+        "    //! detail one\n",
+        "    //! detail two\n",
+        "    //! detail three\n",
+        "    //! detail four\n",
+        "    pub fn work() {}\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "inner-doc syntax cannot make a pub(crate) module public: {findings:#?}"
     );
 }
 
@@ -97,14 +589,35 @@ fn rust_private_function_rustdoc_is_narrative() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
         "private rustdoc syntax must not bypass narrative policy: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_inner_doc_syntax_inside_a_function_is_narrative() {
+    let source = concat!(
+        "fn work() {\n",
+        "    //! first\n",
+        "    //! second\n",
+        "    //! third\n",
+        "    //! fourth\n",
+        "    run();\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "inner-doc punctuation is not a public-doc escape hatch inside code: {findings:#?}"
     );
 }
 
@@ -118,8 +631,7 @@ fn rust_private_const_rejects_four_comment_lines() {
 const RETRY_LIMIT: usize = 3;
 "#;
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -138,8 +650,7 @@ fn rust_private_const_accepts_three_comment_lines() {
 const RETRY_LIMIT: usize = 3;
 "#;
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings.is_empty(),
@@ -159,8 +670,7 @@ fn rust_const_initializer_rejects_four_internal_comment_lines() {
         "};\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -181,8 +691,7 @@ fn blank_line_prevents_file_header_from_becoming_leaf_comment() {
         "const LIMIT: usize = 4;\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -203,8 +712,7 @@ fn orphan_file_comment_block_is_still_gated() {
         "fn work() {}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -218,8 +726,7 @@ fn orphan_file_comment_block_is_still_gated() {
 fn file_owner_accepts_two_narrative_lines() {
     let source = concat!("// first\n", "// second\n", "\n", "fn work() {}\n");
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings.is_empty(),
@@ -238,112 +745,13 @@ fn javascript_directive_cannot_hide_leaf_narrative() {
         "const limit = 4;\n",
     );
 
-    let findings = analyze_file(Path::new("limits.js"), source, &Selection::all(source))
-        .expect("valid JavaScript should parse");
+    let findings = analyze(Path::new("limits.js"), source).expect("valid JavaScript should parse");
 
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
         "a tool directive must not act as an ownership barrier: {findings:#?}"
-    );
-}
-
-#[test]
-fn rust_const_change_rejects_unchanged_comment() {
-    let source = "// Coupled to the upstream retry window.\nconst RETRY_LIMIT: usize = 4;\n";
-    let selection = Selection {
-        changed: BTreeSet::from([2]),
-        owners: BTreeSet::from([2]),
-    };
-
-    let findings =
-        analyze_file(Path::new("src/lib.rs"), source, &selection).expect("valid Rust should parse");
-
-    assert!(
-        findings
-            .iter()
-            .any(|finding| finding.rule == "comment-policy/comment-owner-changed"),
-        "expected stale-owner finding, got {findings:#?}"
-    );
-}
-
-#[test]
-fn rust_const_change_accepts_edited_comment() {
-    let source = "// Coupled to the new upstream retry window.\nconst RETRY_LIMIT: usize = 4;\n";
-    let selection = Selection {
-        changed: BTreeSet::from([1, 2]),
-        owners: BTreeSet::from([1, 2]),
-    };
-
-    let findings =
-        analyze_file(Path::new("src/lib.rs"), source, &selection).expect("valid Rust should parse");
-
-    assert!(
-        findings.is_empty(),
-        "editing the comment attests that it was reviewed: {findings:#?}"
-    );
-}
-
-#[test]
-fn changing_one_function_comment_does_not_attest_another() {
-    let source = concat!(
-        "fn work() {\n",
-        "    // reviewed first rationale\n",
-        "    first();\n",
-        "    // unchanged second rationale\n",
-        "    changed_second();\n",
-        "}\n",
-    );
-    let selection = Selection {
-        changed: BTreeSet::from([2, 5]),
-        owners: BTreeSet::from([2, 5]),
-    };
-
-    let findings =
-        analyze_file(Path::new("src/lib.rs"), source, &selection).expect("valid Rust should parse");
-    let stale_lines: Vec<_> = findings
-        .iter()
-        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
-        .map(|finding| finding.line)
-        .collect();
-
-    assert_eq!(
-        stale_lines,
-        [4],
-        "each surviving comment needs its own attestation"
-    );
-}
-
-#[test]
-fn adding_comment_does_not_attest_existing_function_comments() {
-    let source = concat!(
-        "fn work() {\n",
-        "    // unchanged first rationale\n",
-        "    first();\n",
-        "    // unchanged second rationale\n",
-        "    changed_second();\n",
-        "    // new third rationale\n",
-        "    third();\n",
-        "}\n",
-    );
-    let selection = Selection {
-        changed: BTreeSet::from([5, 6]),
-        owners: BTreeSet::from([5, 6]),
-    };
-
-    let findings =
-        analyze_file(Path::new("src/lib.rs"), source, &selection).expect("valid Rust should parse");
-    let stale_lines: Vec<_> = findings
-        .iter()
-        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
-        .map(|finding| finding.line)
-        .collect();
-
-    assert_eq!(
-        stale_lines,
-        [2, 4],
-        "a new comment cannot wash unchanged comments"
     );
 }
 
@@ -358,8 +766,7 @@ fn read(ptr: *const u8) -> u8 {
 }
 "#;
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings.is_empty(),
@@ -378,14 +785,104 @@ fn rust_safety_prefix_without_unsafe_code_is_narrative() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
         "a magic SAFETY prefix must not bypass policy without unsafe code: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_safety_prefix_cannot_exempt_nine_following_comment_lines() {
+    let source = concat!(
+        "fn read(ptr: *const u8) -> u8 {\n",
+        "    // SAFETY: the caller guarantees that ptr is valid.\n",
+        "    // detail two\n",
+        "    // detail three\n",
+        "    // detail four\n",
+        "    // detail five\n",
+        "    // detail six\n",
+        "    // detail seven\n",
+        "    // detail eight\n",
+        "    // detail nine\n",
+        "    // detail ten\n",
+        "    unsafe { *ptr }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/owner-comment-cap"),
+        "a SAFETY prefix must not launder an unbounded prose block: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_safety_comment_must_not_attach_to_an_unsafe_descendant() {
+    let source = concat!(
+        "fn read(ptr: *const u8) -> u8 {\n",
+        "    // SAFETY: this is not adjacent to the unsafe operation.\n",
+        "    // second narrative line\n",
+        "    // third narrative line\n",
+        "    if ptr.is_null() { 0 } else { unsafe { *ptr } }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
+        "an unsafe descendant of the next statement is not direct attachment: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_safety_comment_must_be_physically_adjacent_to_unsafe_code() {
+    let source = concat!(
+        "fn read(ptr: *const u8) -> u8 {\n",
+        "    // SAFETY: the blank line detaches this explanation.\n",
+        "    // second narrative line\n",
+        "    // third narrative line\n",
+        "\n",
+        "    unsafe { *ptr }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
+        "a blank line must detach a SAFETY proof from unsafe code: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_short_safety_proof_can_attach_inside_an_unsafe_block() {
+    let source = concat!(
+        "unsafe fn read(ptr: *const u8) -> u8 {\n",
+        "    unsafe {\n",
+        "        // SAFETY: the caller guarantees ptr is valid.\n",
+        "        // It is aligned and alive for this read.\n",
+        "        *ptr\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "an adjacent short proof inside its unsafe block remains exempt: {findings:#?}"
     );
 }
 
@@ -399,14 +896,35 @@ fn python_short_function_rejects_ten_spread_comment_lines() {
     }
     source.push_str("    return value_10\n");
 
-    let findings = analyze_file(Path::new("worker.py"), &source, &Selection::all(&source))
-        .expect("valid Python should parse");
+    let findings = analyze(Path::new("worker.py"), &source).expect("valid Python should parse");
 
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
         "expected Python function budget finding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn python_comments_before_decorators_belong_to_the_function() {
+    let source = concat!(
+        "# first\n",
+        "# second\n",
+        "# third\n",
+        "# fourth\n",
+        "@registered\n",
+        "def work():\n",
+        "    return 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "decorators are part of the function declaration boundary: {findings:#?}"
     );
 }
 
@@ -420,8 +938,7 @@ fn python_function_docstring_consumes_comment_budget() {
         "    return 1\n",
     );
 
-    let findings = analyze_file(Path::new("worker.py"), source, &Selection::all(source))
-        .expect("valid Python should parse");
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
 
     assert!(
         findings
@@ -432,11 +949,280 @@ fn python_function_docstring_consumes_comment_budget() {
 }
 
 #[test]
+fn python_parenthesized_implicit_docstring_counts_every_physical_line() {
+    let source = concat!(
+        "def work():\n",
+        "    (\"first implementation detail\"\n",
+        "     \"second implementation detail\"\n",
+        "     \"third implementation detail\"\n",
+        "     \"fourth implementation detail\"\n",
+        "     \"fifth implementation detail\"\n",
+        "     \"sixth implementation detail\"\n",
+        "     \"seventh implementation detail\"\n",
+        "     \"eighth implementation detail\"\n",
+        "     \"ninth implementation detail\"\n",
+        "     \"tenth implementation detail\")\n",
+        "    return 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule == "comment-policy/function-comment-budget")
+        .expect("the implicit docstring must exceed its function budget");
+    assert!(
+        finding.message.contains("10 comment lines"),
+        "one docstring node must retain its ten-line physical span: {finding:#?}"
+    );
+}
+
+#[test]
+fn python_interpolated_string_is_not_a_docstring() {
+    let source = concat!(
+        "def work(value):\n",
+        "    f\"\"\"first expression line\n",
+        "    second expression line\n",
+        "    third {value} expression line\n",
+        "    fourth expression line\"\"\"\n",
+        "    return value\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings.is_empty(),
+        "an interpolated expression is executable code, not a docstring: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_class_docstring_uses_a_class_budget() {
+    let source = concat!(
+        "class Worker:\n",
+        "    \"\"\"first implementation detail\n",
+        "    second implementation detail\n",
+        "    third implementation detail\n",
+        "    fourth implementation detail\"\"\"\n",
+        "    value = 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "class docs must be budgeted by the class rather than file scope: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_ten_tool_directives_cannot_bypass_the_absolute_budget() {
+    let source = concat!(
+        "def work():\n",
+        "    value_1 = missing_1  # noqa: F821\n",
+        "    assert value_1  # nosec B101\n",
+        "    value_2 = missing_2  # noqa: F821\n",
+        "    assert value_2  # nosec B101\n",
+        "    value_3 = missing_3  # noqa: F821\n",
+        "    assert value_3  # nosec B101\n",
+        "    value_4 = missing_4  # noqa: F821\n",
+        "    assert value_4  # nosec B101\n",
+        "    value_5 = missing_5  # noqa: F821\n",
+        "    assert value_5  # nosec B101\n",
+        "    return value_5\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/owner-comment-cap"),
+        "tool-shaped text must not create an unlimited budget bypass: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_one_valid_tool_directive_remains_allowed() {
+    let source = concat!(
+        "def work():\n",
+        "    value = missing_name  # noqa: F821\n",
+        "    return value\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings.is_empty(),
+        "one operational directive is below the hard cap: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_malformed_noqa_directives_are_narrative() {
+    let source = concat!(
+        "def work():\n",
+        "    first = 1  # noqa: prose\n",
+        "    second = 2  # noqa: more prose\n",
+        "    third = 3  # noqa: still prose\n",
+        "    return first + second + third\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "a noqa prefix without rule-code syntax remains narrative: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_detached_line_suppressions_are_narrative() {
+    let source = concat!(
+        "def work():\n",
+        "    # noqa: F401\n",
+        "    # type: ignore[name-defined]\n",
+        "    # nosec B101\n",
+        "    return 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
+        "line suppressions without a same-line statement remain narrative: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_valid_trailing_directives_remain_operational() {
+    let source = concat!(
+        "def work(debug):\n",
+        "    missing = unknown  # noqa: F821\n",
+        "    typed = unknown  # type: ignore[name-defined]\n",
+        "    value = eval('1')  # nosec B307\n",
+        "    if debug:  # pragma: no cover\n",
+        "        return [ missing, typed, value ]  # fmt: skip\n",
+        "    return value\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings.is_empty(),
+        "valid statement-attached directives stay outside narrative ratios: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_matching_standalone_fmt_region_remains_operational() {
+    let source = concat!(
+        "def work():\n",
+        "    # fmt: off\n",
+        "    value    =    1\n",
+        "    # fmt: on\n",
+        "    return value\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a matched statement-level formatter region is operational: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_standalone_unmatched_fmt_markers_remain_operational() {
+    let source = concat!(
+        "def work():\n",
+        "    # fmt: on\n",
+        "    # fmt: off\n",
+        "    return 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings.is_empty(),
+        "exact standalone formatter markers are operational and still capped: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_fmt_markers_inside_expression_are_narrative() {
+    let source = concat!(
+        "def work():\n",
+        "    values = [\n",
+        "        # fmt: off\n",
+        "        1,\n",
+        "        # fmt: on\n",
+        "        2,\n",
+        "    ]\n",
+        "    return values\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "expression-level formatter markers have no operational effect: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_detached_fmt_skip_is_narrative() {
+    let source = concat!(
+        "def work():\n",
+        "    # fmt: skip\n",
+        "    # fmt: skip\n",
+        "    # fmt: skip\n",
+        "    return 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
+        "fmt: skip only applies as a trailing statement directive: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_module_docstring_consumes_file_budget() {
+    let source = concat!(
+        "\"\"\"First module implementation detail.\n",
+        "Second module implementation detail.\n",
+        "Third module implementation detail.\n",
+        "Fourth module implementation detail.\"\"\"\n",
+        "VALUE = 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "module docstrings cannot bypass the file comment budget: {findings:#?}"
+    );
+}
+
+#[test]
 fn python_module_constant_rejects_four_comment_lines() {
     let source = "# first\n# second\n# third\n# fourth\nLIMIT = 4\n";
 
-    let findings = analyze_file(Path::new("limits.py"), source, &Selection::all(source))
-        .expect("valid Python should parse");
+    let findings = analyze(Path::new("limits.py"), source).expect("valid Python should parse");
 
     assert!(
         findings
@@ -448,13 +1234,10 @@ fn python_module_constant_rejects_four_comment_lines() {
 
 #[test]
 fn python_constant_change_rejects_unchanged_comment() {
-    let source = "# Coupled to the upstream retry window.\nRETRY_LIMIT = 4\n";
-    let selection = Selection {
-        changed: BTreeSet::from([2]),
-        owners: BTreeSet::from([2]),
-    };
+    let before = "# Coupled to the upstream retry window.\nRETRY_LIMIT = 3\n";
+    let after = "# Coupled to the upstream retry window.\nRETRY_LIMIT = 4\n";
 
-    let findings = analyze_file(Path::new("limits.py"), source, &selection)
+    let findings = analyze_line_change(Path::new("limits.py"), before, after)
         .expect("valid Python should parse");
 
     assert!(
@@ -475,8 +1258,7 @@ fn typescript_short_function_rejects_ten_spread_comment_lines() {
     }
     source.push_str("  return value10;\n}\n");
 
-    let findings = analyze_file(Path::new("worker.ts"), &source, &Selection::all(&source))
-        .expect("valid TypeScript should parse");
+    let findings = analyze(Path::new("worker.ts"), &source).expect("valid TypeScript should parse");
 
     assert!(
         findings
@@ -490,8 +1272,7 @@ fn typescript_short_function_rejects_ten_spread_comment_lines() {
 fn typescript_const_rejects_four_comment_lines() {
     let source = "// first\n// second\n// third\n// fourth\nconst limit = 4;\n";
 
-    let findings = analyze_file(Path::new("limits.ts"), source, &Selection::all(source))
-        .expect("valid TypeScript should parse");
+    let findings = analyze(Path::new("limits.ts"), source).expect("valid TypeScript should parse");
 
     assert!(
         findings
@@ -503,13 +1284,10 @@ fn typescript_const_rejects_four_comment_lines() {
 
 #[test]
 fn typescript_const_change_rejects_unchanged_comment() {
-    let source = "// Coupled to the upstream retry window.\nconst retryLimit = 4;\n";
-    let selection = Selection {
-        changed: BTreeSet::from([2]),
-        owners: BTreeSet::from([2]),
-    };
+    let before = "// Coupled to the upstream retry window.\nconst retryLimit = 3;\n";
+    let after = "// Coupled to the upstream retry window.\nconst retryLimit = 4;\n";
 
-    let findings = analyze_file(Path::new("limits.ts"), source, &selection)
+    let findings = analyze_line_change(Path::new("limits.ts"), before, after)
         .expect("valid TypeScript should parse");
 
     assert!(
@@ -524,8 +1302,7 @@ fn typescript_const_change_rejects_unchanged_comment() {
 fn toml_key_rejects_four_comment_lines() {
     let source = "# first\n# second\n# third\n# fourth\ntimeout_ms = 200\n";
 
-    let findings = analyze_file(Path::new("config.toml"), source, &Selection::all(source))
-        .expect("valid TOML should parse");
+    let findings = analyze(Path::new("config.toml"), source).expect("valid TOML should parse");
 
     assert!(
         findings
@@ -539,8 +1316,7 @@ fn toml_key_rejects_four_comment_lines() {
 fn toml_key_accepts_three_comment_lines() {
     let source = "# first\n# second\n# third\ntimeout_ms = 200\n";
 
-    let findings = analyze_file(Path::new("config.toml"), source, &Selection::all(source))
-        .expect("valid TOML should parse");
+    let findings = analyze(Path::new("config.toml"), source).expect("valid TOML should parse");
 
     assert!(
         findings.is_empty(),
@@ -556,8 +1332,7 @@ fn toml_hashes_inside_strings_are_not_comments() {
         "multiline = \"\"\"# ten\n# eleven\n# twelve\n# thirteen\"\"\"\n",
     );
 
-    let findings = analyze_file(Path::new("config.toml"), source, &Selection::all(source))
-        .expect("valid TOML should parse");
+    let findings = analyze(Path::new("config.toml"), source).expect("valid TOML should parse");
 
     assert!(
         findings.is_empty(),
@@ -566,14 +1341,57 @@ fn toml_hashes_inside_strings_are_not_comments() {
 }
 
 #[test]
-fn toml_key_change_rejects_unchanged_comment() {
-    let source = "# Coupled to the upstream retry window.\ntimeout_ms = 400\n";
-    let selection = Selection {
-        changed: BTreeSet::from([2]),
-        owners: BTreeSet::from([2]),
-    };
+fn toml_multiline_value_rejects_four_internal_comment_lines() {
+    let source = concat!(
+        "workers = [\n",
+        "  # first\n",
+        "  \"alpha\",\n",
+        "  # second\n",
+        "  \"beta\",\n",
+        "  # third\n",
+        "  \"gamma\",\n",
+        "  # fourth\n",
+        "  \"delta\",\n",
+        "]\n",
+    );
 
-    let findings = analyze_file(Path::new("config.toml"), source, &selection)
+    let findings = analyze(Path::new("config.toml"), source).expect("valid TOML should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "comments inside a multiline value belong to that key: {findings:#?}"
+    );
+}
+
+#[test]
+fn detached_toml_comments_fall_back_to_file_budget() {
+    let source = concat!(
+        "# first\n",
+        "# second\n",
+        "# third\n",
+        "# fourth\n",
+        "\n",
+        "timeout_ms = 200\n",
+    );
+
+    let findings = analyze(Path::new("config.toml"), source).expect("valid TOML should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "detached TOML narration must not disappear from policy: {findings:#?}"
+    );
+}
+
+#[test]
+fn toml_key_change_rejects_unchanged_comment() {
+    let before = "# Coupled to the upstream retry window.\ntimeout_ms = 200\n";
+    let after = "# Coupled to the upstream retry window.\ntimeout_ms = 400\n";
+
+    let findings = analyze_line_change(Path::new("config.toml"), before, after)
         .expect("valid TOML should parse");
 
     assert!(
@@ -588,8 +1406,7 @@ fn toml_key_change_rejects_unchanged_comment() {
 fn html_rejects_four_line_template_comment() {
     let source = "<!-- first\nsecond\nthird\nfourth -->\n<main>hello</main>\n";
 
-    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
-        .expect("valid HTML should parse");
+    let findings = analyze(Path::new("index.html"), source).expect("valid HTML should parse");
 
     assert!(
         findings
@@ -603,8 +1420,7 @@ fn html_rejects_four_line_template_comment() {
 fn css_rejects_four_line_comment() {
     let source = "/* first\nsecond\nthird\nfourth */\nmain { display: block; }\n";
 
-    let findings = analyze_file(Path::new("site.css"), source, &Selection::all(source))
-        .expect("valid CSS should parse");
+    let findings = analyze(Path::new("site.css"), source).expect("valid CSS should parse");
 
     assert!(
         findings
@@ -618,8 +1434,7 @@ fn css_rejects_four_line_comment() {
 fn astro_rejects_four_line_template_comment() {
     let source = "---\nconst title = 'Hello';\n---\n<!-- first\nsecond\nthird\nfourth -->\n<h1>{title}</h1>\n";
 
-    let findings = analyze_file(Path::new("Page.astro"), source, &Selection::all(source))
-        .expect("valid Astro should parse");
+    let findings = analyze(Path::new("Page.astro"), source).expect("valid Astro should parse");
 
     assert!(
         findings
@@ -639,8 +1454,7 @@ fn astro_frontmatter_uses_typescript_owner_policy() {
     }
     source.push_str("  return value10;\n}\n---\n<div>{work()}</div>\n");
 
-    let findings = analyze_file(Path::new("Page.astro"), &source, &Selection::all(&source))
-        .expect("valid Astro should parse");
+    let findings = analyze(Path::new("Page.astro"), &source).expect("valid Astro should parse");
 
     assert!(
         findings
@@ -660,8 +1474,7 @@ fn html_script_uses_javascript_owner_policy() {
     }
     source.push_str("  return value10;\n}\n</script>\n");
 
-    let findings = analyze_file(Path::new("index.html"), &source, &Selection::all(&source))
-        .expect("valid HTML should parse");
+    let findings = analyze(Path::new("index.html"), &source).expect("valid HTML should parse");
 
     assert!(
         findings
@@ -682,8 +1495,7 @@ fn rust_rejects_three_consecutive_narrative_comments() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -703,8 +1515,7 @@ fn rust_trailing_comments_are_not_a_consecutive_comment_block() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -741,8 +1552,7 @@ fn rust_long_function_accepts_four_separate_rationales() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings.is_empty(),
@@ -754,7 +1564,7 @@ fn rust_long_function_accepts_four_separate_rationales() {
 fn malformed_rust_fails_closed() {
     let source = "fn broken( {\n";
 
-    let error = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
+    let error = analyze(Path::new("src/lib.rs"), source)
         .expect_err("malformed Rust must not be analyzed heuristically");
 
     assert!(
@@ -779,8 +1589,7 @@ fn rust_public_const_doc_comment_is_not_a_private_leaf_narrative() {
         "pub const LIMIT: usize = 4;\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings.is_empty(),
@@ -798,8 +1607,7 @@ fn rust_public_const_plain_comments_still_use_leaf_budget() {
         "pub const LIMIT: usize = 4;\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -819,8 +1627,7 @@ fn rust_crate_visible_rustdoc_is_not_public_api_docs() {
         "pub(crate) const LIMIT: usize = 4;\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
@@ -839,8 +1646,7 @@ fn javascript_directive_block_does_not_consume_narrative_budget() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("worker.js"), source, &Selection::all(source))
-        .expect("valid JavaScript should parse");
+    let findings = analyze(Path::new("worker.js"), source).expect("valid JavaScript should parse");
 
     assert!(
         findings.is_empty(),
@@ -860,8 +1666,7 @@ fn javascript_multiline_eslint_prefix_does_not_hide_narrative() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("worker.js"), source, &Selection::all(source))
-        .expect("valid JavaScript should parse");
+    let findings = analyze(Path::new("worker.js"), source).expect("valid JavaScript should parse");
 
     assert!(
         findings
@@ -881,8 +1686,7 @@ fn python_noqa_prefix_does_not_hide_following_narrative() {
         "    return 1\n",
     );
 
-    let findings = analyze_file(Path::new("worker.py"), source, &Selection::all(source))
-        .expect("valid Python should parse");
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
 
     assert!(
         findings
@@ -897,10 +1701,8 @@ fn jsx_and_tsx_use_their_registered_grammars() {
     let jsx = "export const View = () => <main>Hello</main>;\n";
     let tsx = "export const View = (): JSX.Element => <main>Hello</main>;\n";
 
-    let jsx_findings = analyze_file(Path::new("View.jsx"), jsx, &Selection::all(jsx))
-        .expect("valid JSX should parse");
-    let tsx_findings = analyze_file(Path::new("View.tsx"), tsx, &Selection::all(tsx))
-        .expect("valid TSX should parse");
+    let jsx_findings = analyze(Path::new("View.jsx"), jsx).expect("valid JSX should parse");
+    let tsx_findings = analyze(Path::new("View.tsx"), tsx).expect("valid TSX should parse");
 
     assert!(
         jsx_findings.is_empty() && tsx_findings.is_empty(),
@@ -912,8 +1714,7 @@ fn jsx_and_tsx_use_their_registered_grammars() {
 fn html_accepts_three_line_template_comment() {
     let source = "<!-- first\nsecond\nthird -->\n<main>hello</main>\n";
 
-    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
-        .expect("valid HTML should parse");
+    let findings = analyze(Path::new("index.html"), source).expect("valid HTML should parse");
 
     assert!(
         findings.is_empty(),
@@ -935,8 +1736,8 @@ fn embedded_javascript_finding_reports_container_line() {
         "</script>\n",
     );
 
-    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
-        .expect("valid HTML and JavaScript should parse");
+    let findings =
+        analyze(Path::new("index.html"), source).expect("valid HTML and JavaScript should parse");
     let finding = findings
         .iter()
         .find(|finding| finding.rule == "comment-policy/function-comment-budget")
@@ -953,7 +1754,7 @@ fn html_json_script_is_not_parsed_as_javascript() {
         "</script>\n",
     );
 
-    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
+    let findings = analyze(Path::new("index.html"), source)
         .expect("JSON script data should not enter the JavaScript adapter");
 
     assert!(findings.is_empty(), "JSON data has no comment owners");
@@ -970,8 +1771,7 @@ fn javascript_generator_rejects_excessive_comments() {
         "}\n",
     );
 
-    let findings = analyze_file(Path::new("worker.js"), source, &Selection::all(source))
-        .expect("valid JavaScript should parse");
+    let findings = analyze(Path::new("worker.js"), source).expect("valid JavaScript should parse");
 
     assert!(
         findings
@@ -992,13 +1792,210 @@ fn rust_closure_rejects_excessive_comments() {
         "};\n",
     );
 
-    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
-        .expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
         "closures must not bypass the function budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn javascript_multiline_const_uses_leaf_budget_inside_a_long_function() {
+    let source = concat!(
+        "function work() {\n",
+        "  consume(1);\n",
+        "  consume(2);\n",
+        "  consume(3);\n",
+        "  consume(4);\n",
+        "  consume(5);\n",
+        "  consume(6);\n",
+        "  consume(7);\n",
+        "  consume(8);\n",
+        "  consume(9);\n",
+        "  consume(10);\n",
+        "  consume(11);\n",
+        "  consume(12);\n",
+        "  consume(13);\n",
+        "  consume(14);\n",
+        "  consume(15);\n",
+        "  consume(16);\n",
+        "  const\n",
+        "  VALUE = {\n",
+        "    // first\n",
+        "    first: 1,\n",
+        "    // second\n",
+        "    second: 2,\n",
+        "    // third\n",
+        "    third: 3,\n",
+        "    // fourth\n",
+        "    fourth: 4,\n",
+        "  };\n",
+        "  return VALUE;\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("worker.js"), source).expect("valid JavaScript should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "Tree-sitter's const token must identify a multiline declaration: {findings:#?}"
+    );
+}
+
+#[test]
+fn typescript_multiline_const_uses_leaf_budget_inside_a_long_function() {
+    let source = concat!(
+        "function work(): Record<string, number> {\n",
+        "  consume(1);\n",
+        "  consume(2);\n",
+        "  consume(3);\n",
+        "  consume(4);\n",
+        "  consume(5);\n",
+        "  consume(6);\n",
+        "  consume(7);\n",
+        "  consume(8);\n",
+        "  consume(9);\n",
+        "  consume(10);\n",
+        "  consume(11);\n",
+        "  consume(12);\n",
+        "  consume(13);\n",
+        "  consume(14);\n",
+        "  consume(15);\n",
+        "  consume(16);\n",
+        "  const\n",
+        "  VALUE: Record<string, number> = {\n",
+        "    // first\n",
+        "    first: 1,\n",
+        "    // second\n",
+        "    second: 2,\n",
+        "    // third\n",
+        "    third: 3,\n",
+        "    // fourth\n",
+        "    fourth: 4,\n",
+        "  };\n",
+        "  return VALUE;\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("worker.ts"), source).expect("valid TypeScript should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "TypeScript must share the structural const detector: {findings:#?}"
+    );
+}
+
+#[test]
+fn malformed_javascript_and_typescript_directive_prefixes_are_narrative() {
+    for path in ["worker.js", "worker.ts"] {
+        for candidate in [
+            "// eslint-disable-next-line: this is prose",
+            "// @ts-ignore this is prose",
+            "/* @ts-ignore */",
+            "// istanbul ignore totally this is prose",
+            "// c8 ignore totally this is prose",
+        ] {
+            let source = format!(
+                "function work() {{\n  {candidate}\n  perform();\n  // ordinary explanation\n  finish();\n}}\n"
+            );
+
+            let findings = analyze(Path::new(path), &source).expect("valid source should parse");
+
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+                "magic prefix must not classify malformed prose as metadata ({path}, {candidate}): {findings:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unattached_javascript_directive_is_narrative() {
+    let source = concat!(
+        "function work() {\n",
+        "  // @ts-ignore: applies only to the next line\n",
+        "\n",
+        "  perform();\n",
+        "  // ordinary explanation\n",
+        "  finish();\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("worker.js"), source).expect("valid JavaScript should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "a detached magic comment is prose, not executable metadata: {findings:#?}"
+    );
+}
+
+#[test]
+fn valid_attached_javascript_and_typescript_directives_remain_metadata() {
+    for path in ["worker.js", "worker.ts"] {
+        for directive in [
+            "// eslint-disable-next-line no-console",
+            "// @ts-expect-error: intentional invalid call",
+            "/* istanbul ignore next */",
+            "/* c8 ignore next */",
+        ] {
+            let source = format!(
+                "function work() {{\n  {directive}\n  perform();\n  // ordinary explanation\n  finish();\n}}\n"
+            );
+
+            let findings = analyze(Path::new(path), &source).expect("valid source should parse");
+
+            assert!(
+                findings.is_empty(),
+                "one attached operational directive stays outside the narrative ratio ({path}, {directive}): {findings:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn javascript_tool_directives_cannot_bypass_the_absolute_owner_cap() {
+    let source = concat!(
+        "function work() {\n",
+        "  // eslint-disable-next-line no-console\n",
+        "  console.log(1);\n",
+        "  // @ts-expect-error: intentional invalid call\n",
+        "  invalidCall(2);\n",
+        "  /* istanbul ignore next */\n",
+        "  branch(3);\n",
+        "  /* c8 ignore next */\n",
+        "  branch(4);\n",
+        "  // eslint-disable-next-line no-console\n",
+        "  console.log(5);\n",
+        "  // @ts-expect-error: intentional invalid call\n",
+        "  invalidCall(6);\n",
+        "  /* istanbul ignore next */\n",
+        "  branch(7);\n",
+        "  /* c8 ignore next */\n",
+        "  branch(8);\n",
+        "  // eslint-disable-next-line no-console\n",
+        "  console.log(9);\n",
+        "  // @ts-expect-error: intentional invalid call\n",
+        "  invalidCall(10);\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("worker.js"), source).expect("valid JavaScript should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/owner-comment-cap"),
+        "tool metadata must not grant an unlimited comment allowance: {findings:#?}"
     );
 }

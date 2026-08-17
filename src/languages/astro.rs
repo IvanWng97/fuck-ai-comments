@@ -2,9 +2,12 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use super::container::{ContainerSpec, EmbeddedLanguage, EmbeddedRegion, analyze, script_region};
+use super::container::{
+    ContainerSpec, EmbeddedLanguage, EmbeddedRegion, analyze, astro_script_region,
+    astro_style_region, parse_file as parse,
+};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::Span;
+use crate::policy::{ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Astro;
@@ -15,6 +18,10 @@ pub(crate) fn analyze_file(
     selection: &Selection,
 ) -> Result<Vec<Finding>, AnalysisError> {
     analyze(path, source, selection, Astro)
+}
+
+pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
+    parse(path, source, Astro)
 }
 
 impl ContainerSpec for Astro {
@@ -31,8 +38,9 @@ impl ContainerSpec for Astro {
             return Some(EmbeddedRegion {
                 span: Span::from_node(node),
                 language: EmbeddedLanguage::TypeScript,
+                owner_name: "<frontmatter>",
             });
         }
-        script_region(node, source)
+        astro_script_region(node, source).or_else(|| astro_style_region(node, source))
     }
 }

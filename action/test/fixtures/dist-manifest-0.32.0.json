@@ -1,0 +1,106 @@
+{
+  "dist_version": "0.32.0",
+  "announcement_tag": "v0.1.0",
+  "artifacts": {
+    "fuck-ai-comments-aarch64-apple-darwin.tar.xz": {
+      "name": "fuck-ai-comments-aarch64-apple-darwin.tar.xz",
+      "kind": "executable-zip",
+      "target_triples": ["aarch64-apple-darwin"],
+      "assets": [
+        {
+          "name": "LICENSE",
+          "path": "LICENSE",
+          "kind": "license"
+        },
+        {
+          "id": "fuck-ai-comments-aarch64-apple-darwin-exe-fuck-ai-comments",
+          "name": "fuck-ai-comments",
+          "path": "fuck-ai-comments",
+          "kind": "executable"
+        }
+      ],
+      "checksum": "fuck-ai-comments-aarch64-apple-darwin.tar.xz.sha256"
+    },
+    "fuck-ai-comments-aarch64-apple-darwin.tar.xz.sha256": {
+      "name": "fuck-ai-comments-aarch64-apple-darwin.tar.xz.sha256",
+      "kind": "checksum",
+      "target_triples": ["aarch64-apple-darwin"]
+    },
+    "fuck-ai-comments-x86_64-apple-darwin.tar.xz": {
+      "name": "fuck-ai-comments-x86_64-apple-darwin.tar.xz",
+      "kind": "executable-zip",
+      "target_triples": ["x86_64-apple-darwin"],
+      "assets": [
+        {
+          "name": "LICENSE",
+          "path": "LICENSE",
+          "kind": "license"
+        },
+        {
+          "id": "fuck-ai-comments-x86_64-apple-darwin-exe-fuck-ai-comments",
+          "name": "fuck-ai-comments",
+          "path": "fuck-ai-comments",
+          "kind": "executable"
+        }
+      ],
+      "checksum": "fuck-ai-comments-x86_64-apple-darwin.tar.xz.sha256"
+    },
+    "fuck-ai-comments-x86_64-apple-darwin.tar.xz.sha256": {
+      "name": "fuck-ai-comments-x86_64-apple-darwin.tar.xz.sha256",
+      "kind": "checksum",
+      "target_triples": ["x86_64-apple-darwin"]
+    },
+    "fuck-ai-comments-x86_64-pc-windows-msvc.zip": {
+      "name": "fuck-ai-comments-x86_64-pc-windows-msvc.zip",
+      "kind": "executable-zip",
+      "target_triples": ["x86_64-pc-windows-msvc"],
+      "assets": [
+        {
+          "name": "LICENSE",
+          "path": "LICENSE",
+          "kind": "license"
+        },
+        {
+          "id": "fuck-ai-comments-x86_64-pc-windows-msvc-exe-fuck-ai-comments",
+          "name": "fuck-ai-comments",
+          "path": "fuck-ai-comments.exe",
+          "kind": "executable"
+        }
+      ],
+      "checksum": "fuck-ai-comments-x86_64-pc-windows-msvc.zip.sha256"
+    },
+    "fuck-ai-comments-x86_64-pc-windows-msvc.zip.sha256": {
+      "name": "fuck-ai-comments-x86_64-pc-windows-msvc.zip.sha256",
+      "kind": "checksum",
+      "target_triples": ["x86_64-pc-windows-msvc"]
+    },
+    "fuck-ai-comments-x86_64-unknown-linux-gnu.tar.xz": {
+      "name": "fuck-ai-comments-x86_64-unknown-linux-gnu.tar.xz",
+      "kind": "executable-zip",
+      "target_triples": ["x86_64-unknown-linux-gnu"],
+      "assets": [
+        {
+          "name": "LICENSE",
+          "path": "LICENSE",
+          "kind": "license"
+        },
+        {
+          "id": "fuck-ai-comments-x86_64-unknown-linux-gnu-exe-fuck-ai-comments",
+          "name": "fuck-ai-comments",
+          "path": "fuck-ai-comments",
+          "kind": "executable"
+        }
+      ],
+      "checksum": "fuck-ai-comments-x86_64-unknown-linux-gnu.tar.xz.sha256"
+    },
+    "fuck-ai-comments-x86_64-unknown-linux-gnu.tar.xz.sha256": {
+      "name": "fuck-ai-comments-x86_64-unknown-linux-gnu.tar.xz.sha256",
+      "kind": "checksum",
+      "target_triples": ["x86_64-unknown-linux-gnu"]
+    },
+    "sha256.sum": {
+      "name": "sha256.sum",
+      "kind": "unified-checksum"
+    }
+  }
+}

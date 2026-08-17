@@ -1,0 +1,13 @@
+{
+  "source": "https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-x86_64-pc-windows-msvc.zip",
+  "sha256": "26e845cabff12a92911ce960af73a86c8f9b2b2d9072b01dfe5b662acf044fa3",
+  "archive": "cargo-dist-x86_64-pc-windows-msvc.zip",
+  "binary": "dist.exe",
+  "entries": [
+    "CHANGELOG.md",
+    "dist.exe",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "README.md"
+  ]
+}

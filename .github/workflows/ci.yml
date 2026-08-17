@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - ubuntu-24.04
+          - windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test
+        run: cargo test --all-targets --all-features --locked
+      - name: Lint
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Dogfood required comment policy
+        if: runner.os == 'Linux'
+        run: cargo run --locked -- check --all .
+
+  msrv:
+    name: Rust 1.88.0
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install MSRV
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check MSRV
+        run: cargo +1.88.0 check --all-targets --all-features --locked
+      - name: Test MSRV
+        run: cargo +1.88.0 test --all-targets --all-features --locked
+
+  action:
+    name: GitHub Action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - ubuntu-24.04
+          - windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.19.0
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Check formatting
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Verify committed bundle
+        if: runner.os == 'Linux'
+        run: npm run bundle:check
+
+  ci-gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - rust
+      - msrv
+      - action
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI arm
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
+          ACTION_RESULT: ${{ needs.action.result }}
+        run: |
+          if [ "$RUST_RESULT" != success ] || [ "$MSRV_RESULT" != success ] || [ "$ACTION_RESULT" != success ]; then
+            echo "required CI arm failed: rust=$RUST_RESULT msrv=$MSRV_RESULT action=$ACTION_RESULT"
+            exit 1
+          fi

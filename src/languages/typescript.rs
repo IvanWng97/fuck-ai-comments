@@ -2,10 +2,10 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use super::javascript::{classify_comment, is_function_kind, leaf_from_node};
-use super::tree::{LanguageSpec, analyze};
+use super::javascript::{classify_comment, function_namespace, is_function_kind, leaf_from_node};
+use super::tree::{LanguageSpec, analyze, document};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, Leaf};
+use crate::policy::{CommentKind, Leaf, ParsedFile};
 
 #[derive(Clone, Copy)]
 enum TypeScript {
@@ -29,7 +29,17 @@ pub(crate) fn analyze_tsx_file(
     analyze(path, source, selection, TypeScript::Tsx)
 }
 
+pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
+    document(path, source, TypeScript::Standard)
+}
+
+pub(crate) fn parse_tsx_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
+    document(path, source, TypeScript::Tsx)
+}
+
 impl LanguageSpec for TypeScript {
+    type Context = ();
+
     fn label(self) -> &'static str {
         "TypeScript"
     }
@@ -41,11 +51,20 @@ impl LanguageSpec for TypeScript {
         }
     }
 
-    fn is_function(self, kind: &str) -> bool {
-        is_function_kind(kind)
+    fn function_span(self, node: Node<'_>, _source: &str) -> Option<crate::policy::Span> {
+        is_function_kind(node.kind()).then(|| crate::policy::Span::from_node(node))
     }
 
-    fn classify_comment(self, node: Node<'_>, source: &str) -> Option<CommentKind> {
+    fn function_namespace(self, node: Node<'_>, source: &str) -> Vec<String> {
+        function_namespace(node, source)
+    }
+
+    fn classify_comment(
+        self,
+        node: Node<'_>,
+        source: &str,
+        _context: &Self::Context,
+    ) -> Option<CommentKind> {
         classify_comment(node, source)
     }
 

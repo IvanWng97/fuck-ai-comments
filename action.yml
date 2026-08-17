@@ -1,0 +1,31 @@
+name: fuck-ai-comments
+description: Fail CI when comments exceed owner-aware budgets or drift with changed code
+author: IvanWng97
+
+inputs:
+  version:
+    description: Exact fuck-ai-comments CLI version to install
+    required: false
+    default: "0.1.0"
+  mode:
+    description: Check mode; base is the fail-closed default
+    required: false
+    default: base
+  path:
+    description: Repository path to check
+    required: false
+    default: .
+  base:
+    description: Base commit required when mode is base
+    required: false
+  head:
+    description: Head commit used when mode is base; defaults to HEAD
+    required: false
+
+runs:
+  using: node24
+  main: dist/index.js
+
+branding:
+  icon: message-square
+  color: red

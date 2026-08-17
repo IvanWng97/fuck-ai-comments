@@ -1,0 +1,32 @@
+{
+  "name": "fuck-ai-comments-action",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "bundle": "ncc build action/src/index.js --minify --license licenses.txt --out dist",
+    "bundle:check": "node action/scripts/check-bundle.js",
+    "format": "prettier --write action.yml action/src action/test action/scripts eslint.config.js package.json",
+    "format:check": "prettier --check action.yml action/src action/test action/scripts eslint.config.js package.json",
+    "lint": "eslint action/src action/test action/scripts eslint.config.js",
+    "test": "node --test action/test/*.test.js"
+  },
+  "dependencies": {
+    "@actions/core": "3.0.1",
+    "@actions/exec": "3.0.0",
+    "@actions/tool-cache": "4.0.0",
+    "semver": "7.8.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@vercel/ncc": "0.45.0",
+    "eslint": "10.8.1",
+    "globals": "17.11.0",
+    "prettier": "3.9.6",
+    "smol-toml": "1.8.0",
+    "yaml": "2.9.0"
+  }
+}
