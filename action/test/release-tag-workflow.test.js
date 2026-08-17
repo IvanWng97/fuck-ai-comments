@@ -48,11 +48,13 @@ permissions:
   "contents": "write"
 jobs:
   plan:
-    steps: []
+    steps:
+      - uses: actions/checkout@v6
   host:
     outputs:
       val: output
     steps:
+      - uses: actions/checkout@v6
       - run: true
   announce:
     steps: []
@@ -70,13 +72,15 @@ permissions:
   "contents": "read"
 jobs:
   plan:
-    steps: []
+    steps:
+      - uses: actions/checkout@v7
   host:
     outputs:
       val: output
     permissions:
       "contents": "write"
     steps:
+      - uses: actions/checkout@v7
       - run: true
   announce:
     steps: []

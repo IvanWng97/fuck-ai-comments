@@ -267,6 +267,40 @@ fn objective_c_block_assignment_edit_stales_its_leading_comment() {
 }
 
 #[test]
+fn objective_c_chained_block_assignment_stales_its_leading_comment() {
+    let before = concat!(
+        "void installHandler(void) {\n",
+        "    root = first = second = ^{\n",
+        "        // Coupled to the innermost installed handler.\n",
+        "        oldCall();\n",
+        "    };\n",
+        "}\n",
+    );
+    let after = before.replace("oldCall", "newCall");
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Handler.m"),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new("Handler.m"),
+            text: &after,
+        },
+    )
+    .expect("valid chained Objective-C assignment change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed"
+                && finding.line == 3
+                && finding.message.contains("leaf `second`")
+        }),
+        "the innermost assignment must retain the block body and identity: {findings:#?}"
+    );
+}
+
+#[test]
 fn objective_c_block_assignment_keeps_nested_block_owner_independent() {
     let before = concat!(
         "void installHandler(void) {\n",

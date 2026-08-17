@@ -74,6 +74,36 @@ fn plain_callable_assignment_body_change_stales_leading_comment() {
     );
 }
 
+fn assert_chained_callable_assignment_stales(path: &Path) {
+    let before = concat!(
+        "const root = first = second = () => {\n",
+        "  // Coupled to the innermost installed handler.\n",
+        "  return oldCall();\n",
+        "};\n",
+    );
+    let after = before.replace("oldCall", "newCall");
+    let findings = changed_at(path, before, &after);
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed"
+                && finding.line == 2
+                && finding.message.contains("leaf `second`")
+        }),
+        "the innermost assignment must retain the callable body and identity: {findings:#?}"
+    );
+}
+
+#[test]
+fn javascript_chained_callable_assignment_stales_its_leading_comment() {
+    assert_chained_callable_assignment_stales(Path::new("handler.js"));
+}
+
+#[test]
+fn typescript_chained_callable_assignment_stales_its_leading_comment() {
+    assert_chained_callable_assignment_stales(Path::new("handler.ts"));
+}
+
 #[test]
 fn wrapped_callable_assignment_body_change_stales_leading_comment() {
     let findings = changed_at(

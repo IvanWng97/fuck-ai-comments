@@ -4,8 +4,8 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    LanguageSpec, OwnerCandidate, OwnerLocation, analyze, ancestors, canonical_syntax, document,
-    function_name, node_text,
+    CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, ancestors,
+    canonical_syntax, document, function_name, node_text,
 };
 use super::walk::{WalkEvent, events};
 use crate::model::{AnalysisError, Finding, Selection};
@@ -59,6 +59,7 @@ impl LanguageSpec for Rust {
         location: OwnerLocation<'_>,
         source: &str,
         _function_depth: usize,
+        _callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate> {
         if let Some(span) = rust_function_span(node, source) {
             return Some(OwnerCandidate::function(

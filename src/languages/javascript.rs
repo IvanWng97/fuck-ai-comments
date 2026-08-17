@@ -3,9 +3,9 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, DirectivePlacement, LanguageSpec, OwnerCandidate,
-    OwnerLocation, analyze, document, first_descendant_with_kind,
-    function_name as default_function_name, node_text, outermost_node_ids_matching,
+    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, AttachmentSyntax, CallableSubtrees,
+    DirectivePlacement, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, document,
+    first_descendant_with_kind, function_name as default_function_name, node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -40,7 +40,15 @@ impl LanguageSpec for JavaScript {
     }
 
     fn build_context(self, root: Node<'_>, source: &str) -> Self::Context {
-        AttachmentIndex::from_root(root, source)
+        AttachmentIndex::with_syntax(root, source, attachment_syntax())
+    }
+
+    fn is_owner_prefix(self, kind: &str) -> bool {
+        is_owner_prefix(kind)
+    }
+
+    fn callable_kind(self) -> Option<fn(&str) -> bool> {
+        Some(is_function_kind)
     }
 
     fn owner(
@@ -49,8 +57,9 @@ impl LanguageSpec for JavaScript {
         location: OwnerLocation<'_>,
         source: &str,
         _function_depth: usize,
+        callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate> {
-        owner_from_node(node, location, source)
+        owner_from_node(node, location, source, callable_subtrees)
     }
 
     fn classify_comment(
@@ -63,19 +72,37 @@ impl LanguageSpec for JavaScript {
     }
 }
 
+pub(crate) fn attachment_syntax() -> AttachmentSyntax {
+    AttachmentSyntax::new(
+        |kind| kind == "jsx_expression",
+        |kind| kind == "hash_bang_line",
+    )
+}
+
+pub(crate) fn is_owner_prefix(kind: &str) -> bool {
+    kind == "decorator"
+}
+
 pub(crate) fn owner_from_node(
     node: Node<'_>,
     location: OwnerLocation<'_>,
     source: &str,
+    callable_subtrees: &CallableSubtrees,
 ) -> Option<OwnerCandidate> {
-    if let Some(binding) = CallableBinding::from_owner(node) {
+    if let Some(binding) = CallableBinding::from_owner(node, callable_subtrees) {
         let name = binding.name(source);
         let span = prefixed_span(node, location);
-        let suppressed = binding.suppressed_nodes;
+        let callable_frontier_roots = binding.callable_frontier_roots;
         if default_export_value(node).is_some() {
-            return Some(OwnerCandidate::function(span, name, Vec::new()).suppressing(suppressed));
+            return Some(
+                OwnerCandidate::function(span, name, Vec::new())
+                    .suppressing_callable_frontiers(callable_frontier_roots),
+            );
         }
-        return Some(OwnerCandidate::leaf(span, name).suppressing(suppressed));
+        return Some(
+            OwnerCandidate::leaf(span, name)
+                .suppressing_callable_frontiers(callable_frontier_roots),
+        );
     }
     if let Some(candidate) = class_owner(node, location, source) {
         return Some(candidate);
@@ -242,7 +269,7 @@ fn c8_region_directive(body: &str) -> bool {
     matches!(body, "c8 ignore start" | "c8 ignore stop")
 }
 
-fn is_function_kind(kind: &str) -> bool {
+pub(crate) fn is_function_kind(kind: &str) -> bool {
     matches!(
         kind,
         "function_declaration"
@@ -255,22 +282,28 @@ fn is_function_kind(kind: &str) -> bool {
 }
 
 impl<'tree> CallableBinding<'tree> {
-    fn from_owner(owner: Node<'tree>) -> Option<Self> {
-        let mut suppressed_nodes = Vec::new();
+    fn from_owner(owner: Node<'tree>, callable_subtrees: &CallableSubtrees) -> Option<Self> {
+        let mut callable_frontier_roots = Vec::new();
         if is_callable_binding_owner(owner.kind()) {
             for_each_binding(owner, |binding| {
-                if let Some(value) = binding.child_by_field_name("value") {
-                    suppressed_nodes.extend(outermost_node_ids_matching(value, is_function_kind));
+                if let Some(value) = binding.child_by_field_name("value")
+                    && callable_subtrees.contains_callable(value)
+                {
+                    callable_frontier_roots.push(value.id());
                 }
             });
-        } else if let Some(value) = default_export_value(owner) {
-            suppressed_nodes.extend(outermost_node_ids_matching(value, is_function_kind));
-        } else if let Some(right) = assignment_right(owner) {
-            suppressed_nodes.extend(outermost_node_ids_matching(right, is_function_kind));
+        } else if let Some(value) = default_export_value(owner)
+            && callable_subtrees.contains_callable(value)
+        {
+            callable_frontier_roots.push(value.id());
+        } else if let Some(right) = assignment_right(owner)
+            && callable_subtrees.contains_callable(right)
+        {
+            callable_frontier_roots.push(right.id());
         }
-        (!suppressed_nodes.is_empty()).then_some(Self {
+        (!callable_frontier_roots.is_empty()).then_some(Self {
             owner,
-            suppressed_nodes,
+            callable_frontier_roots,
         })
     }
 
@@ -297,7 +330,7 @@ impl<'tree> CallableBinding<'tree> {
 #[derive(Clone)]
 struct CallableBinding<'tree> {
     owner: Node<'tree>,
-    suppressed_nodes: Vec<usize>,
+    callable_frontier_roots: Vec<usize>,
 }
 
 fn is_callable_binding_owner(kind: &str) -> bool {
@@ -357,9 +390,9 @@ pub(crate) fn prefixed_span(node: Node<'_>, location: OwnerLocation<'_>) -> Span
         return Span::from_node(export);
     }
     let mut span = Span::from_node(node);
-    if let Some(decorator) = location.leading_decorator() {
-        span.start_byte = decorator.start_byte();
-        span.start_line = decorator.start_position().row + 1;
+    if let Some(prefix) = location.leading_prefix() {
+        span.start_byte = prefix.start_byte();
+        span.start_line = prefix.start_position().row + 1;
     }
     span
 }
@@ -420,38 +453,29 @@ fn class_owner(
 mod tests {
     use super::*;
 
-    fn declaration_scan_count(binding_count: usize) -> usize {
-        let declarations = (0..binding_count)
-            .map(|index| format!("C{index} = () => {index}"))
+    fn chained_assignment_frontier_counts(depth: usize, width: usize) -> (usize, usize, usize) {
+        let assignments = (0..depth)
+            .map(|index| format!("x{index} = "))
+            .collect::<String>();
+        let callables = (0..width)
+            .map(|index| format!("() => {index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let source = format!("const {declarations};\n");
-        crate::languages::tree::reset_outermost_scan_visits();
-        parse_file(Path::new("components.js"), &source).expect("valid JavaScript");
-        crate::languages::tree::outermost_scan_visits()
+        let source = format!("const root = {assignments}[{callables}];\n");
+        crate::languages::tree::reset_callable_frontier_counts();
+        parse_file(Path::new("frontier.js"), &source).expect("valid JavaScript");
+        crate::languages::tree::callable_frontier_counts()
     }
 
-    fn wrapper_scan_count(depth: usize) -> usize {
-        let source = format!(
-            "const handler = {}() => 1{};\n",
-            "wrap(".repeat(depth),
-            ")".repeat(depth)
-        );
-        crate::languages::tree::reset_outermost_scan_visits();
-        parse_file(Path::new("components.js"), &source).expect("valid JavaScript");
-        crate::languages::tree::outermost_scan_visits()
-    }
-
-    fn nested_binding_scan_count(depth: usize) -> usize {
-        let mut source = String::new();
-        for index in 0..depth {
-            source.push_str(&format!("const C{index} = () => {{\n"));
-        }
-        source.push_str("return 1;\n");
-        source.push_str(&"};\n".repeat(depth));
-        crate::languages::tree::reset_outermost_scan_visits();
-        parse_file(Path::new("components.js"), &source).expect("valid JavaScript");
-        crate::languages::tree::outermost_scan_visits()
+    fn grouped_binding_frontier_counts(size: usize) -> (usize, usize, usize) {
+        let bindings = (0..size)
+            .map(|index| format!("f{index} = () => {index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("const {bindings};\n");
+        crate::languages::tree::reset_callable_frontier_counts();
+        parse_file(Path::new("frontier.js"), &source).expect("valid JavaScript");
+        crate::languages::tree::callable_frontier_counts()
     }
 
     fn public_nested_typescript_parent_probes(depth: usize) -> usize {
@@ -500,21 +524,54 @@ mod tests {
     }
 
     #[test]
-    fn binding_owner_scans_do_not_scale_with_contained_callables() {
-        assert_eq!(declaration_scan_count(64), 64);
+    fn chained_assignment_frontier_work_is_linear_when_deep() {
+        let shallow = chained_assignment_frontier_counts(64, 1);
+        let medium = chained_assignment_frontier_counts(128, 1);
+        let deep = chained_assignment_frontier_counts(256, 1);
+
+        assert_eq!(deep.0 - medium.0, 2 * (medium.0 - shallow.0));
+        assert_eq!(
+            [
+                (shallow.1, shallow.2),
+                (medium.1, medium.2),
+                (deep.1, deep.2)
+            ],
+            [(1, 65), (1, 129), (1, 257)],
+        );
     }
 
     #[test]
-    fn wrapper_scan_visits_grow_linearly_with_wrapper_nodes() {
-        let shallow = wrapper_scan_count(8);
-        let medium = wrapper_scan_count(16);
-        let deep = wrapper_scan_count(32);
-        assert_eq!(deep - medium, 2 * (medium - shallow));
+    fn chained_assignment_frontier_work_is_linear_when_deep_and_wide() {
+        let shallow = chained_assignment_frontier_counts(64, 64);
+        let medium = chained_assignment_frontier_counts(128, 128);
+        let deep = chained_assignment_frontier_counts(256, 256);
+
+        assert_eq!(deep.0 - medium.0, 2 * (medium.0 - shallow.0));
+        assert_eq!(
+            [
+                (shallow.1, shallow.2),
+                (medium.1, medium.2),
+                (deep.1, deep.2)
+            ],
+            [(64, 65), (128, 129), (256, 257)],
+        );
     }
 
     #[test]
-    fn nested_bindings_scan_each_outer_callable_once() {
-        assert_eq!(nested_binding_scan_count(64), 64);
+    fn grouped_binding_frontier_work_is_linear() {
+        let shallow = grouped_binding_frontier_counts(64);
+        let medium = grouped_binding_frontier_counts(128);
+        let deep = grouped_binding_frontier_counts(256);
+
+        assert_eq!(deep.0 - medium.0, 2 * (medium.0 - shallow.0));
+        assert_eq!(
+            [
+                (shallow.1, shallow.2),
+                (medium.1, medium.2),
+                (deep.1, deep.2)
+            ],
+            [(64, 64), (128, 128), (256, 256)],
+        );
     }
 
     #[test]

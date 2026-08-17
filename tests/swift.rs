@@ -202,6 +202,38 @@ fn swift_closure_assignment_edit_stales_its_leading_comment() {
 }
 
 #[test]
+fn swift_chained_closure_assignment_stales_its_leading_comment() {
+    let before = concat!(
+        "root = first = second = {\n",
+        "    // Coupled to the innermost installed handler.\n",
+        "    oldCall()\n",
+        "}\n",
+    );
+    let after = before.replace("oldCall", "newCall");
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Handler.swift"),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new("Handler.swift"),
+            text: &after,
+        },
+    )
+    .expect("valid chained Swift assignment change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed"
+                && finding.line == 2
+                && finding.message.contains("leaf `second`")
+        }),
+        "the innermost assignment must retain the closure body and identity: {findings:#?}"
+    );
+}
+
+#[test]
 fn swift_closure_assignment_keeps_nested_closure_owner_independent() {
     let before = concat!(
         "handler = {\n",
@@ -360,6 +392,98 @@ fn attached_swiftlint_directives_do_not_consume_narrative_budget() {
         assert!(
             findings.is_empty(),
             "an operational SwiftLint directive stays outside the narrative ratio: {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn swiftlint_custom_rule_identifier_is_metadata() {
+    let source = concat!(
+        "func work() {\n",
+        "    // swiftlint:disable:next my-custom-rule\n",
+        "    perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "an operational custom SwiftLint rule stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftlint_trailing_explanation_is_metadata() {
+    let source = concat!(
+        "func work() {\n",
+        "    // swiftlint:disable:next force_cast - required by the API\n",
+        "    perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a documented SwiftLint directive stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftlint_directives_require_a_rule_identifier() {
+    let directives = [
+        "// swiftlint:disable:next",
+        "// swiftlint:disable:next - explanation",
+        "// swiftlint:disable:next - ",
+        "// swiftlint:disable:next \u{2003} - explanation",
+    ];
+    for directive in directives {
+        let source = format!(
+            "func work() {{\n    {directive}\n    perform()\n    // ordinary explanation\n    finish()\n}}\n"
+        );
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: &source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "a SwiftLint command without a rule identifier remains narrative ({directive:?}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn trailing_swiftlint_region_directive_is_metadata() {
+    for action in ["disable", "enable"] {
+        let source = format!(
+            "func work() {{\n    perform() // swiftlint:{action} my-custom-rule\n    // ordinary explanation\n    finish()\n}}\n"
+        );
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: &source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings.is_empty(),
+            "a trailing SwiftLint region directive stays outside the narrative ratio ({action}): {findings:#?}"
         );
     }
 }
@@ -569,22 +693,6 @@ fn malformed_or_unattached_swiftlint_prefixes_remain_narrative() {
     let sources = [
         concat!(
             "func work() {\n",
-            "    // swiftlint:disable:next force-cast\n",
-            "    perform()\n",
-            "    // ordinary explanation\n",
-            "    finish()\n",
-            "}\n",
-        ),
-        concat!(
-            "func work() {\n",
-            "    // swiftlint:disable:next force_cast - explanation\n",
-            "    perform()\n",
-            "    // ordinary explanation\n",
-            "    finish()\n",
-            "}\n",
-        ),
-        concat!(
-            "func work() {\n",
             "    /// swiftlint:disable:next force_cast\n",
             "    perform()\n",
             "    // ordinary explanation\n",
@@ -612,13 +720,6 @@ fn malformed_or_unattached_swiftlint_prefixes_remain_narrative() {
             "func work() {\n",
             "    // swiftlint:disable:this force_cast\n",
             "    perform()\n",
-            "    // ordinary explanation\n",
-            "    finish()\n",
-            "}\n",
-        ),
-        concat!(
-            "func work() {\n",
-            "    perform() // swiftlint:disable force_cast\n",
             "    // ordinary explanation\n",
             "    finish()\n",
             "}\n",

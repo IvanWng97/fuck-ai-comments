@@ -13,55 +13,6 @@ pub(crate) fn events(root: Node<'_>) -> WalkEvents<'_> {
     }
 }
 
-pub(crate) fn outermost_matching_nodes(
-    root: Node<'_>,
-    mut matches: impl FnMut(&str) -> bool,
-) -> Vec<Node<'_>> {
-    let mut cursor = root.walk();
-    let mut found = Vec::new();
-    loop {
-        let node = cursor.node();
-        record_outermost_visit();
-        if matches(node.kind()) {
-            found.push(node);
-        } else if cursor.goto_first_child() {
-            continue;
-        }
-
-        loop {
-            if cursor.goto_next_sibling() {
-                break;
-            }
-            if !cursor.goto_parent() {
-                return found;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static OUTERMOST_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn record_outermost_visit() {
-    OUTERMOST_VISITS.with(|visits| visits.set(visits.get() + 1));
-}
-
-#[cfg(not(test))]
-fn record_outermost_visit() {}
-
-#[cfg(test)]
-pub(crate) fn reset_outermost_visits() {
-    OUTERMOST_VISITS.with(|visits| visits.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn outermost_visits() -> usize {
-    OUTERMOST_VISITS.with(std::cell::Cell::get)
-}
-
 pub(crate) struct WalkEvents<'tree> {
     cursor: TreeCursor<'tree>,
     phase: Option<Phase>,

@@ -3,9 +3,9 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    ANONYMOUS_FUNCTION_NAME, LanguageSpec, OwnerCandidate, OwnerLocation, analyze,
-    direct_named_child, document, first_descendant_with_kind, node_text,
-    outermost_node_ids_matching, starts_physical_line,
+    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, CallableSubtrees, DirectivePlacement, LanguageSpec,
+    OwnerCandidate, OwnerLocation, analyze, direct_named_child, document,
+    first_descendant_with_kind, node_text,
 };
 use super::walk::{WalkEvent, events};
 use crate::model::{AnalysisError, Finding, Selection};
@@ -27,7 +27,7 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
 }
 
 impl LanguageSpec for ObjectiveC {
-    type Context = ();
+    type Context = AttachmentIndex;
 
     fn label(self) -> &'static str {
         "Objective-C"
@@ -37,25 +37,35 @@ impl LanguageSpec for ObjectiveC {
         tree_sitter_objc::LANGUAGE.into()
     }
 
+    fn build_context(self, root: Node<'_>, source: &str) -> Self::Context {
+        AttachmentIndex::from_root(root, source)
+    }
+
+    fn callable_kind(self) -> Option<fn(&str) -> bool> {
+        Some(is_objective_c_callable)
+    }
+
     fn owner(
         self,
         node: Node<'_>,
         _location: OwnerLocation<'_>,
         source: &str,
         _function_depth: usize,
+        callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate> {
-        owner_from_node(node, source)
+        owner_from_node(node, source, callable_subtrees)
     }
 
     fn classify_comment(
         self,
         node: Node<'_>,
         source: &str,
-        _context: &Self::Context,
+        context: &Self::Context,
     ) -> Option<CommentKind> {
         (node.kind() == "comment").then(|| {
             if clang_format_directive(node_text(node, source))
-                && occupies_physical_line(node, source)
+                && context.is_attached(node, DirectivePlacement::Region)
+                && ends_physical_line(node, source)
             {
                 CommentKind::ToolDirective
             } else {
@@ -65,7 +75,11 @@ impl LanguageSpec for ObjectiveC {
     }
 }
 
-fn owner_from_node(node: Node<'_>, source: &str) -> Option<OwnerCandidate> {
+fn owner_from_node(
+    node: Node<'_>,
+    source: &str,
+    callable_subtrees: &CallableSubtrees,
+) -> Option<OwnerCandidate> {
     if let Some(segment) = type_segment(node, source) {
         return Some(OwnerCandidate::type_owner(
             Span::from_node(node),
@@ -73,8 +87,10 @@ fn owner_from_node(node: Node<'_>, source: &str) -> Option<OwnerCandidate> {
             vec![segment],
         ));
     }
-    if let Some((name, suppressed)) = callable_binding(node, source) {
-        return Some(OwnerCandidate::leaf(Span::from_node(node), name).suppressing(suppressed));
+    if let Some((name, roots)) = callable_binding(node, source, callable_subtrees) {
+        return Some(
+            OwnerCandidate::leaf(Span::from_node(node), name).suppressing_callable_frontiers(roots),
+        );
     }
     let name = match node.kind() {
         "method_definition" => method_identity(node, source),
@@ -119,10 +135,7 @@ fn clang_format_directive(comment: &str) -> bool {
         .is_some_and(|body| matches!(body.trim(), "clang-format off" | "clang-format on"))
 }
 
-fn occupies_physical_line(node: Node<'_>, source: &str) -> bool {
-    if !starts_physical_line(node, source) {
-        return false;
-    }
+fn ends_physical_line(node: Node<'_>, source: &str) -> bool {
     let line_suffix = source[node.end_byte()..]
         .split_once('\n')
         .map_or(&source[node.end_byte()..], |(suffix, _)| suffix);
@@ -154,26 +167,33 @@ fn grouped_declaration_name(node: Node<'_>, source: &str) -> Option<String> {
     (!names.is_empty()).then(|| names.join(","))
 }
 
-fn callable_binding(node: Node<'_>, source: &str) -> Option<(String, Vec<usize>)> {
+fn callable_binding(
+    node: Node<'_>,
+    source: &str,
+    callable_subtrees: &CallableSubtrees,
+) -> Option<(String, Vec<usize>)> {
     if node.kind() == "declaration" {
         let mut cursor = node.walk();
-        let mut suppressed = Vec::new();
+        let mut roots = Vec::new();
         for declarator in node
             .named_children(&mut cursor)
             .filter(|child| child.kind() == "init_declarator")
         {
-            if let Some(value) = declarator.child_by_field_name("value") {
-                suppressed.extend(outermost_node_ids_matching(value, is_objective_c_callable));
+            if let Some(value) = declarator.child_by_field_name("value")
+                && callable_subtrees.contains_callable(value)
+            {
+                roots.push(value.id());
             }
         }
-        if !suppressed.is_empty() {
-            return Some((grouped_declaration_name(node, source)?, suppressed));
+        if !roots.is_empty() {
+            return Some((grouped_declaration_name(node, source)?, roots));
         }
     }
     let left = assignment_left(node)?;
     let right = assignment_right(node)?;
-    let suppressed = outermost_node_ids_matching(right, is_objective_c_callable);
-    (!suppressed.is_empty()).then(|| (node_text(left, source).trim().to_owned(), suppressed))
+    callable_subtrees
+        .contains_callable(right)
+        .then(|| (node_text(left, source).trim().to_owned(), vec![right.id()]))
 }
 
 fn is_objective_c_callable(kind: &str) -> bool {
@@ -279,8 +299,19 @@ fn direct_has_const_qualifier(node: Node<'_>, source: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn inline_directive_attachment_visits(count: usize) -> usize {
+        let source = format!(
+            "{}{}\n",
+            " ".repeat(16 * count),
+            "/* clang-format off */ ".repeat(count),
+        );
+        crate::languages::tree::reset_attachment_index_visits();
+        parse_file(Path::new("Formatting.m"), &source).expect("valid Objective-C");
+        crate::languages::tree::attachment_index_visits()
+    }
+
     #[test]
-    fn nested_bindings_scan_each_outer_block_once() {
+    fn nested_bindings_register_each_callable_frontier_once() {
         let depth = 32;
         let mut source = String::new();
         for index in 0..depth {
@@ -288,8 +319,18 @@ mod tests {
         }
         source.push_str("return;\n");
         source.push_str(&"};\n".repeat(depth));
-        crate::languages::tree::reset_outermost_scan_visits();
+        crate::languages::tree::reset_callable_frontier_counts();
         parse_file(Path::new("Nested.m"), &source).expect("valid Objective-C");
-        assert_eq!(crate::languages::tree::outermost_scan_visits(), depth);
+        let (_, candidates, registrations) = crate::languages::tree::callable_frontier_counts();
+        assert_eq!((candidates, registrations), (depth, depth));
+    }
+
+    #[test]
+    fn directive_attachment_index_visits_are_linear() {
+        let shallow = inline_directive_attachment_visits(16);
+        let medium = inline_directive_attachment_visits(32);
+        let deep = inline_directive_attachment_visits(64);
+        assert!(shallow > 0);
+        assert_eq!(deep - medium, 2 * (medium - shallow));
     }
 }

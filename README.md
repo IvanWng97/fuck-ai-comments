@@ -226,12 +226,12 @@ The release-workflow commands require cargo-dist 0.32.0's `dist` executable on
 `PATH`.
 
 The Rust MSRV is 1.88.0. The Action is bundled. `release.yml` is generated from
-the dist configuration, then narrowed to job-level permissions by
-`npm run release:generate`; `release:check` regenerates it in a temporary copy
-so cargo-dist template drift remains a hard failure. The pinned cargo-dist
-template cannot scope its built-in permissions or disable secret inheritance
-for custom jobs, so its `allow-dirty = ["ci"]` escape hatch is intentional; the
-tested transform changes only those two privileges.
+the dist configuration, then hardened by `npm run release:generate`;
+`release:check` regenerates it in a temporary copy so cargo-dist template drift
+remains a hard failure. The pinned cargo-dist template cannot use the approved
+checkout major, scope its built-in permissions, or disable secret inheritance
+for custom jobs, so its `allow-dirty = ["ci"]` escape hatch is intentional. The
+tested transform changes only those three constraints.
 
 ## License
 

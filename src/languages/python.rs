@@ -3,8 +3,8 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    LanguageSpec, OwnerCandidate, OwnerLocation, analyze, document, first_descendant_with_kind,
-    function_name, node_text, starts_physical_line,
+    CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, document,
+    first_descendant_with_kind, function_name, node_text, starts_physical_line,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -43,6 +43,7 @@ impl LanguageSpec for Python {
         location: OwnerLocation<'_>,
         source: &str,
         function_depth: usize,
+        _callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate> {
         if let Some(class) = class_owner_node(node, location) {
             let name = class

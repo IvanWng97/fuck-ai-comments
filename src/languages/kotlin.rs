@@ -3,8 +3,8 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    LanguageSpec, OwnerCandidate, OwnerLocation, analyze, canonical_syntax, direct_named_child,
-    document, function_name, node_text, outermost_node_ids_matching,
+    CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, canonical_syntax,
+    direct_named_child, document, function_name, node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -35,14 +35,19 @@ impl LanguageSpec for Kotlin {
         tree_sitter_kotlin_ng::LANGUAGE.into()
     }
 
+    fn callable_kind(self) -> Option<fn(&str) -> bool> {
+        Some(is_kotlin_callable)
+    }
+
     fn owner(
         self,
         node: Node<'_>,
         location: OwnerLocation<'_>,
         source: &str,
         _function_depth: usize,
+        callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate> {
-        owner_from_node(node, location, source)
+        owner_from_node(node, location, source, callable_subtrees)
     }
 
     fn classify_comment(
@@ -59,6 +64,7 @@ fn owner_from_node(
     node: Node<'_>,
     location: OwnerLocation<'_>,
     source: &str,
+    callable_subtrees: &CallableSubtrees,
 ) -> Option<OwnerCandidate> {
     if let Some(segment) = type_segment(node, source) {
         return Some(OwnerCandidate::type_owner(
@@ -67,8 +73,10 @@ fn owner_from_node(
             vec![segment],
         ));
     }
-    if let Some((name, suppressed)) = callable_binding(node, source) {
-        return Some(OwnerCandidate::leaf(Span::from_node(node), name).suppressing(suppressed));
+    if let Some((name, roots)) = callable_binding(node, source, callable_subtrees) {
+        return Some(
+            OwnerCandidate::leaf(Span::from_node(node), name).suppressing_callable_frontiers(roots),
+        );
     }
     if let Some(name) = body_property_name(node) {
         return Some(OwnerCandidate::function(
@@ -239,20 +247,23 @@ fn body_property_name(node: Node<'_>) -> Option<Node<'_>> {
         .then_some(name)
 }
 
-fn callable_binding(node: Node<'_>, source: &str) -> Option<(String, Vec<usize>)> {
+fn callable_binding(
+    node: Node<'_>,
+    source: &str,
+    callable_subtrees: &CallableSubtrees,
+) -> Option<(String, Vec<usize>)> {
     if let Some(name) = single_property_name(node)
         && body_property_name(node).is_none()
         && let Some(initializer) = property_initializer(node)
+        && callable_subtrees.contains_callable(initializer)
     {
-        let suppressed = outermost_node_ids_matching(initializer, is_kotlin_callable);
-        if !suppressed.is_empty() {
-            return Some((node_text(name, source).to_owned(), suppressed));
-        }
+        return Some((node_text(name, source).to_owned(), vec![initializer.id()]));
     }
     let left = assignment_left(node)?;
     let right = assignment_right(node)?;
-    let suppressed = outermost_node_ids_matching(right, is_kotlin_callable);
-    (!suppressed.is_empty()).then(|| (node_text(left, source).trim().to_owned(), suppressed))
+    callable_subtrees
+        .contains_callable(right)
+        .then(|| (node_text(left, source).trim().to_owned(), vec![right.id()]))
 }
 
 fn is_kotlin_callable(kind: &str) -> bool {
@@ -273,7 +284,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_bindings_scan_each_outer_callable_once() {
+    fn nested_bindings_register_each_callable_frontier_once() {
         let depth = 64;
         let mut source = String::new();
         for index in 0..depth {
@@ -281,8 +292,9 @@ mod tests {
         }
         source.push_str("1\n");
         source.push_str(&"}\n".repeat(depth));
-        crate::languages::tree::reset_outermost_scan_visits();
+        crate::languages::tree::reset_callable_frontier_counts();
         parse_file(Path::new("Nested.kt"), &source).expect("valid Kotlin");
-        assert_eq!(crate::languages::tree::outermost_scan_visits(), depth);
+        let (_, candidates, registrations) = crate::languages::tree::callable_frontier_counts();
+        assert_eq!((candidates, registrations), (depth, depth));
     }
 }

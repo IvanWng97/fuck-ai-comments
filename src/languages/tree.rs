@@ -9,9 +9,118 @@ use crate::policy::{
     TreeOwnership, TypeOwner, tree_document, tree_findings,
 };
 
-use super::walk::{WalkEvent, events, outermost_matching_nodes};
+use super::walk::{WalkEvent, events};
 
 pub(crate) const ANONYMOUS_FUNCTION_NAME: &str = "<anonymous>";
+
+#[derive(Default)]
+pub(crate) struct CallableSubtrees {
+    nodes_with_callables: HashSet<usize>,
+    callable_kind: Option<fn(&str) -> bool>,
+}
+
+struct CallableSubtreeFrame {
+    node_id: usize,
+    subtree_has_callable: bool,
+}
+
+impl CallableSubtrees {
+    fn from_root(root: Node<'_>, callable_kind: Option<fn(&str) -> bool>) -> Self {
+        let Some(callable_kind) = callable_kind else {
+            return Self::default();
+        };
+        let mut nodes_with_callables = HashSet::new();
+        let mut frames: Vec<CallableSubtreeFrame> = Vec::new();
+        for event in events(root) {
+            match event {
+                WalkEvent::Enter(node) => {
+                    record_callable_subtree_visit();
+                    let is_callable = callable_kind(node.kind());
+                    frames.push(CallableSubtreeFrame {
+                        node_id: node.id(),
+                        subtree_has_callable: is_callable,
+                    });
+                }
+                WalkEvent::Leave(node) => {
+                    let frame = frames.pop();
+                    debug_assert_eq!(frame.as_ref().map(|frame| frame.node_id), Some(node.id()));
+                    let Some(frame) = frame else {
+                        continue;
+                    };
+                    if frame.subtree_has_callable {
+                        nodes_with_callables.insert(frame.node_id);
+                        if let Some(parent) = frames.last_mut() {
+                            parent.subtree_has_callable = true;
+                        }
+                    }
+                }
+            }
+        }
+        debug_assert!(frames.is_empty());
+        Self {
+            nodes_with_callables,
+            callable_kind: Some(callable_kind),
+        }
+    }
+
+    pub(crate) fn contains_callable(&self, node: Node<'_>) -> bool {
+        self.nodes_with_callables.contains(&node.id())
+    }
+
+    fn is_callable(&self, node: Node<'_>) -> bool {
+        self.callable_kind
+            .is_some_and(|callable_kind| callable_kind(node.kind()))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CALLABLE_SUBTREE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CALLABLE_CANDIDATE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CALLABLE_FRONTIER_REGISTRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_callable_subtree_visit() {
+    CALLABLE_SUBTREE_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_callable_subtree_visit() {}
+
+#[cfg(test)]
+fn record_callable_candidate_check() {
+    CALLABLE_CANDIDATE_CHECKS.with(|candidates| candidates.set(candidates.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_callable_candidate_check() {}
+
+#[cfg(test)]
+fn record_callable_frontier_registration(count: usize) {
+    CALLABLE_FRONTIER_REGISTRATIONS.with(|registrations| {
+        registrations.set(registrations.get() + count);
+    });
+}
+
+#[cfg(not(test))]
+fn record_callable_frontier_registration(_count: usize) {}
+
+#[cfg(test)]
+pub(crate) fn reset_callable_frontier_counts() {
+    CALLABLE_SUBTREE_VISITS.with(|visits| visits.set(0));
+    CALLABLE_CANDIDATE_CHECKS.with(|candidates| candidates.set(0));
+    CALLABLE_FRONTIER_REGISTRATIONS.with(|registrations| registrations.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn callable_frontier_counts() -> (usize, usize, usize) {
+    (
+        CALLABLE_SUBTREE_VISITS.with(std::cell::Cell::get),
+        CALLABLE_CANDIDATE_CHECKS.with(std::cell::Cell::get),
+        CALLABLE_FRONTIER_REGISTRATIONS.with(std::cell::Cell::get),
+    )
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum DirectivePlacement {
@@ -29,9 +138,37 @@ pub(crate) struct AttachmentIndex {
     comments: HashMap<usize, CommentAttachment>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct AttachmentSyntax {
+    transparent_comment_wrapper: fn(&str) -> bool,
+    preamble_trivia: fn(&str) -> bool,
+}
+
+impl AttachmentSyntax {
+    pub(crate) const fn new(
+        transparent_comment_wrapper: fn(&str) -> bool,
+        preamble_trivia: fn(&str) -> bool,
+    ) -> Self {
+        Self {
+            transparent_comment_wrapper,
+            preamble_trivia,
+        }
+    }
+}
+
+impl Default for AttachmentSyntax {
+    fn default() -> Self {
+        Self::new(|_| false, |_| false)
+    }
+}
+
 impl AttachmentIndex {
     pub(crate) fn from_root(root: Node<'_>, source: &str) -> Self {
-        let mut builder = AttachmentIndexBuilder::new(source);
+        Self::with_syntax(root, source, AttachmentSyntax::default())
+    }
+
+    pub(crate) fn with_syntax(root: Node<'_>, source: &str, syntax: AttachmentSyntax) -> Self {
+        let mut builder = AttachmentIndexBuilder::new(source, syntax);
         for event in events(root) {
             match event {
                 WalkEvent::Enter(node) => builder.enter(node),
@@ -76,15 +213,17 @@ struct AttachmentIndexBuilder<'source> {
     comments: HashMap<usize, CommentAttachment>,
     frames: Vec<AttachmentFrame>,
     source_position: SourcePosition<'source>,
+    syntax: AttachmentSyntax,
 }
 
 // Tree-sitter's Node parent/sibling queries can retrace ancestry, so the frame stack derives every attachment fact in one forward cursor pass.
 impl<'source> AttachmentIndexBuilder<'source> {
-    fn new(source: &'source str) -> Self {
+    fn new(source: &'source str, syntax: AttachmentSyntax) -> Self {
         Self {
             comments: HashMap::new(),
             frames: Vec::new(),
             source_position: SourcePosition::new(source),
+            syntax,
         }
     }
 
@@ -93,9 +232,18 @@ impl<'source> AttachmentIndexBuilder<'source> {
         let starts_line = self.source_position.starts_line_at(node.start_byte());
         let is_root = self.frames.is_empty();
         if let Some(parent) = self.frames.last_mut() {
-            parent.record_child(node, starts_line, &mut self.comments);
+            parent.record_child(
+                node,
+                starts_line,
+                (self.syntax.preamble_trivia)(node.kind()),
+                &mut self.comments,
+            );
         }
-        self.frames.push(AttachmentFrame::new(node, is_root));
+        self.frames.push(AttachmentFrame::new(
+            node,
+            is_root,
+            (self.syntax.transparent_comment_wrapper)(node.kind()),
+        ));
     }
 
     fn leave(&mut self, node: Node<'_>) {
@@ -104,10 +252,10 @@ impl<'source> AttachmentIndexBuilder<'source> {
         let Some(frame) = frame else {
             return;
         };
-        if !frame.jsx_comments.is_empty()
+        if !frame.transparent_comments.is_empty()
             && let Some(parent) = self.frames.last_mut()
         {
-            parent.record_jsx_comments(node.id(), frame.jsx_comments);
+            parent.record_transparent_comments(node.id(), frame.transparent_comments);
         }
     }
 }
@@ -115,21 +263,21 @@ impl<'source> AttachmentIndexBuilder<'source> {
 struct AttachmentFrame {
     node_id: usize,
     is_root: bool,
-    is_jsx_expression: bool,
+    is_transparent_comment_wrapper: bool,
     preamble_open: bool,
     last_named_child: Option<NamedChild>,
-    jsx_comments: Vec<usize>,
+    transparent_comments: Vec<usize>,
 }
 
 impl AttachmentFrame {
-    fn new(node: Node<'_>, is_root: bool) -> Self {
+    fn new(node: Node<'_>, is_root: bool, is_transparent_comment_wrapper: bool) -> Self {
         Self {
             node_id: node.id(),
             is_root,
-            is_jsx_expression: node.kind() == "jsx_expression",
+            is_transparent_comment_wrapper,
             preamble_open: true,
             last_named_child: None,
-            jsx_comments: Vec::new(),
+            transparent_comments: Vec::new(),
         }
     }
 
@@ -137,6 +285,7 @@ impl AttachmentFrame {
         &mut self,
         node: Node<'_>,
         starts_line: bool,
+        is_preamble_trivia: bool,
         comments: &mut HashMap<usize, CommentAttachment>,
     ) {
         if !node.is_named() {
@@ -157,23 +306,23 @@ impl AttachmentFrame {
             if self.is_root && self.preamble_open {
                 attachment.file_preamble = true;
             }
-            if self.is_jsx_expression {
-                self.jsx_comments.push(child.node_id);
+            if self.is_transparent_comment_wrapper {
+                self.transparent_comments.push(child.node_id);
             }
         }
-        if self.is_root && !child.is_comment && node.kind() != "hash_bang_line" {
+        if self.is_root && !child.is_comment && !is_preamble_trivia {
             self.preamble_open = false;
         }
         self.last_named_child = Some(child);
     }
 
-    fn record_jsx_comments(&mut self, node_id: usize, jsx_comments: Vec<usize>) {
+    fn record_transparent_comments(&mut self, node_id: usize, comments: Vec<usize>) {
         if let Some(child) = self
             .last_named_child
             .as_mut()
             .filter(|child| child.node_id == node_id)
         {
-            child.jsx_comments = jsx_comments;
+            child.transparent_comments = comments;
         }
     }
 }
@@ -183,7 +332,7 @@ struct NamedChild {
     start_row: usize,
     end_row: usize,
     is_comment: bool,
-    jsx_comments: Vec<usize>,
+    transparent_comments: Vec<usize>,
 }
 
 impl NamedChild {
@@ -193,7 +342,7 @@ impl NamedChild {
             start_row: node.start_position().row,
             end_row: node.end_position().row,
             is_comment: is_comment_kind(node.kind()),
-            jsx_comments: Vec::new(),
+            transparent_comments: Vec::new(),
         }
     }
 
@@ -204,7 +353,7 @@ impl NamedChild {
             attachment.next_line =
                 !next.is_comment && next.start_row == self.end_row.saturating_add(1);
         }
-        for comment in &self.jsx_comments {
+        for comment in &self.transparent_comments {
             comments.entry(*comment).or_default().next_node = !next.is_comment;
         }
     }
@@ -265,12 +414,13 @@ pub(crate) fn attachment_index_visits() -> usize {
 pub(crate) struct OwnerCandidate {
     data: OwnerData,
     suppressed_nodes: Vec<usize>,
+    callable_frontier_roots: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct OwnerLocation<'tree> {
     parent: Option<Node<'tree>>,
-    leading_decorator: Option<Node<'tree>>,
+    leading_prefix: Option<Node<'tree>>,
 }
 
 impl<'tree> OwnerLocation<'tree> {
@@ -279,8 +429,8 @@ impl<'tree> OwnerLocation<'tree> {
         self.parent
     }
 
-    pub(crate) fn leading_decorator(self) -> Option<Node<'tree>> {
-        self.leading_decorator
+    pub(crate) fn leading_prefix(self) -> Option<Node<'tree>> {
+        self.leading_prefix
     }
 }
 
@@ -300,6 +450,7 @@ impl OwnerCandidate {
                 identity,
             }),
             suppressed_nodes: Vec::new(),
+            callable_frontier_roots: Vec::new(),
         }
     }
 
@@ -311,6 +462,7 @@ impl OwnerCandidate {
                 identity,
             }),
             suppressed_nodes: Vec::new(),
+            callable_frontier_roots: Vec::new(),
         }
     }
 
@@ -318,11 +470,19 @@ impl OwnerCandidate {
         Self {
             data: OwnerData::Leaf(Leaf { span, name }),
             suppressed_nodes: Vec::new(),
+            callable_frontier_roots: Vec::new(),
         }
     }
 
     pub(crate) fn suppressing(mut self, nodes: Vec<usize>) -> Self {
         self.suppressed_nodes = nodes;
+        self
+    }
+
+    pub(crate) fn suppressing_callable_frontiers(mut self, mut roots: Vec<usize>) -> Self {
+        roots.sort_unstable();
+        roots.dedup();
+        self.callable_frontier_roots = roots;
         self
     }
 }
@@ -362,12 +522,19 @@ pub(crate) trait LanguageSpec: Copy {
     fn build_context(self, _root: Node<'_>, _source: &str) -> Self::Context {
         Self::Context::default()
     }
+    fn is_owner_prefix(self, _kind: &str) -> bool {
+        false
+    }
+    fn callable_kind(self) -> Option<fn(&str) -> bool> {
+        None
+    }
     fn owner(
         self,
         node: Node<'_>,
         location: OwnerLocation<'_>,
         source: &str,
         function_depth: usize,
+        callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate>;
     fn classify_comment(
         self,
@@ -426,6 +593,7 @@ fn parse_facts<S: LanguageSpec>(
     spec: S,
 ) -> Result<Facts, AnalysisError> {
     let tree = parse(path, source, spec.label(), spec.grammar())?;
+    let callable_subtrees = CallableSubtrees::from_root(tree.root_node(), spec.callable_kind());
     let context = spec.build_context(tree.root_node(), source);
     let mut collector = FactCollector::new(source);
     let mut traversal = Vec::new();
@@ -435,16 +603,16 @@ fn parse_facts<S: LanguageSpec>(
                 let location = traversal
                     .last()
                     .map_or_else(OwnerLocation::default, |frame: &TraversalFrame<'_>| {
-                        frame.location_for(node, source)
+                        frame.location_for(node, source, spec)
                     });
                 if let Some(frame) = traversal.last_mut() {
-                    frame.record_child(node, source);
+                    frame.record_child(node, source, spec);
                 }
-                collector.enter(node, location, spec, &context);
+                collector.enter(node, location, spec, &context, &callable_subtrees);
                 traversal.push(TraversalFrame::new(node));
             }
             WalkEvent::Leave(node) => {
-                collector.leave(node);
+                collector.leave(node, &callable_subtrees);
                 let frame = traversal.pop();
                 debug_assert_eq!(frame.map(|frame| frame.node.id()), Some(node.id()));
             }
@@ -456,7 +624,7 @@ fn parse_facts<S: LanguageSpec>(
 struct TraversalFrame<'tree> {
     node: Node<'tree>,
     last_named_child: Option<Node<'tree>>,
-    decorator_start: Option<Node<'tree>>,
+    prefix_start: Option<Node<'tree>>,
 }
 
 impl<'tree> TraversalFrame<'tree> {
@@ -464,31 +632,36 @@ impl<'tree> TraversalFrame<'tree> {
         Self {
             node,
             last_named_child: None,
-            decorator_start: None,
+            prefix_start: None,
         }
     }
 
-    fn location_for(&self, node: Node<'tree>, source: &str) -> OwnerLocation<'tree> {
-        let leading_decorator = self
+    fn location_for<S: LanguageSpec>(
+        &self,
+        node: Node<'tree>,
+        source: &str,
+        spec: S,
+    ) -> OwnerLocation<'tree> {
+        let leading_prefix = self
             .last_named_child
-            .filter(|previous| previous.kind() == "decorator")
+            .filter(|previous| spec.is_owner_prefix(previous.kind()))
             .filter(|previous| only_whitespace_between(*previous, node, source))
-            .and(self.decorator_start);
+            .and(self.prefix_start);
         OwnerLocation {
             parent: Some(self.node),
-            leading_decorator,
+            leading_prefix,
         }
     }
 
-    fn record_child(&mut self, node: Node<'tree>, source: &str) {
+    fn record_child<S: LanguageSpec>(&mut self, node: Node<'tree>, source: &str, spec: S) {
         if !node.is_named() {
             return;
         }
-        self.decorator_start = (node.kind() == "decorator").then(|| {
+        self.prefix_start = spec.is_owner_prefix(node.kind()).then(|| {
             self.last_named_child
-                .filter(|previous| previous.kind() == "decorator")
+                .filter(|previous| spec.is_owner_prefix(previous.kind()))
                 .filter(|previous| only_whitespace_between(*previous, node, source))
-                .and(self.decorator_start)
+                .and(self.prefix_start)
                 .unwrap_or(node)
         });
         self.last_named_child = Some(node);
@@ -509,6 +682,10 @@ struct FactCollector<'source> {
     active_types: Vec<TreeOwner>,
     owner_nodes: Vec<OwnerFrame>,
     suppressed_owner_nodes: HashSet<usize>,
+    callable_frontier_starts: HashMap<usize, usize>,
+    active_callable_frontiers: Vec<ActiveCallableFrontier>,
+    callable_frontiers_at_depth: Vec<usize>,
+    callable_depth: usize,
     comment_node: Option<usize>,
     active_function_depth: usize,
     functions: Vec<Function>,
@@ -531,6 +708,12 @@ struct OwnerFrame {
     suppressed_nodes: Vec<usize>,
 }
 
+struct ActiveCallableFrontier {
+    node_id: usize,
+    callable_depth: usize,
+    count: usize,
+}
+
 impl<'source> FactCollector<'source> {
     fn new(source: &'source str) -> Self {
         let line_slots = source.bytes().filter(|byte| *byte == b'\n').count() + 2;
@@ -548,10 +731,12 @@ impl<'source> FactCollector<'source> {
         location: OwnerLocation<'_>,
         spec: S,
         context: &S::Context,
+        callable_subtrees: &CallableSubtrees,
     ) {
         if self.comment_node.is_some() {
             return;
         }
+        self.open_callable_frontiers(node);
         if let Some(kind) = spec.classify_comment(node, self.source, context) {
             self.push_comment(Comment {
                 span: Span::from_comment_node(node, self.source),
@@ -562,13 +747,28 @@ impl<'source> FactCollector<'source> {
             return;
         }
 
-        let candidate = (!self.suppressed_owner_nodes.contains(&node.id()))
-            .then(|| spec.owner(node, location, self.source, self.active_function_depth))
+        let is_callable = callable_subtrees.is_callable(node);
+        if is_callable {
+            record_callable_candidate_check();
+        }
+        let callable_is_suppressed = is_callable && self.callable_frontier_is_active();
+        let candidate = (!self.suppressed_owner_nodes.contains(&node.id())
+            && !callable_is_suppressed)
+            .then(|| {
+                spec.owner(
+                    node,
+                    location,
+                    self.source,
+                    self.active_function_depth,
+                    callable_subtrees,
+                )
+            })
             .flatten();
         if let Some(candidate) = candidate {
             let OwnerCandidate {
                 data,
                 suppressed_nodes,
+                callable_frontier_roots,
             } = candidate;
             let owner = match data {
                 OwnerData::Function(function) => {
@@ -591,6 +791,7 @@ impl<'source> FactCollector<'source> {
             self.register_owner(owner, node.start_byte());
             self.suppressed_owner_nodes
                 .extend(suppressed_nodes.iter().copied());
+            self.register_callable_frontiers(node.id(), callable_frontier_roots);
             self.owner_nodes.push(OwnerFrame {
                 node_id: node.id(),
                 owner,
@@ -605,9 +806,10 @@ impl<'source> FactCollector<'source> {
                 self.push_syntax(Span::from_node(node), CodeToken::atom(node.kind(), text));
             }
         }
+        self.callable_depth += usize::from(is_callable);
     }
 
-    fn leave(&mut self, node: Node<'_>) {
+    fn leave(&mut self, node: Node<'_>, callable_subtrees: &CallableSubtrees) {
         if let Some(comment_node) = self.comment_node {
             if comment_node == node.id() {
                 self.comment_node = None;
@@ -616,32 +818,99 @@ impl<'source> FactCollector<'source> {
         }
 
         self.push_syntax(Span::from_node(node), CodeToken::leave(node.kind()));
-        let Some(frame) = self.owner_nodes.last() else {
-            return;
-        };
-        if frame.node_id != node.id() {
-            return;
+        if self
+            .owner_nodes
+            .last()
+            .is_some_and(|frame| frame.node_id == node.id())
+            && let Some(frame) = self.owner_nodes.pop()
+        {
+            let owner = frame.owner;
+            for suppressed in frame.suppressed_nodes {
+                self.suppressed_owner_nodes.remove(&suppressed);
+            }
+            let popped = self.active.pop();
+            debug_assert_eq!(popped, Some(owner));
+            if is_budget_owner(owner) {
+                debug_assert_eq!(self.active_budgets.pop(), Some(owner));
+            }
+            if matches!(owner, TreeOwner::Type(_)) {
+                debug_assert_eq!(self.active_types.pop(), Some(owner));
+            }
+            self.record_trailing(owner);
+            self.active_function_depth -= usize::from(matches!(owner, TreeOwner::Function(_)));
         }
-        let Some(frame) = self.owner_nodes.pop() else {
-            return;
-        };
-        let owner = frame.owner;
-        for suppressed in frame.suppressed_nodes {
-            self.suppressed_owner_nodes.remove(&suppressed);
+        if callable_subtrees.is_callable(node) {
+            debug_assert!(self.callable_depth > 0);
+            if self.callable_depth == 0 {
+                self.invariant_error = Some("callable depth underflowed".to_owned());
+            } else {
+                self.callable_depth -= 1;
+            }
         }
-        let popped = self.active.pop();
-        debug_assert_eq!(popped, Some(owner));
-        if is_budget_owner(owner) {
-            debug_assert_eq!(self.active_budgets.pop(), Some(owner));
-        }
-        if matches!(owner, TreeOwner::Type(_)) {
-            debug_assert_eq!(self.active_types.pop(), Some(owner));
-        }
-        self.record_trailing(owner);
-        self.active_function_depth -= usize::from(matches!(owner, TreeOwner::Function(_)));
+        self.close_callable_frontiers(node);
     }
 
-    fn finish(self) -> Result<Facts, AnalysisError> {
+    fn register_callable_frontiers(&mut self, owner_node_id: usize, roots: Vec<usize>) {
+        record_callable_frontier_registration(roots.len());
+        for root in roots {
+            debug_assert_ne!(root, owner_node_id);
+            *self.callable_frontier_starts.entry(root).or_default() += 1;
+        }
+    }
+
+    fn open_callable_frontiers(&mut self, node: Node<'_>) {
+        let Some(count) = self.callable_frontier_starts.remove(&node.id()) else {
+            return;
+        };
+        if self.callable_frontiers_at_depth.len() <= self.callable_depth {
+            self.callable_frontiers_at_depth
+                .resize(self.callable_depth + 1, 0);
+        }
+        self.callable_frontiers_at_depth[self.callable_depth] += count;
+        self.active_callable_frontiers.push(ActiveCallableFrontier {
+            node_id: node.id(),
+            callable_depth: self.callable_depth,
+            count,
+        });
+    }
+
+    fn callable_frontier_is_active(&self) -> bool {
+        self.callable_frontiers_at_depth
+            .get(self.callable_depth)
+            .is_some_and(|count| *count > 0)
+    }
+
+    fn close_callable_frontiers(&mut self, node: Node<'_>) {
+        if !self
+            .active_callable_frontiers
+            .last()
+            .is_some_and(|frontier| frontier.node_id == node.id())
+        {
+            return;
+        }
+        let Some(frontier) = self.active_callable_frontiers.pop() else {
+            return;
+        };
+        let count = &mut self.callable_frontiers_at_depth[frontier.callable_depth];
+        debug_assert!(*count >= frontier.count);
+        if *count < frontier.count {
+            self.invariant_error = Some("callable frontier count underflowed".to_owned());
+            return;
+        }
+        *count -= frontier.count;
+        while self.callable_frontiers_at_depth.last() == Some(&0) {
+            self.callable_frontiers_at_depth.pop();
+        }
+    }
+
+    fn finish(mut self) -> Result<Facts, AnalysisError> {
+        if self.callable_depth != 0
+            || !self.callable_frontier_starts.is_empty()
+            || !self.active_callable_frontiers.is_empty()
+            || !self.callable_frontiers_at_depth.is_empty()
+        {
+            self.invariant_error = Some("callable frontier scopes did not close".to_owned());
+        }
         if let Some(detail) = self.invariant_error {
             return Err(AnalysisError::Invariant(detail));
         }
@@ -1083,26 +1352,6 @@ pub(crate) fn first_descendant_with_kind<'tree>(
         WalkEvent::Enter(candidate) if candidate.kind() == kind => Some(candidate),
         WalkEvent::Enter(_) | WalkEvent::Leave(_) => None,
     })
-}
-
-pub(crate) fn outermost_node_ids_matching(
-    node: Node<'_>,
-    matches: impl FnMut(&str) -> bool,
-) -> Vec<usize> {
-    outermost_matching_nodes(node, matches)
-        .into_iter()
-        .map(|candidate| candidate.id())
-        .collect()
-}
-
-#[cfg(test)]
-pub(crate) fn reset_outermost_scan_visits() {
-    super::walk::reset_outermost_visits();
-}
-
-#[cfg(test)]
-pub(crate) fn outermost_scan_visits() -> usize {
-    super::walk::outermost_visits()
 }
 
 #[cfg(test)]

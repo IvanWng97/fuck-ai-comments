@@ -555,6 +555,38 @@ fn kotlin_lambda_assignment_edit_stales_its_leading_comment() {
 }
 
 #[test]
+fn kotlin_nested_branch_assignments_preserve_lambda_ownership() {
+    let before = concat!(
+        "root = if (enabled) first = if (enabled) second = {\n",
+        "    // Coupled to the innermost installed handler.\n",
+        "    oldCall()\n",
+        "} else fallback else fallback\n",
+    );
+    let after = before.replace("oldCall", "newCall");
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Handler.kts"),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new("Handler.kts"),
+            text: &after,
+        },
+    )
+    .expect("valid nested Kotlin branch-assignment change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed"
+                && finding.line == 2
+                && finding.message.contains("leaf `second`")
+        }),
+        "the innermost assignment must retain the lambda body and identity: {findings:#?}"
+    );
+}
+
+#[test]
 fn kotlin_lambda_assignment_keeps_nested_lambda_owner_independent() {
     let before = concat!(
         "handler = {\n",

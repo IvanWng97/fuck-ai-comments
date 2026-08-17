@@ -3,15 +3,18 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, DirectivePlacement, LanguageSpec, OwnerCandidate,
-    OwnerLocation, analyze, canonical_syntax, direct_named_child, document, node_text,
-    outermost_node_ids_matching,
+    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, CallableSubtrees, DirectivePlacement, LanguageSpec,
+    OwnerCandidate, OwnerLocation, analyze, canonical_syntax, direct_named_child, document,
+    node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Swift;
+
+// SwiftLint reserves only the exact whitespace-delimited hyphen; bare hyphens remain rule text.
+const SWIFTLINT_TRAILING_COMMENT_DELIMITER: &str = " - ";
 
 pub(crate) fn analyze_file(
     path: &Path,
@@ -40,14 +43,19 @@ impl LanguageSpec for Swift {
         AttachmentIndex::from_root(root, source)
     }
 
+    fn callable_kind(self) -> Option<fn(&str) -> bool> {
+        Some(is_swift_callable)
+    }
+
     fn owner(
         self,
         node: Node<'_>,
         _location: OwnerLocation<'_>,
         source: &str,
         _function_depth: usize,
+        callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate> {
-        owner_from_node(node, source)
+        owner_from_node(node, source, callable_subtrees)
     }
 
     fn classify_comment(
@@ -69,7 +77,11 @@ impl LanguageSpec for Swift {
     }
 }
 
-fn owner_from_node(node: Node<'_>, source: &str) -> Option<OwnerCandidate> {
+fn owner_from_node(
+    node: Node<'_>,
+    source: &str,
+    callable_subtrees: &CallableSubtrees,
+) -> Option<OwnerCandidate> {
     if let Some(segment) = type_segment(node, source) {
         let name = node
             .child_by_field_name("name")
@@ -87,8 +99,10 @@ fn owner_from_node(node: Node<'_>, source: &str) -> Option<OwnerCandidate> {
             Vec::new(),
         ));
     }
-    if let Some((name, suppressed)) = callable_binding(node, source) {
-        return Some(OwnerCandidate::leaf(Span::from_node(node), name).suppressing(suppressed));
+    if let Some((name, roots)) = callable_binding(node, source, callable_subtrees) {
+        return Some(
+            OwnerCandidate::leaf(Span::from_node(node), name).suppressing_callable_frontiers(roots),
+        );
     }
     let function_name = match node.kind() {
         "function_declaration" if node.child_by_field_name("body").is_some() => node
@@ -130,11 +144,14 @@ fn swiftlint_directive(comment: &str) -> Option<DirectivePlacement> {
     if body.starts_with('/') {
         return None;
     }
-    let body = body.trim();
+    let body = body.trim_start();
     let separator = body.find(char::is_whitespace)?;
     let (command, rules) = body.split_at(separator);
+    let rules = rules
+        .split_once(SWIFTLINT_TRAILING_COMMENT_DELIMITER)
+        .map_or(rules, |(rules, _)| rules);
     let placement = match command {
-        "swiftlint:disable" | "swiftlint:enable" => DirectivePlacement::Region,
+        "swiftlint:disable" | "swiftlint:enable" => DirectivePlacement::FreeStanding,
         "swiftlint:disable:next" | "swiftlint:enable:next" => DirectivePlacement::NextLine,
         "swiftlint:disable:this" | "swiftlint:enable:this" => DirectivePlacement::SameLine,
         "swiftlint:disable:previous" | "swiftlint:enable:previous" => {
@@ -146,18 +163,7 @@ fn swiftlint_directive(comment: &str) -> Option<DirectivePlacement> {
 }
 
 fn valid_swiftlint_rule_list(rules: &str) -> bool {
-    let mut rules = rules.split_ascii_whitespace();
-    let Some(first) = rules.next() else {
-        return false;
-    };
-    valid_swiftlint_rule(first) && rules.all(valid_swiftlint_rule)
-}
-
-fn valid_swiftlint_rule(rule: &str) -> bool {
-    rule.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-        && rule
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    rules.split_whitespace().next().is_some()
 }
 
 fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
@@ -296,25 +302,33 @@ fn grouped_property_name(node: Node<'_>, source: &str) -> Option<String> {
     (!names.is_empty()).then(|| names.join(","))
 }
 
-fn callable_binding(node: Node<'_>, source: &str) -> Option<(String, Vec<usize>)> {
+fn callable_binding(
+    node: Node<'_>,
+    source: &str,
+    callable_subtrees: &CallableSubtrees,
+) -> Option<(String, Vec<usize>)> {
     if node.kind() == "property_declaration" && !property_has_body(node) {
         let name = grouped_property_name(node, source)?;
         let mut cursor = node.walk();
-        let mut suppressed = Vec::new();
+        let mut roots = Vec::new();
         for value in node.children_by_field_name("value", &mut cursor) {
-            suppressed.extend(outermost_node_ids_matching(value, is_swift_callable));
+            if callable_subtrees.contains_callable(value) {
+                roots.push(value.id());
+            }
         }
-        if !suppressed.is_empty() {
-            return Some((name, suppressed));
+        if !roots.is_empty() {
+            return Some((name, roots));
         }
     }
     let target = assignment_target(node)?;
     let mut cursor = node.walk();
-    let mut suppressed = Vec::new();
+    let mut roots = Vec::new();
     for result in node.children_by_field_name("result", &mut cursor) {
-        suppressed.extend(outermost_node_ids_matching(result, is_swift_callable));
+        if callable_subtrees.contains_callable(result) {
+            roots.push(result.id());
+        }
     }
-    (!suppressed.is_empty()).then(|| (node_text(target, source).trim().to_owned(), suppressed))
+    (!roots.is_empty()).then(|| (node_text(target, source).trim().to_owned(), roots))
 }
 
 fn is_swift_callable(kind: &str) -> bool {
@@ -408,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_bindings_scan_each_outer_closure_once() {
+    fn nested_bindings_register_each_callable_frontier_once() {
         let depth = 64;
         let mut source = String::new();
         for index in 0..depth {
@@ -416,9 +430,10 @@ mod tests {
         }
         source.push_str("1\n");
         source.push_str(&"}\n".repeat(depth));
-        crate::languages::tree::reset_outermost_scan_visits();
+        crate::languages::tree::reset_callable_frontier_counts();
         parse_file(Path::new("Nested.swift"), &source).expect("valid Swift");
-        assert_eq!(crate::languages::tree::outermost_scan_visits(), depth);
+        let (_, candidates, registrations) = crate::languages::tree::callable_frontier_counts();
+        assert_eq!((candidates, registrations), (depth, depth));
     }
 
     #[test]

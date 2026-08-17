@@ -480,6 +480,54 @@ fn anonymous_duplicate_owners_without_exact_anchors_fail_closed() {
 }
 
 #[test]
+fn flat_anonymous_siblings_pair_through_the_public_change_seam() {
+    const CALLBACKS: usize = 256;
+    const CHANGED: usize = CALLBACKS / 2;
+
+    let callbacks = |changed| {
+        let mut source = String::new();
+        for index in 0..CALLBACKS {
+            writeln!(source, "consume(() => {{").expect("writing to a String cannot fail");
+            writeln!(
+                source,
+                "    // Callback {index} relies on its configured target."
+            )
+            .expect("writing to a String cannot fail");
+            writeln!(source, "    stable{index}();").expect("writing to a String cannot fail");
+            if changed && index == CHANGED {
+                writeln!(source, "    changed{index}();").expect("writing to a String cannot fail");
+            } else {
+                writeln!(source, "    original{index}();")
+                    .expect("writing to a String cannot fail");
+            }
+            writeln!(source, "}});").expect("writing to a String cannot fail");
+        }
+        source
+    };
+    let before = callbacks(false);
+    let after = callbacks(true);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &after,
+        },
+    )
+    .expect("exact anchors disambiguate flat anonymous callbacks");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(stale_lines, [CHANGED * 5 + 2]);
+}
+
+#[test]
 fn format_only_owner_move_does_not_stale_its_comment() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
