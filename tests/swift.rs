@@ -730,6 +730,39 @@ fn decorated_multiline_swiftformat_boundary_modifiers_do_not_consume_narrative_b
 }
 
 #[test]
+fn compact_and_doc_style_swiftformat_decorations_do_not_consume_narrative_budget() {
+    for (decoration, marker) in [
+        (
+            "compact star",
+            "/*\n     *swiftformat:disable:next redundantSelf */",
+        ),
+        (
+            "documentation block",
+            "/**\n     * swiftformat:disable:next redundantSelf */",
+        ),
+        (
+            "CRLF compact star",
+            "/*\r\n     *swiftformat:disable:next redundantSelf */",
+        ),
+    ] {
+        let source = format!(
+            "func work() {{\n    {marker}\n    self.perform()\n    // ordinary explanation\n    finish()\n}}\n"
+        );
+
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: &source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings.is_empty(),
+            "a {decoration} is structural SwiftFormat syntax: {findings:#?}"
+        );
+    }
+}
+
+#[test]
 fn multiline_swiftformat_boundary_modifier_with_narrative_row_remains_narrative() {
     let source = concat!(
         "func work() {\n",

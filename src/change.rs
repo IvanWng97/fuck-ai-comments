@@ -317,32 +317,39 @@ fn connected_owner_scores(
     anchors: &LineAnchors,
     pairs: &Pairing,
 ) -> Result<Vec<(usize, usize, usize)>, AnalysisError> {
-    let mut before_sweep = OwnerLineSweep::new(
+    let mut before_sweep = OwnerRankSweep::new(
         before,
         before_children
             .iter()
             .copied()
             .filter(|index| pairs.before_to_after[*index].is_none()),
+        |owner| anchors.before_owner_ranks(owner),
     );
-    let mut after_sweep = OwnerLineSweep::new(
+    let mut after_sweep = OwnerRankSweep::new(
         after,
         after_children
             .iter()
             .copied()
             .filter(|index| pairs.after_to_before[*index].is_none()),
+        |owner| anchors.after_owner_ranks(owner),
     );
-    let Some(before_lines) = before_sweep.line_range() else {
-        return Ok(Vec::new());
-    };
-    if after_sweep.is_empty() {
+    if before_sweep.is_empty() || after_sweep.is_empty() {
         return Ok(Vec::new());
     }
 
+    let mut boundaries: Vec<_> = before_sweep
+        .boundaries()
+        .chain(after_sweep.boundaries())
+        .collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
     let mut scores = BTreeMap::new();
-    for (&before_line, &after_line) in anchors.owner.range(before_lines) {
-        let before_by_kind =
-            unique_owner_evidence_by_kind(before, before_sweep.owners_at(before_line));
-        let after_by_kind = unique_owner_evidence_by_kind(after, after_sweep.owners_at(after_line));
+    for segment in boundaries.windows(2) {
+        let rank = segment[0];
+        let anchor_count = segment[1] - rank;
+        let before_by_kind = unique_owner_evidence_by_kind(before, before_sweep.owners_at(rank));
+        let after_by_kind = unique_owner_evidence_by_kind(after, after_sweep.owners_at(rank));
         for (kind, before_evidence) in before_by_kind {
             let Some(after_evidence) = after_by_kind.get(&kind).copied() else {
                 continue;
@@ -352,10 +359,10 @@ fn connected_owner_scores(
             else {
                 return Err(AnalysisError::AmbiguousChange(format!(
                     "exact line anchor {} connects multiple {kind:?} sibling owners",
-                    before_line + 1
+                    anchors.owner[rank].0 + 1
                 )));
             };
-            *scores.entry((before_index, after_index)).or_insert(0) += 1;
+            *scores.entry((before_index, after_index)).or_insert(0) += anchor_count;
         }
     }
     Ok(scores
@@ -372,10 +379,10 @@ enum OwnerEvidence {
 
 fn unique_owner_evidence_by_kind(
     document: &ParsedFile,
-    candidates: &[usize],
+    candidates: impl IntoIterator<Item = usize>,
 ) -> BTreeMap<OwnerKind, OwnerEvidence> {
     let mut by_kind = BTreeMap::new();
-    for &index in candidates {
+    for index in candidates {
         #[cfg(test)]
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| {
             evaluations.set(evaluations.get() + 1);
@@ -388,23 +395,41 @@ fn unique_owner_evidence_by_kind(
     by_kind
 }
 
-struct OwnerLineSweep<'document> {
-    document: &'document ParsedFile,
-    owners: Vec<usize>,
-    first_active: usize,
-    past_active: usize,
-    previous_line: Option<usize>,
+struct RankedOwner {
+    index: usize,
+    start_rank: usize,
+    end_rank: usize,
 }
 
-impl<'document> OwnerLineSweep<'document> {
-    fn new(document: &'document ParsedFile, owners: impl IntoIterator<Item = usize>) -> Self {
-        let owners: Vec<_> = owners.into_iter().collect();
+struct OwnerRankSweep {
+    owners: Vec<RankedOwner>,
+    first_active: usize,
+    past_active: usize,
+    previous_rank: Option<usize>,
+}
+
+impl OwnerRankSweep {
+    fn new(
+        document: &ParsedFile,
+        owners: impl IntoIterator<Item = usize>,
+        rank_range: impl Fn(&OwnerSnapshot) -> std::ops::Range<usize>,
+    ) -> Self {
+        let owners = owners
+            .into_iter()
+            .filter_map(|index| {
+                let ranks = rank_range(&document.owners[index]);
+                (ranks.start < ranks.end).then_some(RankedOwner {
+                    index,
+                    start_rank: ranks.start,
+                    end_rank: ranks.end,
+                })
+            })
+            .collect();
         Self {
-            document,
             owners,
             first_active: 0,
             past_active: 0,
-            previous_line: None,
+            previous_rank: None,
         }
     }
 
@@ -412,34 +437,29 @@ impl<'document> OwnerLineSweep<'document> {
         self.owners.is_empty()
     }
 
-    fn line_range(&self) -> Option<std::ops::Range<usize>> {
-        let first = &self.document.owners[*self.owners.first()?].span;
-        let last = &self.document.owners[*self.owners.last()?].span;
-        Some(first.start_line.saturating_sub(1)..last.end_line)
+    fn boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+        self.owners
+            .iter()
+            .flat_map(|owner| [owner.start_rank, owner.end_rank])
     }
 
-    fn owners_at(&mut self, line: usize) -> &[usize] {
-        debug_assert!(self.previous_line.is_none_or(|previous| previous <= line));
+    fn owners_at(&mut self, rank: usize) -> impl Iterator<Item = usize> + '_ {
+        debug_assert!(self.previous_rank.is_none_or(|previous| previous <= rank));
         while self.first_active < self.owners.len()
-            && self.document.owners[self.owners[self.first_active]]
-                .span
-                .end_line
-                <= line
+            && self.owners[self.first_active].end_rank <= rank
         {
             self.first_active += 1;
         }
         self.past_active = self.past_active.max(self.first_active);
         while self.past_active < self.owners.len()
-            && self.document.owners[self.owners[self.past_active]]
-                .span
-                .start_line
-                .saturating_sub(1)
-                <= line
+            && self.owners[self.past_active].start_rank <= rank
         {
             self.past_active += 1;
         }
-        self.previous_line = Some(line);
-        &self.owners[self.first_active..self.past_active]
+        self.previous_rank = Some(rank);
+        self.owners[self.first_active..self.past_active]
+            .iter()
+            .map(|owner| owner.index)
     }
 }
 
@@ -883,7 +903,7 @@ fn owner_label(owner: &OwnerSnapshot) -> String {
 
 struct LineAnchors {
     exact: BTreeMap<usize, usize>,
-    owner: BTreeMap<usize, usize>,
+    owner: Vec<(usize, usize)>,
 }
 
 impl LineAnchors {
@@ -902,7 +922,7 @@ impl LineAnchors {
         let (old_comment_lines, new_comment_lines) = (comment_lines(old), comment_lines(new));
         let source_lines: Vec<_> = before.lines().collect();
         let mut exact = BTreeMap::new();
-        let mut owner = BTreeMap::new();
+        let mut owner = Vec::new();
         for operation in diff
             .ops()
             .iter()
@@ -916,11 +936,36 @@ impl LineAnchors {
                         .get(old_line)
                         .is_some_and(|line| line.chars().any(char::is_alphanumeric))
                 {
-                    owner.insert(old_line, new_line);
+                    owner.push((old_line, new_line));
                 }
             }
         }
+        debug_assert!(
+            owner
+                .windows(2)
+                .all(|pair| { pair[0].0 < pair[1].0 && pair[0].1 < pair[1].1 })
+        );
         Self { exact, owner }
+    }
+
+    fn before_owner_ranks(&self, owner: &OwnerSnapshot) -> std::ops::Range<usize> {
+        let start_line = owner.span.start_line.saturating_sub(1);
+        let end_line = owner.span.end_line;
+        self.owner
+            .partition_point(|&(before_line, _)| before_line < start_line)
+            ..self
+                .owner
+                .partition_point(|&(before_line, _)| before_line < end_line)
+    }
+
+    fn after_owner_ranks(&self, owner: &OwnerSnapshot) -> std::ops::Range<usize> {
+        let start_line = owner.span.start_line.saturating_sub(1);
+        let end_line = owner.span.end_line;
+        self.owner
+            .partition_point(|&(_, after_line)| after_line < start_line)
+            ..self
+                .owner
+                .partition_point(|&(_, after_line)| after_line < end_line)
     }
 
     fn after_line(&self, one_based_old_line: usize) -> Option<usize> {
@@ -1000,6 +1045,39 @@ mod tests {
         )
         .expect_err("same-line anonymous siblings are ambiguous");
         assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
+    }
+
+    fn deeply_nested_anonymous_callbacks(depth: usize, version: usize) -> String {
+        let mut source = format!("const VERSION = {version};\n");
+        for level in 0..depth {
+            writeln!(source, "(() => {{ stable_{level:08}();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("0\n");
+        for _ in 0..depth {
+            source.push_str("})();\n");
+        }
+        source
+    }
+
+    fn nested_anonymous_owner_anchor_evaluations(depth: usize) -> usize {
+        let before = deeply_nested_anonymous_callbacks(depth, 1);
+        let after = deeply_nested_anonymous_callbacks(depth, 2);
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| evaluations.set(0));
+
+        analyze(
+            SourceFile {
+                path: Path::new("nested.js"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("nested.js"),
+                text: &after,
+            },
+        )
+        .expect("nested anonymous owners pair by exact anchors");
 
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
     }
@@ -1087,6 +1165,13 @@ mod tests {
         for count in [64, 128, 256] {
             assert_eq!(owner_anchor_candidate_evaluations(count), 2 * count);
         }
+    }
+
+    #[test]
+    fn deep_anonymous_owner_anchor_candidates_are_evaluated_linearly() {
+        let evaluations = [10, 20, 40, 80].map(nested_anonymous_owner_anchor_evaluations);
+
+        assert_eq!(evaluations, [20, 40, 80, 160]);
     }
 
     #[test]

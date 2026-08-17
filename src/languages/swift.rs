@@ -167,30 +167,58 @@ fn valid_swiftlint_rule_list(rules: &str) -> bool {
 }
 
 fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
-    let (body, multiline_block) = if let Some(body) = comment.strip_prefix("//") {
+    if let Some(body) = comment.strip_prefix("//") {
         if body.starts_with('/') {
             return None;
         }
-        (body, false)
-    } else {
-        let body = comment.strip_prefix("/*")?.strip_suffix("*/")?;
-        (body, body.contains(['\r', '\n']))
-    };
-    let starts_on_opening_row =
-        !body[..body.len() - body.trim_start().len()].contains(['\r', '\n']);
-    let ends_on_closing_row = !body[body.trim_end().len()..].contains(['\r', '\n']);
-    let body = body.trim();
-    if body.contains(['\r', '\n']) {
-        return None;
+        let body = body.trim();
+        return (!body.contains(['\r', '\n']))
+            .then(|| swiftformat_command(body))
+            .flatten();
     }
-    let body = if multiline_block
-        && let Some(decorated) = body.strip_prefix('*')
-        && decorated.starts_with(char::is_whitespace)
-    {
-        decorated.trim_start()
-    } else {
-        body
-    };
+
+    let body = comment.strip_prefix("/*")?.strip_suffix("*/")?;
+    swiftformat_block_directive(body)
+}
+
+fn swiftformat_block_directive(body: &str) -> Option<DirectivePlacement> {
+    let mut candidate = None;
+    let mut row_count = 0;
+    for row in body.split(['\r', '\n']) {
+        let row_index = row_count;
+        row_count += 1;
+        let row = row.trim();
+        if row
+            .chars()
+            .all(|character| character.is_whitespace() || character == '*')
+        {
+            continue;
+        }
+        let row = row
+            .strip_prefix('*')
+            .map_or(row, |decorated| decorated.trim_start());
+        let placement = swiftformat_command(row)?;
+        if candidate.replace((placement, row_index)).is_some() {
+            return None;
+        }
+    }
+
+    let (placement, candidate_row) = candidate?;
+    let starts_on_opening_row = candidate_row == 0;
+    let ends_on_closing_row = candidate_row + 1 == row_count;
+    match placement {
+        DirectivePlacement::FreeStanding => Some(placement),
+        DirectivePlacement::NextLine if ends_on_closing_row => Some(placement),
+        DirectivePlacement::SameLine | DirectivePlacement::PreviousLine
+            if starts_on_opening_row =>
+        {
+            Some(placement)
+        }
+        _ => None,
+    }
+}
+
+fn swiftformat_command(body: &str) -> Option<DirectivePlacement> {
     let separator = body.find(' ')?;
     let (command, arguments) = body.split_at(separator);
     let (placement, valid_arguments) = match command {
@@ -212,16 +240,7 @@ fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
         ),
         _ => return None,
     };
-    let block_placement_is_valid = !multiline_block
-        || match placement {
-            DirectivePlacement::FreeStanding => true,
-            DirectivePlacement::NextLine => ends_on_closing_row,
-            DirectivePlacement::SameLine | DirectivePlacement::PreviousLine => {
-                starts_on_opening_row
-            }
-            _ => false,
-        };
-    (valid_arguments && block_placement_is_valid).then_some(placement)
+    valid_arguments.then_some(placement)
 }
 
 fn valid_swiftformat_rule_list(rules: &str) -> bool {

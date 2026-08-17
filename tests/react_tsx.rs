@@ -349,6 +349,67 @@ fn jsx_wrapper_line_cannot_replace_the_comment_end_line() {
 }
 
 #[test]
+fn jsx_mixed_wrapper_prettier_ignore_cannot_target_following_sibling() {
+    let source = concat!(
+        "const Card = () => (\n",
+        "  <main>\n",
+        "    {value /* prettier-ignore */}\n",
+        "    <span data-id='one' />\n",
+        "    {/* ordinary one */}\n",
+        "    <span data-id='two' />\n",
+        "    {/* ordinary two */}\n",
+        "    <span data-id='three' />\n",
+        "    {/* ordinary three */}\n",
+        "    <span data-id='four' />\n",
+        "  </main>\n",
+        ");\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Card.tsx"),
+        text: source,
+    })
+    .expect("valid TSX should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "a directive inside a mixed JSX wrapper cannot target the next sibling: {findings:#?}"
+    );
+}
+
+#[test]
+fn jsx_typescript_suppression_targets_a_mixed_wrapper_on_the_next_line() {
+    let source = concat!(
+        "const Card = () => (\n",
+        "  <main>\n",
+        "    {/* @ts-ignore */}\n",
+        "    {value /* ordinary one */}\n",
+        "    <span data-id='one' />\n",
+        "    {/* ordinary two */}\n",
+        "    <span data-id='two' />\n",
+        "    {/* ordinary three */}\n",
+        "    <span data-id='three' />\n",
+        "  </main>\n",
+        ");\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Card.tsx"),
+        text: source,
+    })
+    .expect("valid TSX should parse");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
+        "a suppression directive targets a mixed JSX wrapper on the next line: {findings:#?}"
+    );
+}
+
+#[test]
 fn jsx_line_start_prettier_ignore_targets_across_blank_lines() {
     let source = concat!(
         "const Card = () => (\n",

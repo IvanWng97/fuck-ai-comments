@@ -246,11 +246,17 @@ impl<'source> AttachmentIndexBuilder<'source> {
             return;
         };
         if let Some(parent) = self.frames.last_mut() {
+            let transparent_comments =
+                if frame.is_transparent_comment_wrapper && !frame.has_non_comment_named_child {
+                    frame.transparent_comments
+                } else {
+                    Vec::new()
+                };
             parent.record_child(
                 node,
                 frame.starts_line,
                 frame.is_preamble_trivia,
-                frame.transparent_comments,
+                transparent_comments,
                 &mut self.comments,
             );
         }
@@ -263,6 +269,7 @@ struct AttachmentFrame {
     is_transparent_comment_wrapper: bool,
     starts_line: bool,
     is_preamble_trivia: bool,
+    has_non_comment_named_child: bool,
     preamble_open: bool,
     last_named_child: Option<NamedChild>,
     pending_next_node_comments: Vec<PendingNextNodeComment>,
@@ -283,6 +290,7 @@ impl AttachmentFrame {
             is_transparent_comment_wrapper,
             starts_line,
             is_preamble_trivia,
+            has_non_comment_named_child: false,
             preamble_open: true,
             last_named_child: None,
             pending_next_node_comments: Vec::new(),
@@ -302,6 +310,9 @@ impl AttachmentFrame {
             return;
         }
         let child = NamedChild::new(node, starts_line, transparent_comments);
+        if !child.is_comment_boundary() {
+            self.has_non_comment_named_child = true;
+        }
         if child.is_comment {
             let attachment = comments.entry(child.node_id).or_default();
             attachment.starts_line = starts_line;
