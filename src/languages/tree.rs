@@ -1587,6 +1587,11 @@ pub(crate) fn direct_named_child<'tree>(node: Node<'tree>, kind: &str) -> Option
         .find(|child| child.kind() == kind)
 }
 
+pub(crate) fn has_direct_child(node: Node<'_>, kind: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(|child| child.kind() == kind)
+}
+
 pub(crate) fn starts_physical_line(node: Node<'_>, source: &str) -> bool {
     let line_start = source[..node.start_byte()]
         .rfind('\n')

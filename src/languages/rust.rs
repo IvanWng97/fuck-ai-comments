@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use super::tree::{
     CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, ancestors,
-    canonical_syntax, document, function_name, node_text,
+    canonical_syntax, document, function_name, has_direct_child, node_text,
 };
 use super::walk::{WalkEvent, events};
 use crate::model::{AnalysisError, Finding, Selection};
@@ -366,9 +366,7 @@ fn is_unsafe_construct(node: Node<'_>) -> bool {
 }
 
 fn has_unsafe_keyword(node: Node<'_>) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .any(|child| child.kind() == "unsafe")
+    has_direct_child(node, "unsafe")
 }
 
 fn is_adjacent(left: Node<'_>, right: Node<'_>, source: &str) -> bool {

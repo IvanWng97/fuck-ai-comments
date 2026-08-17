@@ -4,7 +4,7 @@ use tree_sitter::Node;
 
 use super::tree::{
     ANONYMOUS_FUNCTION_NAME, CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation,
-    analyze, canonical_syntax, direct_named_child, document, node_text,
+    analyze, canonical_syntax, direct_named_child, document, has_direct_child, node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -187,11 +187,6 @@ fn parameter_type(parameter: Node<'_>) -> Option<Node<'_>> {
     parameter
         .named_children(&mut cursor)
         .find(|child| child.kind() != "identifier")
-}
-
-fn has_direct_child(node: Node<'_>, kind: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor).any(|child| child.kind() == kind)
 }
 
 fn single_val_name(node: Node<'_>) -> Option<Node<'_>> {

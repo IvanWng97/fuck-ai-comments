@@ -5,7 +5,8 @@ use tree_sitter::Node;
 use super::tree::{
     ANONYMOUS_FUNCTION_NAME, AttachmentIndex, AttachmentSyntax, CallableSubtrees,
     DirectivePlacement, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, document,
-    first_descendant_with_kind, function_name as default_function_name, node_text,
+    first_descendant_with_kind, function_name as default_function_name, has_direct_child,
+    node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -383,14 +384,7 @@ fn is_callable_binding_owner(kind: &str) -> bool {
 }
 
 fn default_export_value(owner: Node<'_>) -> Option<Node<'_>> {
-    if owner.kind() != "export_statement" {
-        return None;
-    }
-    let mut cursor = owner.walk();
-    if !owner
-        .children(&mut cursor)
-        .any(|child| child.kind() == "default")
-    {
+    if owner.kind() != "export_statement" || !has_direct_child(owner, "default") {
         return None;
     }
     owner.child_by_field_name("value")

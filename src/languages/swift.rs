@@ -5,7 +5,7 @@ use tree_sitter::Node;
 use super::tree::{
     ANONYMOUS_FUNCTION_NAME, AttachmentIndex, AttachmentSyntax, CallableSubtrees,
     DirectivePlacement, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, canonical_syntax,
-    direct_named_child, document, node_text,
+    direct_named_child, document, has_direct_child, node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -387,11 +387,6 @@ fn canonical_name(node: Node<'_>, source: &str) -> String {
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect()
-}
-
-fn has_direct_child(node: Node<'_>, kind: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor).any(|child| child.kind() == kind)
 }
 
 #[cfg(test)]
