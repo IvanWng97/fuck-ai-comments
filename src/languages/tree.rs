@@ -1332,10 +1332,6 @@ fn assign_code(
 pub(crate) fn function_name(node: Node<'_>, location: OwnerLocation<'_>, source: &str) -> String {
     node.child_by_field_name("name")
         .or_else(|| {
-            first_descendant_with_kind(node, "function_definition")
-                .and_then(|function| function.child_by_field_name("name"))
-        })
-        .or_else(|| {
             location
                 .parent()
                 .and_then(|parent| parent.child_by_field_name("name"))
@@ -1348,10 +1344,29 @@ pub(crate) fn first_descendant_with_kind<'tree>(
     node: Node<'tree>,
     kind: &str,
 ) -> Option<Node<'tree>> {
-    events(node).find_map(|event| match event {
-        WalkEvent::Enter(candidate) if candidate.kind() == kind => Some(candidate),
-        WalkEvent::Enter(_) | WalkEvent::Leave(_) => None,
+    events(node).find_map(|event| {
+        #[cfg(test)]
+        FIRST_DESCENDANT_VISITS.with(|visits| visits.set(visits.get() + 1));
+        match event {
+            WalkEvent::Enter(candidate) if candidate.kind() == kind => Some(candidate),
+            WalkEvent::Enter(_) | WalkEvent::Leave(_) => None,
+        }
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    static FIRST_DESCENDANT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_first_descendant_visits() {
+    FIRST_DESCENDANT_VISITS.with(|visits| visits.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn first_descendant_visits() -> usize {
+    FIRST_DESCENDANT_VISITS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

@@ -65,7 +65,7 @@ impl LanguageSpec for Swift {
         context: &Self::Context,
     ) -> Option<CommentKind> {
         match node.kind() {
-            "comment"
+            "comment" | "multiline_comment"
                 if swift_directive(node_text(node, source))
                     .is_some_and(|placement| context.is_attached(node, placement)) =>
             {
@@ -145,7 +145,7 @@ fn swiftlint_directive(comment: &str) -> Option<DirectivePlacement> {
         return None;
     }
     let body = body.trim_start();
-    let separator = body.find(char::is_whitespace)?;
+    let separator = body.find(' ')?;
     let (command, rules) = body.split_at(separator);
     let rules = rules
         .split_once(SWIFTLINT_TRAILING_COMMENT_DELIMITER)
@@ -167,16 +167,20 @@ fn valid_swiftlint_rule_list(rules: &str) -> bool {
 }
 
 fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
-    let body = comment.strip_prefix("//")?;
-    if body.starts_with('/') {
-        return None;
+    let body = if let Some(body) = comment.strip_prefix("//") {
+        if body.starts_with('/') {
+            return None;
+        }
+        body
+    } else {
+        comment.strip_prefix("/*")?.strip_suffix("*/")?
     }
-    let body = body.trim();
+    .trim();
     let separator = body.find(char::is_whitespace)?;
     let (command, arguments) = body.split_at(separator);
     let (placement, valid_arguments) = match command {
         "swiftformat:disable" | "swiftformat:enable" => (
-            DirectivePlacement::Region,
+            DirectivePlacement::FreeStanding,
             valid_swiftformat_rule_list(arguments),
         ),
         "swiftformat:disable:next" | "swiftformat:enable:next" => (
@@ -191,29 +195,15 @@ fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
             DirectivePlacement::PreviousLine,
             valid_swiftformat_rule_list(arguments),
         ),
-        "swiftformat:options" => (
-            DirectivePlacement::Region,
-            valid_swiftformat_options(arguments),
-        ),
-        "swiftformat:options:next" => (
-            DirectivePlacement::NextLine,
-            valid_swiftformat_options(arguments),
-        ),
-        "swiftformat:options:this" => (
-            DirectivePlacement::SameLine,
-            valid_swiftformat_options(arguments),
-        ),
-        "swiftformat:options:previous" => (
-            DirectivePlacement::PreviousLine,
-            valid_swiftformat_options(arguments),
-        ),
         _ => return None,
     };
     valid_arguments.then_some(placement)
 }
 
 fn valid_swiftformat_rule_list(rules: &str) -> bool {
-    let mut rules = rules.split_ascii_whitespace();
+    let mut rules = rules
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .filter(|rule| !rule.is_empty());
     let Some(first) = rules.next() else {
         return false;
     };
@@ -227,34 +217,6 @@ fn valid_swiftformat_rule(rule: &str) -> bool {
         && rule
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-fn valid_swiftformat_options(arguments: &str) -> bool {
-    let mut arguments = arguments.split_ascii_whitespace();
-    let mut found = false;
-    while let Some(option) = arguments.next() {
-        let Some(name) = option.strip_prefix("--") else {
-            return false;
-        };
-        if !valid_swiftformat_option_name(name) {
-            return false;
-        }
-        let Some(value) = arguments.next() else {
-            return false;
-        };
-        if value.starts_with("--") || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
-            return false;
-        }
-        found = true;
-    }
-    found
-}
-
-fn valid_swiftformat_option_name(name: &str) -> bool {
-    name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn property_has_body(node: Node<'_>) -> bool {

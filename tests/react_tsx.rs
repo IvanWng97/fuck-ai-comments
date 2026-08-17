@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 
 use fuck_ai_comments::{SourceFile, analyze_all, analyze_change};
@@ -1275,6 +1276,35 @@ fn malformed_unknown_or_nonpreamble_triple_slash_comments_remain_narrative() {
             .iter()
             .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
         "a valid tag after a declaration is ordinary narrative: {findings:#?}"
+    );
+}
+
+#[test]
+fn long_unknown_triple_slash_attribute_lists_remain_narrative() {
+    const ATTRIBUTE_NAME_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+
+    let mut directive = String::from("/// <reference");
+    for index in 0..1_000 {
+        let radix = ATTRIBUTE_NAME_ALPHABET.len();
+        let first = char::from(ATTRIBUTE_NAME_ALPHABET[(index / (radix * radix)) % radix]);
+        let second = char::from(ATTRIBUTE_NAME_ALPHABET[(index / radix) % radix]);
+        let third = char::from(ATTRIBUTE_NAME_ALPHABET[index % radix]);
+        write!(directive, " x{first}{second}{third}=\"value\"").unwrap();
+    }
+    directive.push_str(" />");
+    let source = format!("{}const value = 1;\n", format!("{directive}\n").repeat(4));
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("invalid.ts"),
+        text: &source,
+    })
+    .expect("malformed TypeScript comments should still parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "a long unknown attribute list remains narrative: {findings:#?}"
     );
 }
 

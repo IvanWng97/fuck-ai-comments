@@ -3,8 +3,8 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, document,
-    first_descendant_with_kind, function_name, node_text, starts_physical_line,
+    ANONYMOUS_FUNCTION_NAME, CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation,
+    analyze, document, first_descendant_with_kind, node_text, starts_physical_line,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -55,10 +55,13 @@ impl LanguageSpec for Python {
                 vec![format!("class:{name}")],
             ));
         }
-        if function_owner_node(node, location).is_some() {
+        if let Some(function) = function_owner_node(node, location) {
             return Some(OwnerCandidate::function(
                 Span::from_node(node),
-                function_name(node, location, source),
+                function
+                    .child_by_field_name("name")
+                    .map_or(ANONYMOUS_FUNCTION_NAME, |name| node_text(name, source))
+                    .to_owned(),
                 Vec::new(),
             ));
         }

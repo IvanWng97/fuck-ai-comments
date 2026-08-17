@@ -453,6 +453,17 @@ fn class_owner(
 mod tests {
     use super::*;
 
+    #[test]
+    fn unbound_nested_callable_names_do_not_scan_descendants() {
+        let depth = 64;
+        let source = format!("{}1;\n", "() => ".repeat(depth));
+        crate::languages::tree::reset_first_descendant_visits();
+
+        parse_file(Path::new("nested.js"), &source).expect("valid nested JavaScript callables");
+
+        assert_eq!(crate::languages::tree::first_descendant_visits(), 0);
+    }
+
     fn chained_assignment_frontier_counts(depth: usize, width: usize) -> (usize, usize, usize) {
         let assignments = (0..depth)
             .map(|index| format!("x{index} = "))

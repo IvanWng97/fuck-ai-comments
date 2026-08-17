@@ -470,6 +470,27 @@ fn swiftlint_directives_require_a_rule_identifier() {
 }
 
 #[test]
+fn swiftlint_directive_requires_ascii_space_before_rules() {
+    for separator in ["\t", "\u{2003}"] {
+        let source = format!(
+            "func work() {{\n    // swiftlint:disable:next{separator}force_cast\n    perform()\n    // ordinary explanation\n    finish()\n}}\n"
+        );
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: &source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "SwiftLint only accepts an ASCII space before rules ({separator:?}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
 fn trailing_swiftlint_region_directive_is_metadata() {
     for action in ["disable", "enable"] {
         let source = format!(
@@ -536,16 +557,100 @@ fn attached_swiftformat_directive_does_not_consume_narrative_budget() {
 }
 
 #[test]
+fn swiftformat_block_directive_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    /* swiftformat:disable:next redundantSelf */\n",
+        "    self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "an operational SwiftFormat block directive stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_comma_delimited_rule_list_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    // swiftformat:disable:next redundantSelf,braces\n",
+        "    self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat accepts comma-delimited rule lists: {findings:#?}"
+    );
+}
+
+#[test]
+fn trailing_swiftformat_region_directive_does_not_consume_narrative_budget() {
+    for directive in [
+        "// swiftformat:disable redundantSelf",
+        "/* swiftformat:disable redundantSelf */",
+    ] {
+        let source = format!(
+            "func work() {{\n    self.perform() {directive}\n    // ordinary explanation\n    finish()\n}}\n"
+        );
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: &source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings.is_empty(),
+            "a trailing SwiftFormat region directive is operational ({directive}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn swiftformat_directive_must_be_the_only_comment_content_before_arguments() {
+    for comment in [
+        "// note: swiftformat:disable:next redundantSelf",
+        "/* note: swiftformat:disable:next redundantSelf */",
+    ] {
+        let source = format!(
+            "func work() {{\n    {comment}\n    self.perform()\n    // ordinary explanation\n    finish()\n}}\n"
+        );
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: &source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "narrative before a SwiftFormat marker remains narrative ({comment}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
 fn malformed_or_unattached_swiftformat_prefixes_remain_narrative() {
     let sources = [
-        concat!(
-            "func work() {\n",
-            "    // swiftformat:disable:next redundantSelf,braces\n",
-            "    self.perform()\n",
-            "    // ordinary explanation\n",
-            "    finish()\n",
-            "}\n",
-        ),
         concat!(
             "func work() {\n",
             "    // swiftformat:disbible:next redundantSelf\n",
@@ -590,7 +695,7 @@ fn malformed_or_unattached_swiftformat_prefixes_remain_narrative() {
 }
 
 #[test]
-fn swiftformat_options_directives_follow_their_placement() {
+fn swiftformat_options_remain_narrative_without_authoritative_validation() {
     let sources = [
         concat!(
             "func work() {\n",
@@ -623,6 +728,14 @@ fn swiftformat_options_directives_follow_their_placement() {
             "    finish()\n",
             "}\n",
         ),
+        concat!(
+            "func work() {\n",
+            "    // swiftformat:options:next --foobar baz\n",
+            "    perform()\n",
+            "    // ordinary explanation\n",
+            "    finish()\n",
+            "}\n",
+        ),
     ];
 
     for source in sources {
@@ -633,8 +746,10 @@ fn swiftformat_options_directives_follow_their_placement() {
         .expect("valid Swift should parse");
 
         assert!(
-            findings.is_empty(),
-            "an attached SwiftFormat option directive is metadata: {findings:#?}"
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "SwiftFormat options stay narrative without authoritative validation: {findings:#?}"
         );
     }
 }
@@ -776,23 +891,23 @@ fn swiftlint_directives_cannot_bypass_the_absolute_owner_cap() {
 fn swiftformat_directives_cannot_bypass_the_absolute_owner_cap() {
     let source = concat!(
         "func work() {\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(1)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(2)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(3)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(4)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(5)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(6)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(7)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(8)\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.perform(9)\n",
         "}\n",
     );
@@ -844,7 +959,7 @@ fn swiftlint_directive_remains_stale_when_owner_code_changes() {
 fn swiftformat_directive_remains_stale_when_owner_code_changes() {
     let before = concat!(
         "func work() {\n",
-        "    // swiftformat:options:next --indent 2\n",
+        "    // swiftformat:disable:next redundantSelf\n",
         "    self.oldCall()\n",
         "}\n",
     );

@@ -33,8 +33,15 @@ pub(crate) fn analyze(
 
     let anchors = LineAnchors::new(before.text, after.text, &before_document, &after_document);
     let owners = pair_owners(&before_document, &after_document, &anchors)?;
+    let owner_changes = OwnerChangeIndex::new(&before_document, &after_document, &owners);
     let comments = pair_comments(&before_document, &after_document, &owners, &anchors)?;
-    let selection = semantic_selection(&before_document, &after_document, &owners, &comments);
+    let selection = semantic_selection(
+        &before_document,
+        &after_document,
+        &owners,
+        &comments,
+        &owner_changes,
+    );
 
     let mut findings = languages::analyze_file(after.path, after.text, &selection)?;
     findings.extend(change_findings(
@@ -43,6 +50,7 @@ pub(crate) fn analyze(
         &after_document,
         &owners,
         &comments,
+        &owner_changes,
     ));
     findings.sort();
     findings.dedup();
@@ -104,6 +112,55 @@ impl Pairing {
         self.before_to_after[before] = Some(after);
         self.after_to_before[after] = Some(before);
         Ok(())
+    }
+}
+
+struct OwnerChangeIndex {
+    identity_path_changed: Vec<bool>,
+}
+
+impl OwnerChangeIndex {
+    fn new(before: &ParsedFile, after: &ParsedFile, pairs: &Pairing) -> Self {
+        let children = owners_by_parent(before);
+        let mut identity_path_changed = vec![true; before.owners.len()];
+        let mut frontier = VecDeque::from([0]);
+
+        while let Some(before_index) = frontier.pop_front() {
+            let old_owner = &before.owners[before_index];
+            if let Some(after_index) = pairs.before_to_after[before_index] {
+                let new_owner = &after.owners[after_index];
+                let expected_after_parent = old_owner
+                    .parent
+                    .and_then(|parent| pairs.before_to_after[parent]);
+                let parent_path_changed = old_owner.parent.is_some_and(|parent| {
+                    before.owners[parent].kind == OwnerKind::Type && identity_path_changed[parent]
+                });
+                let type_parent_changed = old_owner.parent.is_some_and(|parent| {
+                    before.owners[parent].kind == OwnerKind::Type
+                        && new_owner.parent != expected_after_parent
+                });
+                identity_path_changed[before_index] = parent_path_changed
+                    || type_parent_changed
+                    || old_owner.kind != new_owner.kind
+                    || old_owner.identity != new_owner.identity;
+            }
+            frontier.extend(children[before_index].iter().copied());
+        }
+
+        Self {
+            identity_path_changed,
+        }
+    }
+
+    fn changed(
+        &self,
+        before: &ParsedFile,
+        after: &ParsedFile,
+        before_index: usize,
+        after_index: usize,
+    ) -> bool {
+        self.identity_path_changed[before_index]
+            || before.owners[before_index].code != after.owners[after_index].code
     }
 }
 
@@ -240,7 +297,7 @@ fn anchored_owner_pairs(
         after_children,
         anchors,
         pairs,
-    );
+    )?;
 
     let before_choices = owner_choices(
         scores
@@ -267,7 +324,7 @@ fn connected_owner_scores(
     after_children: &[usize],
     anchors: &LineAnchors,
     pairs: &Pairing,
-) -> Vec<(usize, usize, usize)> {
+) -> Result<Vec<(usize, usize, usize)>, AnalysisError> {
     let mut before_sweep = OwnerLineSweep::new(
         before,
         before_children
@@ -283,32 +340,60 @@ fn connected_owner_scores(
             .filter(|index| pairs.after_to_before[*index].is_none()),
     );
     let Some(before_lines) = before_sweep.line_range() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if after_sweep.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut scores = BTreeMap::new();
     for (&before_line, &after_line) in anchors.owner.range(before_lines) {
-        let before_candidates = before_sweep.owners_at(before_line);
-        let after_candidates = after_sweep.owners_at(after_line);
-        for &before_index in before_candidates {
-            for &after_index in after_candidates {
-                #[cfg(test)]
-                OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| {
-                    evaluations.set(evaluations.get() + 1);
-                });
-                if before.owners[before_index].kind == after.owners[after_index].kind {
-                    *scores.entry((before_index, after_index)).or_insert(0) += 1;
-                }
-            }
+        let before_by_kind =
+            unique_owner_evidence_by_kind(before, before_sweep.owners_at(before_line));
+        let after_by_kind = unique_owner_evidence_by_kind(after, after_sweep.owners_at(after_line));
+        for (kind, before_evidence) in before_by_kind {
+            let Some(after_evidence) = after_by_kind.get(&kind).copied() else {
+                continue;
+            };
+            let (OwnerEvidence::Unique(before_index), OwnerEvidence::Unique(after_index)) =
+                (before_evidence, after_evidence)
+            else {
+                return Err(AnalysisError::AmbiguousChange(format!(
+                    "exact line anchor {} connects multiple {kind:?} sibling owners",
+                    before_line + 1
+                )));
+            };
+            *scores.entry((before_index, after_index)).or_insert(0) += 1;
         }
     }
-    scores
+    Ok(scores
         .into_iter()
         .map(|((before, after), score)| (before, after, score))
-        .collect()
+        .collect())
+}
+
+#[derive(Clone, Copy)]
+enum OwnerEvidence {
+    Unique(usize),
+    Ambiguous,
+}
+
+fn unique_owner_evidence_by_kind(
+    document: &ParsedFile,
+    candidates: &[usize],
+) -> BTreeMap<OwnerKind, OwnerEvidence> {
+    let mut by_kind = BTreeMap::new();
+    for &index in candidates {
+        #[cfg(test)]
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| {
+            evaluations.set(evaluations.get() + 1);
+        });
+        by_kind
+            .entry(document.owners[index].kind)
+            .and_modify(|evidence| *evidence = OwnerEvidence::Ambiguous)
+            .or_insert(OwnerEvidence::Unique(index));
+    }
+    by_kind
 }
 
 struct OwnerLineSweep<'document> {
@@ -659,12 +744,13 @@ fn semantic_selection(
     after: &ParsedFile,
     owners: &Pairing,
     comments: &Pairing,
+    owner_changes: &OwnerChangeIndex,
 ) -> Selection {
     let mut affected = BTreeSet::new();
 
     for (before_index, after_index) in owners.before_to_after.iter().enumerate() {
         if let Some(after_index) = after_index
-            && owner_changed(&before.owners[before_index], &after.owners[*after_index])
+            && owner_changes.changed(before, after, before_index, *after_index)
         {
             affected.insert(*after_index);
         }
@@ -743,6 +829,7 @@ fn change_findings(
     after: &ParsedFile,
     owners: &Pairing,
     comments: &Pairing,
+    owner_changes: &OwnerChangeIndex,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (before_comment_index, after_comment_index) in comments.before_to_after.iter().enumerate() {
@@ -769,9 +856,10 @@ fn change_findings(
         let Some(after_owner_index) = paired_owner else {
             continue;
         };
-        let old_owner = &before.owners[old_comment.owner];
         let new_owner = &after.owners[after_owner_index];
-        if owner_changed(old_owner, new_owner) || old_comment.kind != new_comment.kind {
+        if owner_changes.changed(before, after, old_comment.owner, after_owner_index)
+            || old_comment.kind != new_comment.kind
+        {
             findings.push(Finding {
                 path: after_file.path.display().to_string(),
                 line: new_comment.span.start_line,
@@ -784,10 +872,6 @@ fn change_findings(
         }
     }
     findings
-}
-
-fn owner_changed(before: &OwnerSnapshot, after: &OwnerSnapshot) -> bool {
-    before.identity != after.identity || before.code != after.code
 }
 
 fn owner_label(owner: &OwnerSnapshot) -> String {
@@ -893,29 +977,33 @@ mod tests {
         OWNER_FRONTIER_VISITS.with(Cell::get)
     }
 
-    fn flat_anonymous_callbacks(count: usize) -> String {
-        let mut source = String::new();
+    fn same_line_anonymous_callbacks(count: usize, version: usize) -> String {
+        let mut source = format!("const VERSION = {version};\n");
         for index in 0..count {
-            writeln!(source, "(() => {{{index}}})();").expect("writing to a String cannot fail");
+            write!(source, "(() => {{ stable{index}(); }})();")
+                .expect("writing to a String cannot fail");
         }
+        source.push('\n');
         source
     }
 
     fn owner_anchor_candidate_evaluations(count: usize) -> usize {
-        let source = flat_anonymous_callbacks(count);
+        let before = same_line_anonymous_callbacks(count, 1);
+        let after = same_line_anonymous_callbacks(count, 2);
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| evaluations.set(0));
 
-        analyze(
+        let error = analyze(
             SourceFile {
                 path: Path::new("callbacks.js"),
-                text: &source,
+                text: &before,
             },
             SourceFile {
                 path: Path::new("callbacks.js"),
-                text: &source,
+                text: &after,
             },
         )
-        .expect("valid flat anonymous JavaScript callbacks");
+        .expect_err("same-line anonymous siblings are ambiguous");
+        assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
 
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
     }
@@ -934,9 +1022,9 @@ mod tests {
     }
 
     #[test]
-    fn flat_anonymous_owner_anchor_candidates_are_evaluated_linearly() {
+    fn same_line_anonymous_owner_anchor_candidates_are_evaluated_linearly() {
         for count in [64, 128, 256] {
-            assert_eq!(owner_anchor_candidate_evaluations(count), count);
+            assert_eq!(owner_anchor_candidate_evaluations(count), 2 * count);
         }
     }
 }

@@ -3,6 +3,36 @@ use std::path::Path;
 
 use fuck_ai_comments::{AnalysisError, SourceFile, analyze_all, analyze_change, supports_path};
 
+fn assert_parent_type_rename_stales_nested_comment(
+    path: &str,
+    before: &str,
+    after: &str,
+    comment_line: usize,
+) {
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new(path),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new(path),
+            text: after,
+        },
+    )
+    .expect("the unchanged child owner anchors its renamed parent type");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(
+        stale_lines,
+        [comment_line],
+        "a parent type rename changes the nested owner's semantic identity path"
+    );
+}
+
 #[test]
 fn registered_extensions_share_one_registry() {
     let supported = [
@@ -415,6 +445,167 @@ fn javascript_arrow_binding_rename_stales_its_comment() {
 }
 
 #[test]
+fn javascript_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "worker.js",
+        concat!(
+            "class OldWorker {\n",
+            "    run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare();\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+        concat!(
+            "class NewWorker {\n",
+            "    run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare();\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn python_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "worker.py",
+        concat!(
+            "class OldWorker:\n",
+            "    def run(self):\n",
+            "        # Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        return work()\n",
+        ),
+        concat!(
+            "class NewWorker:\n",
+            "    def run(self):\n",
+            "        # Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        return work()\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn kotlin_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "Worker.kt",
+        concat!(
+            "class OldWorker {\n",
+            "    fun run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        concat!(
+            "class NewWorker {\n",
+            "    fun run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn swift_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "Worker.swift",
+        concat!(
+            "class OldWorker {\n",
+            "    func run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        concat!(
+            "class NewWorker {\n",
+            "    func run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn objective_c_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "Worker.m",
+        concat!(
+            "@implementation OldWorker\n",
+            "- (void)run {\n",
+            "    // Coupled to the enclosing worker type.\n",
+            "    [self prepare];\n",
+            "    [self work];\n",
+            "}\n",
+            "@end\n",
+        ),
+        concat!(
+            "@implementation NewWorker\n",
+            "- (void)run {\n",
+            "    // Coupled to the enclosing worker type.\n",
+            "    [self prepare];\n",
+            "    [self work];\n",
+            "}\n",
+            "@end\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn parent_code_change_does_not_stale_nested_child_comment() {
+    let before = SourceFile {
+        path: Path::new("worker.js"),
+        text: concat!(
+            "class Worker extends OldBase {\n",
+            "    run() {\n",
+            "        // Coupled only to the run method.\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("worker.js"),
+        text: concat!(
+            "class Worker extends NewBase {\n",
+            "    run() {\n",
+            "        // Coupled only to the run method.\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("valid parent-only JavaScript change");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/comment-owner-changed"),
+        "ancestor code cannot wash into an unchanged nested owner: {findings:#?}"
+    );
+}
+
+#[test]
 fn insertion_at_an_owner_end_does_not_expand_its_anchor_set() {
     let before = SourceFile {
         path: Path::new("worker.js"),
@@ -525,6 +716,40 @@ fn flat_anonymous_siblings_pair_through_the_public_change_seam() {
         .collect();
 
     assert_eq!(stale_lines, [CHANGED * 5 + 2]);
+}
+
+#[test]
+fn same_line_anonymous_siblings_fail_closed_through_the_public_change_seam() {
+    const CALLBACKS: usize = 256;
+
+    let callbacks = |version| {
+        let mut source = format!("const VERSION = {version};\n");
+        for index in 0..CALLBACKS {
+            write!(source, "(() => {{ stable{index}(); }})();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push('\n');
+        source
+    };
+    let before = callbacks(1);
+    let after = callbacks(2);
+
+    let error = analyze_change(
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &after,
+        },
+    )
+    .expect_err("one shared line cannot prove anonymous sibling correspondence");
+
+    assert!(
+        matches!(error, AnalysisError::AmbiguousChange(_)),
+        "ambiguous same-line evidence must fail closed: {error:#?}"
+    );
 }
 
 #[test]

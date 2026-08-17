@@ -229,6 +229,59 @@ fn typescript_type_prefix(kind: &str) -> Option<&'static str> {
     }
 }
 
+const PATH_ATTRIBUTE: &str = "path";
+const TYPES_ATTRIBUTE: &str = "types";
+const LIB_ATTRIBUTE: &str = "lib";
+const NO_DEFAULT_LIB_ATTRIBUTE: &str = "no-default-lib";
+const PRESERVE_ATTRIBUTE: &str = "preserve";
+const RESOLUTION_MODE_ATTRIBUTE: &str = "resolution-mode";
+const NAME_ATTRIBUTE: &str = "name";
+const TRUE_ATTRIBUTE_VALUE: &str = "true";
+const REFERENCE_ATTRIBUTES: &[&str] = &[
+    PATH_ATTRIBUTE,
+    TYPES_ATTRIBUTE,
+    LIB_ATTRIBUTE,
+    NO_DEFAULT_LIB_ATTRIBUTE,
+    PRESERVE_ATTRIBUTE,
+    RESOLUTION_MODE_ATTRIBUTE,
+];
+const AMD_MODULE_ATTRIBUTES: &[&str] = &[NAME_ATTRIBUTE];
+const AMD_DEPENDENCY_ATTRIBUTES: &[&str] = &[PATH_ATTRIBUTE, NAME_ATTRIBUTE];
+
+#[derive(Clone, Copy)]
+enum TripleSlashTag {
+    Reference,
+    AmdModule,
+    AmdDependency,
+}
+
+impl TripleSlashTag {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "reference" => Some(Self::Reference),
+            "amd-module" => Some(Self::AmdModule),
+            "amd-dependency" => Some(Self::AmdDependency),
+            _ => None,
+        }
+    }
+
+    fn allowed_attributes(self) -> &'static [&'static str] {
+        match self {
+            Self::Reference => REFERENCE_ATTRIBUTES,
+            Self::AmdModule => AMD_MODULE_ATTRIBUTES,
+            Self::AmdDependency => AMD_DEPENDENCY_ATTRIBUTES,
+        }
+    }
+
+    fn valid_attributes(self, attributes: &[(&str, &str)]) -> bool {
+        match self {
+            Self::Reference => valid_reference_attributes(attributes),
+            Self::AmdModule => attributes.len() == 1 && attributes[0].0 == NAME_ATTRIBUTE,
+            Self::AmdDependency => attributes.iter().any(|(name, _)| *name == PATH_ATTRIBUTE),
+        }
+    }
+}
+
 fn valid_triple_slash_directive(comment: &str) -> bool {
     let Some(body) = comment.trim().strip_prefix("///") else {
         return false;
@@ -246,24 +299,34 @@ fn valid_triple_slash_directive(comment: &str) -> bool {
     let tag = tag.trim();
     let name_end = tag.find(char::is_whitespace).unwrap_or(tag.len());
     let name = &tag[..name_end];
-    let Some(attributes) = parse_attributes(&tag[name_end..]) else {
+    let Some(tag_kind) = TripleSlashTag::from_name(name) else {
         return false;
     };
-    match name {
-        "reference" => valid_reference_attributes(&attributes),
-        "amd-module" => attributes.len() == 1 && attributes[0].0 == "name",
-        "amd-dependency" => {
-            attributes.iter().any(|(name, _)| *name == "path")
-                && attributes
-                    .iter()
-                    .all(|(name, _)| matches!(*name, "path" | "name"))
-        }
-        _ => false,
-    }
+    let Some(attributes) = parse_attributes(&tag[name_end..], tag_kind.allowed_attributes()) else {
+        return false;
+    };
+    tag_kind.valid_attributes(&attributes)
 }
 
-fn parse_attributes(mut input: &str) -> Option<Vec<(&str, &str)>> {
+#[cfg(test)]
+thread_local! {
+    static ATTRIBUTE_NAME_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_attribute_name_inspection() {
+    ATTRIBUTE_NAME_INSPECTIONS.with(|inspections| inspections.set(inspections.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_attribute_name_inspection() {}
+
+fn parse_attributes<'source>(
+    mut input: &'source str,
+    allowed_names: &[&str],
+) -> Option<Vec<(&'source str, &'source str)>> {
     let mut attributes = Vec::new();
+    let mut seen = vec![false; allowed_names.len()];
     loop {
         input = input.trim_start();
         if input.is_empty() {
@@ -273,12 +336,11 @@ fn parse_attributes(mut input: &str) -> Option<Vec<(&str, &str)>> {
             .find(|character: char| character.is_whitespace() || character == '=')
             .unwrap_or(input.len());
         let name = &input[..name_end];
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
-            || attributes.iter().any(|(existing, _)| *existing == name)
-        {
+        let name_index = allowed_names.iter().position(|allowed| {
+            record_attribute_name_inspection();
+            *allowed == name
+        })?;
+        if std::mem::replace(&mut seen[name_index], true) {
             return None;
         }
         input = input[name_end..].trim_start();
@@ -302,20 +364,64 @@ fn parse_attributes(mut input: &str) -> Option<Vec<(&str, &str)>> {
 }
 
 fn valid_reference_attributes(attributes: &[(&str, &str)]) -> bool {
-    if attributes == [("no-default-lib", "true")] {
+    if attributes == [(NO_DEFAULT_LIB_ATTRIBUTE, TRUE_ATTRIBUTE_VALUE)] {
         return true;
     }
     let mut primaries = attributes
         .iter()
-        .filter(|(name, _)| matches!(*name, "path" | "types" | "lib"));
+        .filter(|(name, _)| matches!(*name, PATH_ATTRIBUTE | TYPES_ATTRIBUTE | LIB_ATTRIBUTE));
     let Some((primary, _)) = primaries.next() else {
         return false;
     };
     primaries.next().is_none()
         && attributes.iter().all(|(name, value)| match *name {
-            "path" | "types" | "lib" => !value.is_empty(),
-            "preserve" => *value == "true",
-            "resolution-mode" => *primary == "types" && matches!(*value, "import" | "require"),
+            PATH_ATTRIBUTE | TYPES_ATTRIBUTE | LIB_ATTRIBUTE => !value.is_empty(),
+            PRESERVE_ATTRIBUTE => *value == TRUE_ATTRIBUTE_VALUE,
+            RESOLUTION_MODE_ATTRIBUTE => {
+                *primary == TYPES_ATTRIBUTE && matches!(*value, "import" | "require")
+            }
             _ => false,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+
+    use super::*;
+
+    const ATTRIBUTE_NAME_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+
+    fn unknown_attribute_name(index: usize) -> String {
+        let radix = ATTRIBUTE_NAME_ALPHABET.len();
+        let first = char::from(ATTRIBUTE_NAME_ALPHABET[(index / (radix * radix)) % radix]);
+        let second = char::from(ATTRIBUTE_NAME_ALPHABET[(index / radix) % radix]);
+        let third = char::from(ATTRIBUTE_NAME_ALPHABET[index % radix]);
+        format!("x{first}{second}{third}")
+    }
+
+    fn malformed_reference_attribute_inspections(attribute_count: usize) -> usize {
+        let mut directive = String::from("/// <reference");
+        for index in 0..attribute_count {
+            write!(directive, " {}=\"value\"", unknown_attribute_name(index)).unwrap();
+        }
+        directive.push_str(" />");
+
+        ATTRIBUTE_NAME_INSPECTIONS.with(|inspections| inspections.set(0));
+        assert!(!valid_triple_slash_directive(&directive));
+        ATTRIBUTE_NAME_INSPECTIONS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn unknown_triple_slash_attributes_have_bounded_name_inspections() {
+        const ATTRIBUTE_COUNTS: [usize; 4] = [1_000, 2_000, 4_000, 8_000];
+
+        let inspections = ATTRIBUTE_COUNTS.map(malformed_reference_attribute_inspections);
+
+        assert_eq!(
+            inspections,
+            ATTRIBUTE_COUNTS.map(|_| REFERENCE_ATTRIBUTES.len()),
+            "each unknown name should inspect only the finite reference attribute set"
+        );
+    }
 }

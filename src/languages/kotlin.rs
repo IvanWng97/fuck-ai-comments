@@ -3,8 +3,8 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, canonical_syntax,
-    direct_named_child, document, function_name, node_text,
+    ANONYMOUS_FUNCTION_NAME, CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation,
+    analyze, canonical_syntax, direct_named_child, document, node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -42,12 +42,12 @@ impl LanguageSpec for Kotlin {
     fn owner(
         self,
         node: Node<'_>,
-        location: OwnerLocation<'_>,
+        _location: OwnerLocation<'_>,
         source: &str,
         _function_depth: usize,
         callable_subtrees: &CallableSubtrees,
     ) -> Option<OwnerCandidate> {
-        owner_from_node(node, location, source, callable_subtrees)
+        owner_from_node(node, source, callable_subtrees)
     }
 
     fn classify_comment(
@@ -62,7 +62,6 @@ impl LanguageSpec for Kotlin {
 
 fn owner_from_node(
     node: Node<'_>,
-    location: OwnerLocation<'_>,
     source: &str,
     callable_subtrees: &CallableSubtrees,
 ) -> Option<OwnerCandidate> {
@@ -96,7 +95,12 @@ fn owner_from_node(
         let name = match node.kind() {
             "secondary_constructor" => "constructor".to_owned(),
             "anonymous_initializer" => "init".to_owned(),
-            _ => function_name(node, location, source),
+            "function_declaration" => node
+                .child_by_field_name("name")
+                .map_or(ANONYMOUS_FUNCTION_NAME, |name| node_text(name, source))
+                .to_owned(),
+            "anonymous_function" | "lambda_literal" => ANONYMOUS_FUNCTION_NAME.to_owned(),
+            _ => return None,
         };
         return Some(OwnerCandidate::function(
             Span::from_node(node),
@@ -282,6 +286,17 @@ fn is_kotlin_callable(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unbound_nested_lambda_names_do_not_scan_descendants() {
+        let depth = 64;
+        let source = format!("{}1{}", "{ ".repeat(depth), " }".repeat(depth));
+        crate::languages::tree::reset_first_descendant_visits();
+
+        parse_file(Path::new("Nested.kts"), &source).expect("valid nested Kotlin lambdas");
+
+        assert_eq!(crate::languages::tree::first_descendant_visits(), 0);
+    }
 
     #[test]
     fn nested_bindings_register_each_callable_frontier_once() {
