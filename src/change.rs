@@ -176,28 +176,35 @@ fn pair_owners(
     let mut frontier = VecDeque::from([(0, 0)]);
 
     while let Some((before_parent, after_parent)) = frontier.pop_front() {
-        loop {
-            let stable = unique_stable_owner_pairs(
-                before,
-                after,
-                &before_children[before_parent],
-                &after_children[after_parent],
-                &pairs,
-            );
-            enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+        let before_siblings = &before_children[before_parent];
+        let after_siblings = &after_children[after_parent];
+        let stable =
+            unique_stable_owner_pairs(before, after, before_siblings, after_siblings, &pairs);
+        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
 
-            let anchored = anchored_owner_pairs(
-                before,
-                after,
-                &before_children[before_parent],
-                &after_children[after_parent],
-                anchors,
-                &pairs,
-            )?;
-            if anchored.is_empty() {
-                break;
-            }
-            enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
+        let scores = connected_owner_scores(
+            before,
+            after,
+            before_siblings,
+            after_siblings,
+            anchors,
+            &pairs,
+        )?;
+        let anchored = anchored_owner_pairs(&scores, &pairs)?;
+        if anchored.is_empty() {
+            continue;
+        }
+        enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
+
+        let stable =
+            unique_stable_owner_pairs(before, after, before_siblings, after_siblings, &pairs);
+        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+
+        // A second anchor wave would make correspondence depend on the first wave's guesses.
+        if !anchored_owner_pairs(&scores, &pairs)?.is_empty() {
+            return Err(AnalysisError::AmbiguousChange(
+                "owner correspondence requires iterative anchor preference peeling".to_owned(),
+            ));
         }
     }
     Ok(pairs)
@@ -283,32 +290,17 @@ fn has_stable_identity(owner: &OwnerSnapshot) -> bool {
 }
 
 fn anchored_owner_pairs(
-    before: &ParsedFile,
-    after: &ParsedFile,
-    before_children: &[usize],
-    after_children: &[usize],
-    anchors: &LineAnchors,
+    scores: &[(usize, usize, usize)],
     pairs: &Pairing,
 ) -> Result<Vec<(usize, usize)>, AnalysisError> {
-    let scores = connected_owner_scores(
-        before,
-        after,
-        before_children,
-        after_children,
-        anchors,
-        pairs,
-    )?;
-
-    let before_choices = owner_choices(
-        scores
-            .iter()
-            .map(|&(before, after, score)| (before, after, score)),
-        "old owner",
-    )?;
+    let remaining = || {
+        scores.iter().copied().filter(|&(before, after, _)| {
+            pairs.before_to_after[before].is_none() && pairs.after_to_before[after].is_none()
+        })
+    };
+    let before_choices = owner_choices(remaining(), "old owner")?;
     let after_choices = owner_choices(
-        scores
-            .iter()
-            .map(|&(before, after, score)| (after, before, score)),
+        remaining().map(|(before, after, score)| (after, before, score)),
         "new owner",
     )?;
     Ok(before_choices
@@ -1008,6 +1000,71 @@ mod tests {
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
     }
 
+    fn regrouped_anonymous_callbacks(count: usize) -> (String, String) {
+        fn emit_callbacks(
+            source: &mut String,
+            statements: &mut impl Iterator<Item = usize>,
+            count: usize,
+        ) {
+            source.push_str("(() => {\n");
+            for statement in statements.take(count) {
+                writeln!(source, "  statement_{statement:08}();")
+                    .expect("writing to a String cannot fail");
+            }
+            source.push_str("})();\n");
+        }
+
+        let statement_count = 2 * count * count - count;
+        let mut before = String::new();
+        let mut before_statements = 0..statement_count;
+        for index in 0..count - 1 {
+            emit_callbacks(
+                &mut before,
+                &mut before_statements,
+                (2 * index + 1) + (2 * index + 2),
+            );
+        }
+        emit_callbacks(&mut before, &mut before_statements, 2 * (count - 1) + 1);
+
+        let mut after = String::new();
+        let mut after_statements = 0..statement_count;
+        emit_callbacks(&mut after, &mut after_statements, 1);
+        for index in 1..count {
+            emit_callbacks(
+                &mut after,
+                &mut after_statements,
+                2 * index + (2 * index + 1),
+            );
+        }
+        assert_eq!(before_statements.next(), None);
+        assert_eq!(after_statements.next(), None);
+        (before, after)
+    }
+
+    fn regrouped_owner_pairing_work(count: usize) -> (usize, usize) {
+        let (before, after) = regrouped_anonymous_callbacks(count);
+        OWNER_FRONTIER_VISITS.with(|visits| visits.set(0));
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| evaluations.set(0));
+
+        let error = analyze(
+            SourceFile {
+                path: Path::new("callbacks.js"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("callbacks.js"),
+                text: &after,
+            },
+        )
+        .expect_err("iterative preference peeling is not proof of owner correspondence");
+        assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+
+        (
+            OWNER_FRONTIER_VISITS.with(Cell::get),
+            OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get),
+        )
+    }
+
     #[test]
     fn deep_stable_owner_pairing_visits_each_owner_once_per_snapshot() {
         for depth in [25, 50, 100, 200] {
@@ -1025,6 +1082,20 @@ mod tests {
     fn same_line_anonymous_owner_anchor_candidates_are_evaluated_linearly() {
         for count in [64, 128, 256] {
             assert_eq!(owner_anchor_candidate_evaluations(count), 2 * count);
+        }
+    }
+
+    #[test]
+    fn regrouped_anonymous_owner_graph_is_built_once() {
+        for count in [10, 20, 40] {
+            let (frontier_visits, anchor_evaluations) = regrouped_owner_pairing_work(count);
+            let statement_count = 2 * count * count - count;
+
+            assert_eq!(frontier_visits, 4 * count);
+            assert!(
+                anchor_evaluations <= 2 * statement_count,
+                "each exact statement line can inspect at most one owner per snapshot"
+            );
         }
     }
 }

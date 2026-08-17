@@ -753,6 +753,66 @@ fn same_line_anonymous_siblings_fail_closed_through_the_public_change_seam() {
 }
 
 #[test]
+fn regrouped_anonymous_preference_chain_fails_closed_through_the_public_change_seam() {
+    const CALLBACKS: usize = 32;
+
+    fn emit_callback(
+        source: &mut String,
+        statements: &mut impl Iterator<Item = usize>,
+        count: usize,
+    ) {
+        source.push_str("(() => {\n");
+        for statement in statements.take(count) {
+            writeln!(source, "  statement_{statement:08}();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("})();\n");
+    }
+
+    let statement_count = 2 * CALLBACKS * CALLBACKS - CALLBACKS;
+    let mut before = String::new();
+    let mut before_statements = 0..statement_count;
+    for index in 0..CALLBACKS - 1 {
+        emit_callback(
+            &mut before,
+            &mut before_statements,
+            (2 * index + 1) + (2 * index + 2),
+        );
+    }
+    emit_callback(&mut before, &mut before_statements, 2 * (CALLBACKS - 1) + 1);
+
+    let mut after = String::new();
+    let mut after_statements = 0..statement_count;
+    emit_callback(&mut after, &mut after_statements, 1);
+    for index in 1..CALLBACKS {
+        emit_callback(
+            &mut after,
+            &mut after_statements,
+            2 * index + (2 * index + 1),
+        );
+    }
+    assert_eq!(before_statements.next(), None);
+    assert_eq!(after_statements.next(), None);
+
+    let error = analyze_change(
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &after,
+        },
+    )
+    .expect_err("iterative preferences cannot prove anonymous owner correspondence");
+
+    assert!(
+        matches!(error, AnalysisError::AmbiguousChange(_)),
+        "the analyzer must fail closed instead of peeling guessed pairs: {error:#?}"
+    );
+}
+
+#[test]
 fn format_only_owner_move_does_not_stale_its_comment() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
