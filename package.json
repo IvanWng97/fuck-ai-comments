@@ -12,7 +12,9 @@
     "format": "prettier --write action.yml action/src action/test action/scripts eslint.config.js package.json",
     "format:check": "prettier --check action.yml action/src action/test action/scripts eslint.config.js package.json",
     "lint": "eslint action/src action/test action/scripts eslint.config.js",
-    "test": "node --test action/test/*.test.js"
+    "test": "node --test action/test/*.test.js",
+    "release:check": "node action/scripts/harden-release-workflow.js --check",
+    "release:generate": "node action/scripts/harden-release-workflow.js --write"
   },
   "dependencies": {
     "@actions/core": "3.0.1",

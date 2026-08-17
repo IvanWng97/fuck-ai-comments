@@ -887,6 +887,30 @@ fn rust_short_safety_proof_can_attach_inside_an_unsafe_block() {
 }
 
 #[test]
+fn rust_safety_comment_before_safe_statement_in_unsafe_block_is_narrative() {
+    let source = concat!(
+        "unsafe fn read() -> u8 {\n",
+        "    unsafe {\n",
+        "        // SAFETY: this safe binding needs no unsafe justification.\n",
+        "        // second narrative line\n",
+        "        // third narrative line\n",
+        "        let value = 1;\n",
+        "        value\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
+        "a safe statement inside an unsafe block cannot receive a safety exemption: {findings:#?}"
+    );
+}
+
+#[test]
 fn python_short_function_rejects_ten_spread_comment_lines() {
     let mut source = String::from("def work():\n");
     for number in 1..=10 {

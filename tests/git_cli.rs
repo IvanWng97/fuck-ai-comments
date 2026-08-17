@@ -380,6 +380,35 @@ fn invalid_revision_fails_closed() {
 }
 
 #[test]
+fn nonexistent_scope_fails_closed() {
+    let root = repository();
+
+    let output = command(&root)
+        .args(["check", "missing-directory"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("error: scope missing-directory does not exist"));
+}
+
+#[test]
+fn deleted_file_remains_a_valid_scope() {
+    let root = repository();
+    write(&root, "deleted.rs", SLOPPY_RUST);
+    commit_all(&root, "add source");
+    fs::remove_file(root.path().join("deleted.rs")).expect("source should be removed");
+
+    command(&root)
+        .args(["check", "deleted.rs"])
+        .assert()
+        .code(0)
+        .stdout("clean: 0 files scanned\n");
+}
+
+#[test]
 fn supported_index_blob_with_invalid_utf8_fails_closed() {
     let root = repository();
     write(&root, "broken.rs", [0xff, 0xfe]);

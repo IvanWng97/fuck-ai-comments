@@ -15,7 +15,7 @@
 
 name: Release
 permissions:
-  "contents": "write"
+  "contents": "read"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -234,6 +234,8 @@ jobs:
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.host.outputs.manifest }}
+    permissions:
+      "contents": "write"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -312,6 +314,5 @@ jobs:
     uses: ./.github/workflows/update-major-tag.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
-    secrets: inherit
     permissions:
       "contents": "write"

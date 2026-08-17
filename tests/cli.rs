@@ -41,7 +41,7 @@ fn all_reports_findings_in_stable_path_order() {
 }
 
 #[test]
-fn all_honors_gitignore_ignore_hidden_and_symlink_filters() {
+fn all_honors_gitignore_and_ignore_filters() {
     let root = TempDir::new().expect("temporary directory should be created");
     fs::write(root.path().join("clean.rs"), "const LIMIT: usize = 4;\n")
         .expect("clean.rs should be written");
@@ -52,15 +52,6 @@ fn all_honors_gitignore_ignore_hidden_and_symlink_filters() {
     fs::write(root.path().join("git-ignored.rs"), "fn {").expect("ignored Rust should be written");
     fs::write(root.path().join("ignore-ignored.py"), "def (")
         .expect("ignored Python should be written");
-    fs::write(root.path().join(".hidden.rs"), "fn {").expect("hidden Rust should be written");
-
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(
-        root.path().join("git-ignored.rs"),
-        root.path().join("linked.rs"),
-    )
-    .expect("symlink should be created");
-
     let output = command(&root)
         .args(["check", "--all", "."])
         .assert()
@@ -70,6 +61,45 @@ fn all_honors_gitignore_ignore_hidden_and_symlink_filters() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert_eq!(stdout, "clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_scans_hidden_supported_files() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir(root.path().join(".github")).expect("hidden directory should be created");
+    fs::write(root.path().join(".github/broken.js"), "function {")
+        .expect("hidden JavaScript should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("error: could not analyze"));
+    assert!(stderr.contains("broken.js"));
+}
+
+#[cfg(unix)]
+#[test]
+fn all_fails_closed_on_supported_symlinks() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(root.path().join("target.txt"), "const LIMIT = 4;\n")
+        .expect("target should be written");
+    std::os::unix::fs::symlink("target.txt", root.path().join("linked.js"))
+        .expect("symlink should be created");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("error: supported path linked.js is not a regular file"));
 }
 
 #[test]

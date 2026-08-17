@@ -377,6 +377,39 @@ fn owner_rename_with_an_exact_code_anchor_stales_its_comment() {
 }
 
 #[test]
+fn javascript_arrow_binding_rename_stales_its_comment() {
+    let before = SourceFile {
+        path: Path::new("worker.js"),
+        text: concat!(
+            "const oldName = () => {\n",
+            "    // Coupled to the callback identity.\n",
+            "    prepare();\n",
+            "    return work();\n",
+            "};\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("worker.js"),
+        text: concat!(
+            "const newName = () => {\n",
+            "    // Coupled to the callback identity.\n",
+            "    prepare();\n",
+            "    return work();\n",
+            "};\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("the body anchors the renamed callback");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 2
+        }),
+        "changing the binding changes the arrow function's meaning: {findings:#?}"
+    );
+}
+
+#[test]
 fn insertion_at_an_owner_end_does_not_expand_its_anchor_set() {
     let before = SourceFile {
         path: Path::new("worker.js"),

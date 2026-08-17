@@ -50,7 +50,8 @@ unsupported preprocessors remain opaque.
 ## CLI
 
 ```console
-# New baseline: scan every supported file, honoring .gitignore and .ignore.
+# New baseline: scan every supported regular file, including hidden paths.
+# .gitignore and .ignore still define intentional exclusions.
 fuck-ai-comments check --all
 
 # Scan one directory or file; absolute paths work too.
@@ -75,7 +76,8 @@ are stable:
 - `0`: clean;
 - `1`: one or more required policy findings;
 - `2`: the analysis could not be trusted, including parser, Git, UTF-8,
-  ownership ambiguity, or resource-limit errors.
+  ownership ambiguity, nonexistent scopes, non-regular supported paths, or
+  resource-limit errors.
 
 Supported source files are limited to 16 MiB. Git blob batches are limited to
 128 MiB. Exceeding either limit fails closed instead of risking an unbounded CI
@@ -178,11 +180,16 @@ npm ci --ignore-scripts
 npm test
 npm run lint
 npm run bundle:check
+npm run release:check
 ```
 
-The Rust MSRV is 1.88.0. Release and Action files are generated or bundled;
-change their source configuration rather than editing generated output by
-hand.
+The Rust MSRV is 1.88.0. The Action is bundled. `release.yml` is generated from
+the dist configuration, then narrowed to job-level permissions by
+`npm run release:generate`; `release:check` regenerates it in a temporary copy
+so cargo-dist template drift remains a hard failure. The pinned cargo-dist
+template cannot scope its built-in permissions or disable secret inheritance
+for custom jobs, so its `allow-dirty = ["ci"]` escape hatch is intentional; the
+tested transform changes only those two privileges.
 
 ## License
 

@@ -14,6 +14,8 @@ use super::source::{self, MAX_SOURCE_BYTES};
 
 // Bounds aggregate blob allocation after every source has passed the shared per-file limit.
 const MAX_BATCH_BYTES: u64 = 128 * 1024 * 1024;
+const GIT_OBJECT_ID_HEX_LENGTHS: [usize; 2] = [40, 64];
+const MAX_GIT_SIMILARITY_SCORE: u16 = 100;
 
 pub(super) enum Mode {
     Worktree,
@@ -22,8 +24,18 @@ pub(super) enum Mode {
 }
 
 pub(super) fn scan(scope: &Path, mode: Mode) -> Result<Report> {
+    let scope_exists = match fs::symlink_metadata(scope) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not inspect {}", scope.display()));
+        }
+    };
     let repository = Repository::discover(scope)?;
     let changes = repository.changes(mode)?;
+    if !scope_exists && changes.is_empty() {
+        bail!("scope {} does not exist", scope.display());
+    }
     analyze_changes(&repository, changes)
 }
 
@@ -147,7 +159,7 @@ impl Repository {
             OsString::from("--no-ext-diff"),
             OsString::from("--no-textconv"),
             OsString::from("--find-renames"),
-            OsString::from("--abbrev=64"),
+            OsString::from("--no-abbrev"),
         ];
         if target == DiffTarget::Index {
             arguments.push(OsString::from("--cached"));
@@ -316,7 +328,9 @@ struct ObjectId(String);
 
 impl ObjectId {
     fn parse(text: &str) -> Result<Self> {
-        if !matches!(text.len(), 40 | 64) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if !GIT_OBJECT_ID_HEX_LENGTHS.contains(&text.len())
+            || !text.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
             bail!("invalid Git object ID {text:?}");
         }
         Ok(Self(text.to_ascii_lowercase()))
@@ -429,7 +443,7 @@ fn valid_similarity_score(bytes: &[u8]) -> bool {
             .try_fold(0_u16, |score, digit| {
                 score.checked_mul(10)?.checked_add(u16::from(*digit - b'0'))
             })
-            .is_some_and(|score| score <= 100)
+            .is_some_and(|score| score <= MAX_GIT_SIMILARITY_SCORE)
 }
 
 fn validate_raw_entry(
@@ -473,7 +487,7 @@ fn parse_mode(text: &str) -> Result<FileMode> {
 
 fn parse_raw_object_id(text: &str) -> Result<Option<ObjectId>> {
     if text.bytes().all(|byte| byte == b'0') {
-        if matches!(text.len(), 40 | 64) {
+        if GIT_OBJECT_ID_HEX_LENGTHS.contains(&text.len()) {
             return Ok(None);
         }
         bail!("malformed zero Git object ID");

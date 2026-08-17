@@ -5,6 +5,8 @@ import test from "node:test";
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 
+import { hardenReleaseWorkflow } from "../scripts/harden-release-workflow.js";
+
 const workflowPath = ".github/workflows/update-major-tag.yml";
 
 test("cargo-dist owns the post-release compatibility tag job", async () => {
@@ -23,6 +25,67 @@ test("cargo-dist owns the post-release compatibility tag job", async () => {
   assert.equal(generatedJob.uses, "./.github/workflows/update-major-tag.yml");
   assert.equal(generatedJob.with.plan, "${{ needs.plan.outputs.val }}");
   assert.deepEqual(generatedJob.permissions, { contents: "write" });
+  assert.equal("secrets" in generatedJob, false);
+});
+
+test("release jobs only receive the repository access they need", async () => {
+  const release = parseYaml(
+    await readFile(".github/workflows/release.yml", "utf8"),
+  );
+
+  assert.deepEqual(release.permissions, { contents: "read" });
+  assert.deepEqual(release.jobs.host.permissions, { contents: "write" });
+
+  const writers = Object.entries(release.jobs)
+    .filter(([, job]) => job.permissions?.contents === "write")
+    .map(([name]) => name);
+  assert.deepEqual(writers, ["host", "custom-update-major-tag"]);
+});
+
+test("hardening is a narrow transform over cargo-dist output", () => {
+  const generated = `name: Release
+permissions:
+  "contents": "write"
+jobs:
+  plan:
+    steps: []
+  host:
+    outputs:
+      val: output
+    steps:
+      - run: true
+  announce:
+    steps: []
+  custom-update-major-tag:
+    uses: ./.github/workflows/update-major-tag.yml
+    secrets: inherit
+    permissions:
+      "contents": "write"
+`;
+
+  assert.equal(
+    hardenReleaseWorkflow(generated),
+    `name: Release
+permissions:
+  "contents": "read"
+jobs:
+  plan:
+    steps: []
+  host:
+    outputs:
+      val: output
+    permissions:
+      "contents": "write"
+    steps:
+      - run: true
+  announce:
+    steps: []
+  custom-update-major-tag:
+    uses: ./.github/workflows/update-major-tag.yml
+    permissions:
+      "contents": "write"
+`,
+  );
 });
 
 test("compatibility tag workflow derives one major alias after stable releases", async () => {

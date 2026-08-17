@@ -317,9 +317,50 @@ fn is_safety_proof(node: Node<'_>, source: &str) -> bool {
     if !is_adjacent(last, next, source) {
         return false;
     }
-    next.kind() == "unsafe_block"
-        || node_text(next, source).trim_start().starts_with("unsafe ")
-        || ancestors(node).any(|ancestor| ancestor.kind() == "unsafe_block")
+    let target = attached_expression(next);
+    is_unsafe_construct(target)
+        || (ancestors(node).any(|ancestor| ancestor.kind() == "unsafe_block")
+            && is_raw_pointer_dereference(target))
+}
+
+fn attached_expression(node: Node<'_>) -> Node<'_> {
+    if node.kind() == "expression_statement" {
+        return node.named_child(0).unwrap_or(node);
+    }
+    node
+}
+
+fn is_unsafe_construct(node: Node<'_>) -> bool {
+    if node.kind() == "unsafe_block" {
+        return true;
+    }
+    if !matches!(
+        node.kind(),
+        "foreign_mod_item"
+            | "function_item"
+            | "function_signature_item"
+            | "impl_item"
+            | "trait_item"
+    ) {
+        return false;
+    }
+
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(|child| {
+        child.kind() == "unsafe"
+            || (child.kind() == "function_modifiers" && has_unsafe_keyword(child))
+    })
+}
+
+fn has_unsafe_keyword(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| child.kind() == "unsafe")
+}
+
+fn is_raw_pointer_dereference(node: Node<'_>) -> bool {
+    node.kind() == "unary_expression"
+        && node.child(0).is_some_and(|operator| operator.kind() == "*")
 }
 
 fn is_adjacent(left: Node<'_>, right: Node<'_>, source: &str) -> bool {

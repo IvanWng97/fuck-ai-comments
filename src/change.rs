@@ -517,7 +517,7 @@ fn semantic_selection(
 
     for (before_index, after_index) in owners.before_to_after.iter().enumerate() {
         if let Some(after_index) = after_index
-            && before.owners[before_index].code != after.owners[*after_index].code
+            && owner_changed(&before.owners[before_index], &after.owners[*after_index])
         {
             affected.insert(*after_index);
         }
@@ -624,7 +624,7 @@ fn change_findings(
         };
         let old_owner = &before.owners[old_comment.owner];
         let new_owner = &after.owners[after_owner_index];
-        if old_owner.code != new_owner.code || old_comment.kind != new_comment.kind {
+        if owner_changed(old_owner, new_owner) || old_comment.kind != new_comment.kind {
             findings.push(Finding {
                 path: after_file.path.display().to_string(),
                 line: new_comment.span.start_line,
@@ -637,6 +637,10 @@ fn change_findings(
         }
     }
     findings
+}
+
+fn owner_changed(before: &OwnerSnapshot, after: &OwnerSnapshot) -> bool {
+    before.identity != after.identity || before.code != after.code
 }
 
 fn owner_label(owner: &OwnerSnapshot) -> String {

@@ -39,14 +39,9 @@ pub(crate) struct EmbeddedRegion {
 }
 
 struct Facts {
-    syntax: Vec<SyntaxEvent>,
+    syntax: Vec<CodeToken>,
     comments: Vec<Comment>,
     regions: Vec<EmbeddedRegion>,
-}
-
-struct SyntaxEvent {
-    span: Span,
-    token: CodeToken,
 }
 
 pub(crate) fn analyze<S: ContainerSpec>(
@@ -75,7 +70,6 @@ pub(crate) fn parse_file<S: ContainerSpec>(
         regions,
     } = parse_facts(path, source, spec)?;
     let file_span = file_span(source);
-    let template_code = collect_template_code(syntax, &comments, &regions);
     let mut document = ParsedFile {
         owners: vec![
             OwnerSnapshot {
@@ -92,7 +86,7 @@ pub(crate) fn parse_file<S: ContainerSpec>(
                 identity: vec!["template".to_owned()],
                 span: file_span,
                 parent: Some(0),
-                code: template_code,
+                code: syntax,
             },
         ],
         comments: comments
@@ -130,10 +124,13 @@ fn parse_facts<S: ContainerSpec>(
     let mut syntax = Vec::new();
     let mut comments = Vec::new();
     let mut regions = Vec::new();
+    let mut excluded_depth = 0;
     for event in events(tree.root_node()) {
         match event {
             WalkEvent::Enter(node) => {
-                if spec.is_comment(node) {
+                let node_span = Span::from_node(node);
+                let is_comment = spec.is_comment(node);
+                if is_comment {
                     comments.push(Comment {
                         span: Span::from_comment_node(node, source),
                         kind: CommentKind::Narrative,
@@ -143,24 +140,29 @@ fn parse_facts<S: ContainerSpec>(
                 if let Some(region) = spec.embedded_region(node, source) {
                     regions.push(region);
                 }
-                syntax.push(SyntaxEvent {
-                    span: Span::from_node(node),
-                    token: CodeToken::enter(node.kind()),
-                });
+                let starts_exclusion = is_comment
+                    || regions
+                        .last()
+                        .is_some_and(|region| region.span.contains(&node_span));
+                if excluded_depth > 0 || starts_exclusion {
+                    excluded_depth += 1;
+                    continue;
+                }
+                syntax.push(CodeToken::enter(node.kind()));
                 if node.child_count() == 0 {
                     let text = tree::node_text(node, source);
                     if !text.trim().is_empty() {
-                        syntax.push(SyntaxEvent {
-                            span: Span::from_node(node),
-                            token: CodeToken::atom(node.kind(), text),
-                        });
+                        syntax.push(CodeToken::atom(node.kind(), text));
                     }
                 }
             }
-            WalkEvent::Leave(node) => syntax.push(SyntaxEvent {
-                span: Span::from_node(node),
-                token: CodeToken::leave(node.kind()),
-            }),
+            WalkEvent::Leave(node) => {
+                if excluded_depth > 0 {
+                    excluded_depth -= 1;
+                } else {
+                    syntax.push(CodeToken::leave(node.kind()));
+                }
+            }
         }
     }
     Ok(Facts {
@@ -379,26 +381,6 @@ fn trim_attribute_value(value: &str) -> &str {
                 .and_then(|value| value.strip_suffix('\''))
         })
         .unwrap_or(value)
-}
-
-fn collect_template_code(
-    syntax: Vec<SyntaxEvent>,
-    comments: &[Comment],
-    regions: &[EmbeddedRegion],
-) -> Vec<CodeToken> {
-    let mut code = Vec::new();
-    for event in syntax {
-        let excluded = comments
-            .iter()
-            .any(|comment| comment.span.contains(&event.span))
-            || regions
-                .iter()
-                .any(|region| region.span.contains(&event.span));
-        if !excluded {
-            code.push(event.token);
-        }
-    }
-    code
 }
 
 fn parse_embedded_file(

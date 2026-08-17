@@ -79,6 +79,30 @@ fn thousands_of_public_rust_methods_keep_docs_exempt() {
 }
 
 #[test]
+fn thousands_of_html_comment_edits_do_not_stale_stable_template_attestation() {
+    let before = html_source(STATIC_OWNER_COUNT, 1);
+    let after = html_source(STATIC_OWNER_COUNT, 2);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("index.html"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("index.html"),
+            text: &after,
+        },
+    )
+    .expect("generated HTML change must parse");
+    let stale_count = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .count();
+
+    assert_eq!(stale_count, 0);
+}
+
+#[test]
 #[ignore = "manual release-mode scaling evidence"]
 fn report_many_owner_release_scaling() {
     for owner_count in [1_000, 2_000, 4_000] {
@@ -137,6 +161,29 @@ fn report_many_owner_release_scaling() {
         .expect("generated Rust must parse");
         assert!(findings.is_empty());
         eprintln!("rust public methods={owner_count}: {:?}", started.elapsed());
+
+        let before = html_source(owner_count, 1);
+        let after = html_source(owner_count, 2);
+        let started = Instant::now();
+        let findings = analyze_change(
+            SourceFile {
+                path: Path::new("index.html"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("index.html"),
+                text: &after,
+            },
+        )
+        .expect("generated HTML change must parse");
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+                .count(),
+            0
+        );
+        eprintln!("html comments={owner_count}: {:?}", started.elapsed());
     }
 }
 
@@ -173,6 +220,23 @@ fn rust_public_method_source(owner_count: usize) -> String {
             "pub struct Type{owner:05};\nimpl Type{owner:05} {{\n    /// Runs this public type.\n    pub fn run(&self) {{}}\n}}"
         )
         .expect("writing to a String cannot fail");
+    }
+    source
+}
+
+fn html_source(comment_count: usize, attestation: usize) -> String {
+    let mut source = String::with_capacity(comment_count * 128);
+    source.push_str("<!-- Coupled to the unchanged template structure. -->\n");
+    for comment in 0..comment_count {
+        writeln!(
+            source,
+            "<!-- Attestation {attestation} is coupled to card {comment:05}'s rendered label. -->"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for card in 0..comment_count {
+        writeln!(source, "<div data-card=\"{card:05}\">{card}</div>")
+            .expect("writing to a String cannot fail");
     }
     source
 }

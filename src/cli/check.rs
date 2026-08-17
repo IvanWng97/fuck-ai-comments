@@ -38,8 +38,10 @@ fn supported_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(true)
+        .hidden(false)
         .require_git(false)
-        .follow_links(false);
+        .follow_links(false)
+        .filter_entry(|entry| entry.file_name() != ".git");
 
     let mut files = Vec::new();
     for entry in builder.build() {
@@ -50,12 +52,22 @@ fn supported_files(root: &Path) -> Result<Vec<PathBuf>> {
                 entry.path().display()
             );
         }
+        if !supports_path(entry.path()) {
+            continue;
+        }
         if entry
             .file_type()
             .is_some_and(|file_type| file_type.is_file())
-            && supports_path(entry.path())
         {
             files.push(entry.into_path());
+        } else if entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_symlink())
+        {
+            bail!(
+                "supported path {} is not a regular file",
+                without_dot_prefix(entry.path()).display()
+            );
         }
     }
     files.sort();

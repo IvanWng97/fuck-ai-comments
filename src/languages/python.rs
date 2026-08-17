@@ -6,6 +6,8 @@ use super::tree::{LanguageSpec, analyze, document, first_descendant_with_kind, n
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, Leaf, ParsedFile, Span, TypeOwner};
 
+const BANDIT_NUMERIC_TEST_ID_DIGITS: usize = 3;
+
 #[derive(Clone, Copy)]
 struct Python;
 
@@ -211,7 +213,8 @@ fn is_mypy_code(code: &str) -> bool {
 
 fn is_bandit_test(test: &str) -> bool {
     let is_id = test.strip_prefix('B').is_some_and(|digits| {
-        digits.len() == 3 && digits.bytes().all(|byte| byte.is_ascii_digit())
+        digits.len() == BANDIT_NUMERIC_TEST_ID_DIGITS
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
     });
     let is_name = test.contains('_')
         && test
