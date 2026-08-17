@@ -4,11 +4,7 @@ use tree_sitter::Node;
 
 use super::tree::{LanguageSpec, analyze, first_descendant_with_kind, node_text};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{Leaf, Span};
-
-pub(crate) const DIRECTIVES: &[&str] = &["eslint", "@ts-", "istanbul ignore", "c8 ignore"];
-pub(crate) const LEAF_STOP_PREFIXES: &[&str] =
-    &["// eslint", "/* eslint", "// @ts-", "/* istanbul", "/* c8"];
+use crate::policy::{CommentKind, Leaf, Span};
 
 #[derive(Clone, Copy)]
 struct JavaScript;
@@ -34,16 +30,8 @@ impl LanguageSpec for JavaScript {
         is_function_kind(kind)
     }
 
-    fn is_comment(self, node: Node<'_>) -> bool {
-        node.kind() == "comment"
-    }
-
-    fn directives(self) -> &'static [&'static str] {
-        DIRECTIVES
-    }
-
-    fn leaf_stop_prefixes(self) -> &'static [&'static str] {
-        LEAF_STOP_PREFIXES
+    fn classify_comment(self, node: Node<'_>, source: &str) -> Option<CommentKind> {
+        classify_comment(node, source)
     }
 
     fn leaf(self, node: Node<'_>, source: &str, _function_depth: usize) -> Option<Leaf> {
@@ -51,10 +39,59 @@ impl LanguageSpec for JavaScript {
     }
 }
 
+pub(crate) fn classify_comment(node: Node<'_>, source: &str) -> Option<CommentKind> {
+    if node.kind() != "comment" {
+        return None;
+    }
+    let kind = if node.start_position().row == node.end_position().row
+        && is_tool_directive(node_text(node, source))
+    {
+        CommentKind::ToolDirective
+    } else {
+        CommentKind::Narrative
+    };
+    Some(kind)
+}
+
+fn is_tool_directive(comment: &str) -> bool {
+    let body = comment
+        .trim()
+        .strip_prefix("//")
+        .or_else(|| comment.trim().strip_prefix("/*"))
+        .unwrap_or(comment)
+        .trim_end_matches("*/")
+        .trim();
+    [
+        "eslint-disable",
+        "eslint-enable",
+        "eslint-disable-next-line",
+        "eslint-disable-line",
+        "eslint-env",
+        "@ts-check",
+        "@ts-nocheck",
+        "@ts-ignore",
+        "@ts-expect-error",
+        "istanbul ignore",
+        "c8 ignore",
+    ]
+    .iter()
+    .any(|directive| {
+        body == *directive
+            || body
+                .strip_prefix(directive)
+                .is_some_and(|suffix| suffix.starts_with([' ', ':']))
+    })
+}
+
 pub(crate) fn is_function_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "function_declaration" | "function_expression" | "arrow_function" | "method_definition"
+        "function_declaration"
+            | "function_expression"
+            | "generator_function_declaration"
+            | "generator_function"
+            | "arrow_function"
+            | "method_definition"
     )
 }
 
@@ -71,6 +108,5 @@ pub(crate) fn leaf_from_node(node: Node<'_>, source: &str) -> Option<Leaf> {
     Some(Leaf {
         span: Span::from_node(node),
         name: name.to_owned(),
-        public: false,
     })
 }

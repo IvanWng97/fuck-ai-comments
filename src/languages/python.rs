@@ -4,7 +4,7 @@ use tree_sitter::Node;
 
 use super::tree::{LanguageSpec, analyze, node_text};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{Leaf, Span};
+use crate::policy::{CommentKind, Leaf, Span};
 
 #[derive(Clone, Copy)]
 struct Python;
@@ -30,25 +30,17 @@ impl LanguageSpec for Python {
         kind == "function_definition"
     }
 
-    fn is_comment(self, node: Node<'_>) -> bool {
-        node.kind() == "comment" || is_function_docstring(node)
-    }
-
-    fn directives(self) -> &'static [&'static str] {
-        &["noqa", "type: ignore", "fmt:", "pragma:", "nosec"]
-    }
-
-    fn leaf_stop_prefixes(self) -> &'static [&'static str] {
-        &[
-            "#!",
-            "# -*-",
-            "# coding",
-            "# noqa",
-            "# type:",
-            "# fmt:",
-            "# pragma:",
-            "# nosec",
-        ]
+    fn classify_comment(self, node: Node<'_>, source: &str) -> Option<CommentKind> {
+        if is_function_docstring(node) {
+            return Some(CommentKind::Narrative);
+        }
+        (node.kind() == "comment").then(|| {
+            if is_tool_directive(node_text(node, source)) {
+                CommentKind::ToolDirective
+            } else {
+                CommentKind::Narrative
+            }
+        })
     }
 
     fn leaf(self, node: Node<'_>, source: &str, function_depth: usize) -> Option<Leaf> {
@@ -66,9 +58,25 @@ impl LanguageSpec for Python {
         uppercase.then(|| Leaf {
             span: Span::from_node(node),
             name: name.to_owned(),
-            public: false,
         })
     }
+}
+
+fn is_tool_directive(comment: &str) -> bool {
+    let body = comment
+        .trim_start()
+        .strip_prefix('#')
+        .unwrap_or(comment)
+        .trim();
+    body == "noqa"
+        || body.starts_with("noqa:")
+        || body == "type: ignore"
+        || (body.starts_with("type: ignore[") && body.ends_with(']'))
+        || matches!(body, "fmt: off" | "fmt: on" | "fmt: skip")
+        || body == "pragma: no cover"
+        || body == "nosec"
+        || body.starts_with("nosec ")
+        || body.starts_with("nosec:")
 }
 
 fn is_function_docstring(node: Node<'_>) -> bool {

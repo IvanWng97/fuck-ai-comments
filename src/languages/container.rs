@@ -5,7 +5,7 @@ use tree_sitter::{Language, Node};
 
 use super::{javascript, tree, typescript};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{Comment, Span, template_findings};
+use crate::policy::{Comment, CommentKind, Span, template_findings};
 
 pub(crate) trait ContainerSpec: Copy {
     fn label(self) -> &'static str;
@@ -76,8 +76,8 @@ fn collect_nodes<S: ContainerSpec>(
 ) {
     if spec.is_comment(node) {
         comments.push(Comment {
-            span: Span::from_node(node),
-            text: tree::node_text(node, source).to_owned(),
+            span: Span::from_comment_node(node, source),
+            kind: CommentKind::Narrative,
         });
     }
     if let Some(region) = spec.embedded_region(node, source) {

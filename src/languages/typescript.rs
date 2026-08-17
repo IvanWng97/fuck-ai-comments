@@ -2,10 +2,10 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use super::javascript::{DIRECTIVES, LEAF_STOP_PREFIXES, is_function_kind, leaf_from_node};
+use super::javascript::{classify_comment, is_function_kind, leaf_from_node};
 use super::tree::{LanguageSpec, analyze};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::Leaf;
+use crate::policy::{CommentKind, Leaf};
 
 #[derive(Clone, Copy)]
 enum TypeScript {
@@ -45,16 +45,8 @@ impl LanguageSpec for TypeScript {
         is_function_kind(kind)
     }
 
-    fn is_comment(self, node: Node<'_>) -> bool {
-        node.kind() == "comment"
-    }
-
-    fn directives(self) -> &'static [&'static str] {
-        DIRECTIVES
-    }
-
-    fn leaf_stop_prefixes(self) -> &'static [&'static str] {
-        LEAF_STOP_PREFIXES
+    fn classify_comment(self, node: Node<'_>, source: &str) -> Option<CommentKind> {
+        classify_comment(node, source)
     }
 
     fn leaf(self, node: Node<'_>, source: &str, _function_depth: usize) -> Option<Leaf> {

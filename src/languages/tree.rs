@@ -3,15 +3,13 @@ use std::path::Path;
 use tree_sitter::{Language, Node, Parser, Tree};
 
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{Comment, Function, Leaf, Span, function_findings, leaf_findings};
+use crate::policy::{Comment, CommentKind, Function, Leaf, Span, tree_findings};
 
 pub(crate) trait LanguageSpec: Copy {
     fn label(self) -> &'static str;
     fn grammar(self) -> Language;
     fn is_function(self, kind: &str) -> bool;
-    fn is_comment(self, node: Node<'_>) -> bool;
-    fn directives(self) -> &'static [&'static str];
-    fn leaf_stop_prefixes(self) -> &'static [&'static str];
+    fn classify_comment(self, node: Node<'_>, source: &str) -> Option<CommentKind>;
     fn leaf(self, node: Node<'_>, source: &str, function_depth: usize) -> Option<Leaf>;
 }
 
@@ -34,24 +32,15 @@ pub(crate) fn analyze<S: LanguageSpec>(
         &mut comments,
         &mut leaves,
     );
-    let mut findings = function_findings(
+    Ok(tree_findings(
         path,
         source,
         selection,
         &functions,
-        &comments,
-        spec.directives(),
-    );
-    findings.extend(leaf_findings(
-        path,
-        source,
-        selection,
         &leaves,
         &comments,
         spec.label(),
-        spec.leaf_stop_prefixes(),
-    ));
-    Ok(findings)
+    ))
 }
 
 pub(crate) fn parse(
@@ -98,10 +87,10 @@ fn collect_nodes<S: LanguageSpec>(
             name: function_name(node, source),
         });
     }
-    if spec.is_comment(node) {
+    if let Some(kind) = spec.classify_comment(node, source) {
         comments.push(Comment {
-            span: Span::from_node(node),
-            text: node_text(node, source).to_owned(),
+            span: Span::from_comment_node(node, source),
+            kind,
         });
     }
     if let Some(leaf) = spec.leaf(node, source, function_depth) {
