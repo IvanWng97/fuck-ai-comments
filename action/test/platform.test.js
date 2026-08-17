@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 
 import { parse as parseToml } from "smol-toml";
@@ -67,7 +68,11 @@ test("resolves cargo-dist archive layouts", () => {
       "fuck-ai-comments-x86_64-unknown-linux-gnu.tar.xz",
       "fuck-ai-comments",
     ),
-    "/tmp/extracted/fuck-ai-comments-x86_64-unknown-linux-gnu/fuck-ai-comments",
+    path.join(
+      "/tmp/extracted",
+      "fuck-ai-comments-x86_64-unknown-linux-gnu",
+      "fuck-ai-comments",
+    ),
   );
   assert.equal(
     extractedBinary(
@@ -75,7 +80,7 @@ test("resolves cargo-dist archive layouts", () => {
       "fuck-ai-comments-x86_64-pc-windows-msvc.zip",
       "fuck-ai-comments.exe",
     ),
-    "/tmp/extracted/fuck-ai-comments.exe",
+    path.join("/tmp/extracted", "fuck-ai-comments.exe"),
   );
 });
 
@@ -92,7 +97,7 @@ test("uses the root-level Windows layout from cargo-dist 0.32", async () => {
   assert.ok(fixture.entries.every((entry) => !entry.includes("/")));
   assert.equal(
     extractedBinary("/tmp/extracted", fixture.archive, fixture.binary),
-    "/tmp/extracted/dist.exe",
+    path.join("/tmp/extracted", "dist.exe"),
   );
 });
 
