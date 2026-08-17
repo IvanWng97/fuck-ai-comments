@@ -495,7 +495,7 @@ fn collect_tree_nodes(
             name: function_name(node, source),
         });
     }
-    if language.is_comment(node.kind()) {
+    if language.is_comment(node.kind()) || is_python_function_docstring(node, language) {
         comments.push(Comment {
             span: Span::from_node(node),
             text: node_text(node, source).to_owned(),
@@ -518,6 +518,29 @@ fn collect_tree_nodes(
             leaves,
         );
     }
+}
+
+fn is_python_function_docstring(node: Node<'_>, language: TreeLanguage) -> bool {
+    if !matches!(language, TreeLanguage::Python) || node.kind() != "string" {
+        return false;
+    }
+    let Some(statement) = node
+        .parent()
+        .filter(|parent| parent.kind() == "expression_statement")
+    else {
+        return false;
+    };
+    let Some(body) = statement.parent().filter(|parent| parent.kind() == "block") else {
+        return false;
+    };
+    if body
+        .parent()
+        .is_none_or(|parent| parent.kind() != "function_definition")
+    {
+        return false;
+    }
+    body.named_child(0)
+        .is_some_and(|first_statement| first_statement.id() == statement.id())
 }
 
 fn function_name(node: Node<'_>, source: &str) -> String {

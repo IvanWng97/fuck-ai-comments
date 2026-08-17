@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use fuck_ai_comments::{Selection, analyze_file};
+use fuck_ai_comments::{AnalysisError, Selection, analyze_file};
 
 #[test]
 fn rust_short_function_rejects_ten_comment_lines() {
@@ -154,6 +154,27 @@ fn python_short_function_rejects_ten_spread_comment_lines() {
             .iter()
             .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
         "expected Python function budget finding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn python_function_docstring_consumes_comment_budget() {
+    let source = concat!(
+        "def work():\n",
+        "    \"\"\"Describe the first implementation detail.\n",
+        "    Describe the second implementation detail.\n",
+        "    Describe the third implementation detail.\"\"\"\n",
+        "    return 1\n",
+    );
+
+    let findings = analyze_file(Path::new("worker.py"), source, &Selection::all(source))
+        .expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "expected Python docstring to consume the function budget, got {findings:#?}"
     );
 }
 
@@ -395,4 +416,187 @@ fn html_script_uses_javascript_owner_policy() {
             .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
         "expected embedded JavaScript function finding, got {findings:#?}"
     );
+}
+
+#[test]
+fn rust_rejects_three_consecutive_narrative_comments() {
+    let source = concat!(
+        "fn work() {\n",
+        "    // first\n",
+        "    // second\n",
+        "    // third\n",
+        "    run();\n",
+        "}\n",
+    );
+
+    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
+        .expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
+        "expected consecutive comment block finding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_long_function_accepts_four_separate_rationales() {
+    let source = concat!(
+        "fn work() {\n",
+        "    // first reason\n",
+        "    let a = 1;\n",
+        "    let b = 2;\n",
+        "    let c = 3;\n",
+        "    let d = 4;\n",
+        "    // second reason\n",
+        "    let e = 5;\n",
+        "    let f = 6;\n",
+        "    let g = 7;\n",
+        "    let h = 8;\n",
+        "    // third reason\n",
+        "    let i = 9;\n",
+        "    let j = 10;\n",
+        "    let k = 11;\n",
+        "    let l = 12;\n",
+        "    // fourth reason\n",
+        "    let m = 13;\n",
+        "    let n = 14;\n",
+        "    let o = 15;\n",
+        "    consume((a, b, c, d, e, f, g, h, i, j, k, l, m, n, o));\n",
+        "}\n",
+    );
+
+    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
+        .expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a longer function can earn separate rationale lines: {findings:#?}"
+    );
+}
+
+#[test]
+fn malformed_rust_fails_closed() {
+    let source = "fn broken( {\n";
+
+    let error = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
+        .expect_err("malformed Rust must not be analyzed heuristically");
+
+    assert!(
+        matches!(
+            error,
+            AnalysisError::Parse {
+                language: "Rust",
+                ..
+            }
+        ),
+        "expected a fail-closed Rust parse error, got {error}"
+    );
+}
+
+#[test]
+fn rust_public_const_doc_comment_is_not_a_private_leaf_narrative() {
+    let source = concat!(
+        "/// First public contract detail.\n",
+        "/// Second public contract detail.\n",
+        "/// Third public contract detail.\n",
+        "/// Fourth public contract detail.\n",
+        "pub const LIMIT: usize = 4;\n",
+    );
+
+    let findings = analyze_file(Path::new("src/lib.rs"), source, &Selection::all(source))
+        .expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "public rustdoc is governed by documentation lints, not the private leaf budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn javascript_directive_block_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "function work() {\n",
+        "  /* eslint-disable no-console\n",
+        "   * -- generated integration boundary\n",
+        "   * eslint-enable no-console */\n",
+        "  console.log('work');\n",
+        "}\n",
+    );
+
+    let findings = analyze_file(Path::new("worker.js"), source, &Selection::all(source))
+        .expect("valid JavaScript should parse");
+
+    assert!(
+        findings.is_empty(),
+        "tool directives are executable metadata, not narrative: {findings:#?}"
+    );
+}
+
+#[test]
+fn jsx_and_tsx_use_their_registered_grammars() {
+    let jsx = "export const View = () => <main>Hello</main>;\n";
+    let tsx = "export const View = (): JSX.Element => <main>Hello</main>;\n";
+
+    let jsx_findings = analyze_file(Path::new("View.jsx"), jsx, &Selection::all(jsx))
+        .expect("valid JSX should parse");
+    let tsx_findings = analyze_file(Path::new("View.tsx"), tsx, &Selection::all(tsx))
+        .expect("valid TSX should parse");
+
+    assert!(
+        jsx_findings.is_empty() && tsx_findings.is_empty(),
+        "registered JSX and TSX grammars should accept component syntax"
+    );
+}
+
+#[test]
+fn html_accepts_three_line_template_comment() {
+    let source = "<!-- first\nsecond\nthird -->\n<main>hello</main>\n";
+
+    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
+        .expect("valid HTML should parse");
+
+    assert!(
+        findings.is_empty(),
+        "three lines are within the template allowance: {findings:#?}"
+    );
+}
+
+#[test]
+fn embedded_javascript_finding_reports_container_line() {
+    let source = concat!(
+        "<header>heading</header>\n",
+        "<script>\n",
+        "function work() {\n",
+        "  // one\n",
+        "  const one = 1;\n",
+        "  // two\n",
+        "  const two = 2;\n",
+        "}\n",
+        "</script>\n",
+    );
+
+    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
+        .expect("valid HTML and JavaScript should parse");
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule == "comment-policy/function-comment-budget")
+        .expect("short embedded function should exceed its budget");
+
+    assert_eq!(finding.line, 4, "finding line should map to the HTML file");
+}
+
+#[test]
+fn html_json_script_is_not_parsed_as_javascript() {
+    let source = concat!(
+        "<script type=\"application/json\">\n",
+        "{\"template\": \"{{ this is not JavaScript }}\"}\n",
+        "</script>\n",
+    );
+
+    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
+        .expect("JSON script data should not enter the JavaScript adapter");
+
+    assert!(findings.is_empty(), "JSON data has no comment owners");
 }
