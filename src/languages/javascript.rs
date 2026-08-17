@@ -279,7 +279,7 @@ fn typescript_suppression_directive(comment: &str) -> bool {
         }
         candidate
             .trim_start_matches(char::is_whitespace)
-            .trim_start_matches('*')
+            .trim_start_matches(['/', '*'])
             .trim_start()
     };
     ["@ts-ignore", "@ts-expect-error"]

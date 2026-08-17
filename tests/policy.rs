@@ -2017,6 +2017,28 @@ fn typescript_suppression_directives_match_compiler_comment_forms() {
 }
 
 #[test]
+fn typescript_suppression_block_accepts_scanner_slash_decoration() {
+    for path in ["worker.js", "worker.ts"] {
+        let source = concat!(
+            "function work() {\n",
+            "  /*\n",
+            "   /// @ts-ignore */\n",
+            "  perform();\n",
+            "  // ordinary explanation\n",
+            "  finish();\n",
+            "}\n",
+        );
+
+        let findings = analyze(Path::new(path), source).expect("valid source should parse");
+
+        assert!(
+            findings.is_empty(),
+            "the TypeScript scanner permits slash decoration before a block suppression directive ({path}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
 fn typescript_suppression_block_with_prior_prose_is_narrative() {
     for path in ["worker.js", "worker.ts"] {
         let source = concat!(

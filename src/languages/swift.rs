@@ -3,9 +3,9 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, CallableSubtrees, DirectivePlacement, LanguageSpec,
-    OwnerCandidate, OwnerLocation, analyze, canonical_syntax, direct_named_child, document,
-    node_text,
+    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, AttachmentSyntax, CallableSubtrees,
+    DirectivePlacement, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, canonical_syntax,
+    direct_named_child, document, node_text,
 };
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -40,7 +40,12 @@ impl LanguageSpec for Swift {
     }
 
     fn build_context(self, root: Node<'_>, source: &str) -> Self::Context {
-        AttachmentIndex::from_root(root, source)
+        AttachmentIndex::with_syntax(
+            root,
+            source,
+            AttachmentSyntax::default()
+                .with_physical_scope_barrier(is_swift_physical_scope_barrier),
+        )
     }
 
     fn callable_kind(self) -> Option<fn(&str) -> bool> {
@@ -75,6 +80,10 @@ impl LanguageSpec for Swift {
             _ => None,
         }
     }
+}
+
+fn is_swift_physical_scope_barrier(kind: &str) -> bool {
+    is_swift_callable(kind) || matches!(kind, "class_declaration" | "protocol_declaration")
 }
 
 fn owner_from_node(
@@ -152,10 +161,10 @@ fn swiftlint_directive(comment: &str) -> Option<DirectivePlacement> {
         .map_or(rules, |(rules, _)| rules);
     let placement = match command {
         "swiftlint:disable" | "swiftlint:enable" => DirectivePlacement::FreeStanding,
-        "swiftlint:disable:next" | "swiftlint:enable:next" => DirectivePlacement::NextLine,
-        "swiftlint:disable:this" | "swiftlint:enable:this" => DirectivePlacement::SameLine,
+        "swiftlint:disable:next" | "swiftlint:enable:next" => DirectivePlacement::PhysicalNextLine,
+        "swiftlint:disable:this" | "swiftlint:enable:this" => DirectivePlacement::PhysicalSameLine,
         "swiftlint:disable:previous" | "swiftlint:enable:previous" => {
-            DirectivePlacement::PreviousLine
+            DirectivePlacement::PhysicalPreviousLine
         }
         _ => return None,
     };
@@ -208,8 +217,8 @@ fn swiftformat_block_directive(body: &str) -> Option<DirectivePlacement> {
     let ends_on_closing_row = candidate_row + 1 == row_count;
     match placement {
         DirectivePlacement::FreeStanding => Some(placement),
-        DirectivePlacement::NextLine if ends_on_closing_row => Some(placement),
-        DirectivePlacement::SameLine | DirectivePlacement::PreviousLine
+        DirectivePlacement::PhysicalNextLine if ends_on_closing_row => Some(placement),
+        DirectivePlacement::PhysicalSameLine | DirectivePlacement::PhysicalPreviousLine
             if starts_on_opening_row =>
         {
             Some(placement)
@@ -227,15 +236,15 @@ fn swiftformat_command(body: &str) -> Option<DirectivePlacement> {
             valid_swiftformat_rule_list(arguments),
         ),
         "swiftformat:disable:next" | "swiftformat:enable:next" => (
-            DirectivePlacement::NextLine,
+            DirectivePlacement::PhysicalNextLine,
             valid_swiftformat_rule_list(arguments),
         ),
         "swiftformat:disable:this" | "swiftformat:enable:this" => (
-            DirectivePlacement::SameLine,
+            DirectivePlacement::PhysicalSameLine,
             valid_swiftformat_rule_list(arguments),
         ),
         "swiftformat:disable:previous" | "swiftformat:enable:previous" => (
-            DirectivePlacement::PreviousLine,
+            DirectivePlacement::PhysicalPreviousLine,
             valid_swiftformat_rule_list(arguments),
         ),
         _ => return None,
@@ -408,7 +417,7 @@ fn has_direct_child(node: Node<'_>, kind: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn nested_directive_attachment_visits(depth: usize) -> usize {
+    fn nested_directive_source(depth: usize) -> String {
         let mut source = String::new();
         for index in 0..depth {
             source.push_str(&format!(
@@ -417,6 +426,11 @@ mod tests {
         }
         source.push_str("let value = 1\n");
         source.push_str(&"}\n".repeat(depth));
+        source
+    }
+
+    fn nested_directive_attachment_visits(depth: usize) -> usize {
+        let source = nested_directive_source(depth);
         crate::languages::tree::reset_attachment_index_visits();
         crate::analyze_all(crate::SourceFile {
             path: Path::new("Deep.swift"),
@@ -424,6 +438,26 @@ mod tests {
         })
         .expect("valid nested Swift");
         crate::languages::tree::attachment_index_visits()
+    }
+
+    fn nested_directive_physical_operations(depth: usize) -> usize {
+        let source = nested_directive_source(depth);
+        crate::languages::tree::reset_physical_attachment_operations();
+        parse_file(Path::new("Deep.swift"), &source).expect("valid nested Swift");
+        crate::languages::tree::physical_attachment_operations()
+    }
+
+    fn alternating_directive_physical_operations(count: usize) -> usize {
+        let mut source = String::from("func work() {\n");
+        for index in 0..count {
+            source.push_str(&format!(
+                "// swiftlint:disable:next custom-rule\ntarget{index}()\n"
+            ));
+        }
+        source.push_str("}\n");
+        crate::languages::tree::reset_physical_attachment_operations();
+        parse_file(Path::new("Alternating.swift"), &source).expect("valid alternating Swift");
+        crate::languages::tree::physical_attachment_operations()
     }
 
     #[test]
@@ -446,6 +480,22 @@ mod tests {
         let shallow = nested_directive_attachment_visits(16);
         let medium = nested_directive_attachment_visits(32);
         let deep = nested_directive_attachment_visits(64);
+        assert_eq!(deep - medium, 2 * (medium - shallow));
+    }
+
+    #[test]
+    fn alternating_directive_physical_operations_are_linear() {
+        let shallow = alternating_directive_physical_operations(16);
+        let medium = alternating_directive_physical_operations(32);
+        let deep = alternating_directive_physical_operations(64);
+        assert_eq!(deep - medium, 2 * (medium - shallow));
+    }
+
+    #[test]
+    fn nested_directive_physical_operations_are_linear() {
+        let shallow = nested_directive_physical_operations(16);
+        let medium = nested_directive_physical_operations(32);
+        let deep = nested_directive_physical_operations(64);
         assert_eq!(deep - medium, 2 * (medium - shallow));
     }
 }

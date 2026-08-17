@@ -397,6 +397,28 @@ fn attached_swiftlint_directives_do_not_consume_narrative_budget() {
 }
 
 #[test]
+fn swiftlint_previous_ignores_code_on_the_directive_line() {
+    let source = concat!(
+        "func work() {\n",
+        "    target()\n",
+        "    current() // swiftlint:disable:previous custom-rule\n",
+        "    // ordinary rationale\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftLint :previous targets the prior physical line even with code before the directive: {findings:#?}"
+    );
+}
+
+#[test]
 fn swiftlint_custom_rule_identifier_is_metadata() {
     let source = concat!(
         "func work() {\n",
@@ -553,6 +575,245 @@ fn attached_swiftformat_directive_does_not_consume_narrative_budget() {
     assert!(
         findings.is_empty(),
         "an operational SwiftFormat directive stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_this_attaches_to_code_after_the_comment_on_its_physical_line() {
+    let source = concat!(
+        "func work() {\n",
+        "    /* swiftformat:disable:this redundantSelf */ self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :this targets its physical line even when code follows it: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_next_ignores_code_on_the_directive_line() {
+    let source = concat!(
+        "func work() {\n",
+        "    /* swiftformat:disable:next redundantSelf */ self.current()\n",
+        "    self.target()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :next targets the next physical line instead of the next sibling: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_next_attaches_to_code_inside_a_multiline_sibling() {
+    let source = concat!(
+        "func work() {\n",
+        "    /* swiftformat:disable:next redundantSelf */ self.current(\n",
+        "        self.target()\n",
+        "    )\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :next targets code on an interior physical row of a sibling: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_previous_ignores_code_on_the_directive_line() {
+    let source = concat!(
+        "func work() {\n",
+        "    self.target()\n",
+        "    self.current() /* swiftformat:disable:previous redundantSelf */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :previous targets the prior physical line instead of the prior sibling: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_previous_attaches_to_code_inside_a_multiline_sibling() {
+    let source = concat!(
+        "func work() {\n",
+        "    self.current(\n",
+        "        self.target()\n",
+        "    ) /* swiftformat:disable:previous redundantSelf */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :previous targets code on an interior physical row of a sibling: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_next_attaches_to_a_closing_brace_on_the_target_line() {
+    let source = concat!(
+        "func work() {\n",
+        "    if enabled {\n",
+        "        // swiftformat:disable:next redundantSelf\n",
+        "    }\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :next applies when the target line contains only a closing brace: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_next_does_not_drift_past_a_comment_only_target_line() {
+    let source = concat!(
+        "func work() {\n",
+        "    /* swiftformat:disable:next redundantSelf */ self.current()\n",
+        "    /* target line contains no code */\n",
+        "    self.later()\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "a comment-only target line cannot shift SwiftFormat :next to later code: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftformat_next_survives_a_comment_sibling_before_the_target_line() {
+    let source = concat!(
+        "func work() {\n",
+        "    /* swiftformat:disable:next redundantSelf */ ",
+        "/* swiftformat:disable redundantSelf */ self.current()\n",
+        "    self.target()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a comment sibling does not cancel SwiftFormat :next before its target line: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftlint_previous_does_not_attach_to_code_outside_its_closure_frame() {
+    let source = concat!(
+        "func work() {\n",
+        "    outerTarget()\n",
+        "    let nested = { // swiftlint:disable:previous custom-rule\n",
+        "        // ordinary rationale\n",
+        "        inner()\n",
+        "    }\n",
+        "    consume(nested)\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "SwiftLint :previous cannot borrow target code from an enclosing syntax frame: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftlint_previous_does_not_attach_to_code_outside_its_type_frame() {
+    let source = concat!(
+        "outerTarget()\n",
+        "class Worker { // swiftlint:disable:previous custom-rule\n",
+        "    // ordinary rationale\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "SwiftLint :previous cannot borrow target code from outside its type frame: {findings:#?}"
     );
 }
 

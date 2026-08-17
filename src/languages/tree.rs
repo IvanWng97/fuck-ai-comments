@@ -127,7 +127,9 @@ pub(crate) enum DirectivePlacement {
     NextLine,
     NextNode,
     SameLine,
-    PreviousLine,
+    PhysicalNextLine,
+    PhysicalPreviousLine,
+    PhysicalSameLine,
     FilePreamble,
     FreeStanding,
 }
@@ -140,6 +142,7 @@ pub(crate) struct AttachmentIndex {
 #[derive(Clone, Copy)]
 pub(crate) struct AttachmentSyntax {
     transparent_comment_wrapper: fn(&str) -> bool,
+    physical_scope_barrier: Option<fn(&str) -> bool>,
     preamble_trivia: fn(&str) -> bool,
 }
 
@@ -150,8 +153,17 @@ impl AttachmentSyntax {
     ) -> Self {
         Self {
             transparent_comment_wrapper,
+            physical_scope_barrier: None,
             preamble_trivia,
         }
+    }
+
+    pub(crate) const fn with_physical_scope_barrier(
+        mut self,
+        physical_scope_barrier: fn(&str) -> bool,
+    ) -> Self {
+        self.physical_scope_barrier = Some(physical_scope_barrier);
+        self
     }
 }
 
@@ -162,10 +174,6 @@ impl Default for AttachmentSyntax {
 }
 
 impl AttachmentIndex {
-    pub(crate) fn from_root(root: Node<'_>, source: &str) -> Self {
-        Self::with_syntax(root, source, AttachmentSyntax::default())
-    }
-
     pub(crate) fn with_syntax(root: Node<'_>, source: &str, syntax: AttachmentSyntax) -> Self {
         let mut builder = AttachmentIndexBuilder::new(source, syntax);
         for event in events(root) {
@@ -174,9 +182,7 @@ impl AttachmentIndex {
                 WalkEvent::Leave(node) => builder.leave(node),
             }
         }
-        Self {
-            comments: builder.comments,
-        }
+        builder.finish()
     }
 
     pub(crate) fn is_attached(&self, node: Node<'_>, placement: DirectivePlacement) -> bool {
@@ -190,7 +196,9 @@ impl AttachmentIndex {
             DirectivePlacement::NextLine => attachment.next_line,
             DirectivePlacement::NextNode => attachment.next_node,
             DirectivePlacement::SameLine => attachment.same_line,
-            DirectivePlacement::PreviousLine => attachment.previous_line,
+            DirectivePlacement::PhysicalNextLine => attachment.physical_next_line,
+            DirectivePlacement::PhysicalPreviousLine => attachment.physical_previous_line,
+            DirectivePlacement::PhysicalSameLine => attachment.physical_same_line,
             DirectivePlacement::FilePreamble => attachment.file_preamble,
             DirectivePlacement::FreeStanding => true,
         }
@@ -204,13 +212,16 @@ struct CommentAttachment {
     next_line: bool,
     next_node: bool,
     same_line: bool,
-    previous_line: bool,
+    physical_next_line: bool,
+    physical_previous_line: bool,
+    physical_same_line: bool,
     file_preamble: bool,
 }
 
 struct AttachmentIndexBuilder<'source> {
     comments: HashMap<usize, CommentAttachment>,
     frames: Vec<AttachmentFrame>,
+    physical: Option<PhysicalAttachments>,
     source_position: SourcePosition<'source>,
     syntax: AttachmentSyntax,
 }
@@ -221,6 +232,7 @@ impl<'source> AttachmentIndexBuilder<'source> {
         Self {
             comments: HashMap::new(),
             frames: Vec::new(),
+            physical: syntax.physical_scope_barrier.map(PhysicalAttachments::new),
             source_position: SourcePosition::new(source),
             syntax,
         }
@@ -230,6 +242,14 @@ impl<'source> AttachmentIndexBuilder<'source> {
         record_attachment_index_visit();
         let starts_line = self.source_position.starts_line_at(node.start_byte());
         let is_root = self.frames.is_empty();
+        if let Some(physical) = self.physical.as_mut() {
+            physical.enter(
+                node,
+                is_root,
+                self.source_position.source,
+                &mut self.comments,
+            );
+        }
         self.frames.push(AttachmentFrame::new(
             node,
             is_root,
@@ -245,6 +265,7 @@ impl<'source> AttachmentIndexBuilder<'source> {
         let Some(frame) = frame else {
             return;
         };
+        let is_root = self.frames.is_empty();
         if let Some(parent) = self.frames.last_mut() {
             let transparent_comments =
                 if frame.is_transparent_comment_wrapper && !frame.has_non_comment_named_child {
@@ -259,6 +280,20 @@ impl<'source> AttachmentIndexBuilder<'source> {
                 transparent_comments,
                 &mut self.comments,
             );
+        }
+        if let Some(physical) = self.physical.as_mut() {
+            physical.leave(node, is_root);
+        }
+    }
+
+    fn finish(self) -> AttachmentIndex {
+        debug_assert!(self.frames.is_empty());
+        if let Some(physical) = self.physical.as_ref() {
+            debug_assert!(physical.scopes.is_empty());
+            debug_assert_eq!(physical.comment_depth, 0);
+        }
+        AttachmentIndex {
+            comments: self.comments,
         }
     }
 }
@@ -320,8 +355,6 @@ impl AttachmentFrame {
             if let Some(previous) = self.last_named_child.as_ref() {
                 attachment.same_line =
                     !previous.is_comment_boundary() && previous.end_row == child.start_row;
-                attachment.previous_line = !previous.is_comment_boundary()
-                    && previous.end_row.saturating_add(1) == child.start_row;
             }
             if self.is_root && self.preamble_open {
                 attachment.file_preamble = true;
@@ -353,6 +386,189 @@ impl AttachmentFrame {
             self.preamble_open = false;
         }
         self.last_named_child = Some(child);
+    }
+}
+
+struct PhysicalAttachments {
+    barrier: fn(&str) -> bool,
+    scopes: Vec<PhysicalScope>,
+    comment_depth: usize,
+}
+
+impl PhysicalAttachments {
+    fn new(barrier: fn(&str) -> bool) -> Self {
+        Self {
+            barrier,
+            scopes: Vec::new(),
+            comment_depth: 0,
+        }
+    }
+
+    fn enter(
+        &mut self,
+        node: Node<'_>,
+        is_root: bool,
+        source: &[u8],
+        comments: &mut HashMap<usize, CommentAttachment>,
+    ) {
+        if self.comment_depth > 0 {
+            self.comment_depth += 1;
+            return;
+        }
+        if is_comment_kind(node.kind()) {
+            if let Some(scope) = self.scopes.last_mut() {
+                let attachment = comments.entry(node.id()).or_default();
+                scope.record_comment(node, attachment);
+            }
+            self.comment_depth = 1;
+            return;
+        }
+
+        let is_barrier = !is_root && (self.barrier)(node.kind());
+        if is_root || is_barrier {
+            if is_barrier && let Some(parent) = self.scopes.last_mut() {
+                parent.record_row(node.start_position().row, comments);
+                parent.record_row(node.end_position().row, comments);
+            }
+            self.scopes.push(PhysicalScope::new(node.id()));
+        } else if node.child_count() == 0
+            && let Some(scope) = self.scopes.last_mut()
+        {
+            scope.record_leaf(node, source, comments);
+        }
+    }
+
+    fn leave(&mut self, node: Node<'_>, is_root: bool) {
+        if self.comment_depth > 0 {
+            self.comment_depth -= 1;
+            return;
+        }
+        if is_root || (self.barrier)(node.kind()) {
+            let scope = self.scopes.pop();
+            debug_assert_eq!(scope.map(|scope| scope.node_id), Some(node.id()));
+        }
+    }
+}
+
+struct PhysicalScope {
+    node_id: usize,
+    code_rows: RecentCodeRows,
+    pending: HashMap<usize, Vec<PendingPhysicalAttachment>>,
+}
+
+impl PhysicalScope {
+    fn new(node_id: usize) -> Self {
+        Self {
+            node_id,
+            code_rows: RecentCodeRows::default(),
+            pending: HashMap::new(),
+        }
+    }
+
+    fn record_comment(&mut self, node: Node<'_>, attachment: &mut CommentAttachment) {
+        record_physical_attachment_operations(2);
+        let start_row = node.start_position().row;
+        let end_row = node.end_position().row;
+        attachment.physical_same_line = self.code_rows.contains(start_row);
+        attachment.physical_previous_line = start_row
+            .checked_sub(1)
+            .is_some_and(|row| self.code_rows.contains(row));
+        self.pending
+            .entry(start_row)
+            .or_default()
+            .push(PendingPhysicalAttachment {
+                node_id: node.id(),
+                target: PhysicalAttachmentTarget::SameLine,
+            });
+        self.pending
+            .entry(end_row.saturating_add(1))
+            .or_default()
+            .push(PendingPhysicalAttachment {
+                node_id: node.id(),
+                target: PhysicalAttachmentTarget::NextLine,
+            });
+    }
+
+    fn record_leaf(
+        &mut self,
+        node: Node<'_>,
+        source: &[u8],
+        comments: &mut HashMap<usize, CommentAttachment>,
+    ) {
+        let Some(bytes) = source.get(node.start_byte()..node.end_byte()) else {
+            debug_assert!(false, "tree-sitter leaf range must fit the source");
+            return;
+        };
+        let mut row = node.start_position().row;
+        let mut row_has_code = false;
+        for byte in bytes {
+            if *byte == b'\n' {
+                if row_has_code {
+                    self.record_row(row, comments);
+                }
+                row = row.saturating_add(1);
+                row_has_code = false;
+            } else if !byte.is_ascii_whitespace() {
+                row_has_code = true;
+            }
+        }
+        if row_has_code {
+            self.record_row(row, comments);
+        }
+    }
+
+    fn record_row(&mut self, row: usize, comments: &mut HashMap<usize, CommentAttachment>) {
+        record_physical_attachment_operations(1);
+        if let Some(pending) = self.pending.remove(&row) {
+            record_physical_attachment_operations(pending.len());
+            for attachment in pending {
+                attachment.mark(comments);
+            }
+        }
+        self.code_rows.record(row);
+    }
+}
+
+// Monotone token rows make values older than the latest two unreachable by the only queries: a comment row and its predecessor.
+#[derive(Default)]
+struct RecentCodeRows {
+    previous: Option<usize>,
+    latest: Option<usize>,
+}
+
+impl RecentCodeRows {
+    fn contains(&self, row: usize) -> bool {
+        self.latest == Some(row) || self.previous == Some(row)
+    }
+
+    fn record(&mut self, row: usize) {
+        if self.latest == Some(row) {
+            return;
+        }
+        debug_assert!(self.latest.is_none_or(|latest| latest <= row));
+        self.previous = self.latest;
+        self.latest = Some(row);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PhysicalAttachmentTarget {
+    SameLine,
+    NextLine,
+}
+
+struct PendingPhysicalAttachment {
+    node_id: usize,
+    target: PhysicalAttachmentTarget,
+}
+
+impl PendingPhysicalAttachment {
+    fn mark(self, comments: &mut HashMap<usize, CommentAttachment>) {
+        let attachment = comments.entry(self.node_id).or_default();
+        match self.target {
+            PhysicalAttachmentTarget::SameLine => attachment.physical_same_line = true,
+            PhysicalAttachmentTarget::NextLine => attachment.physical_next_line = true,
+        }
     }
 }
 
@@ -441,6 +657,7 @@ impl<'source> SourcePosition<'source> {
 #[cfg(test)]
 thread_local! {
     static ATTACHMENT_INDEX_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHYSICAL_ATTACHMENT_OPERATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -452,6 +669,14 @@ fn record_attachment_index_visit() {
 fn record_attachment_index_visit() {}
 
 #[cfg(test)]
+fn record_physical_attachment_operations(count: usize) {
+    PHYSICAL_ATTACHMENT_OPERATIONS.with(|operations| operations.set(operations.get() + count));
+}
+
+#[cfg(not(test))]
+fn record_physical_attachment_operations(_count: usize) {}
+
+#[cfg(test)]
 pub(crate) fn reset_attachment_index_visits() {
     ATTACHMENT_INDEX_VISITS.with(|visits| visits.set(0));
 }
@@ -459,6 +684,16 @@ pub(crate) fn reset_attachment_index_visits() {
 #[cfg(test)]
 pub(crate) fn attachment_index_visits() -> usize {
     ATTACHMENT_INDEX_VISITS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_physical_attachment_operations() {
+    PHYSICAL_ATTACHMENT_OPERATIONS.with(|operations| operations.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn physical_attachment_operations() -> usize {
+    PHYSICAL_ATTACHMENT_OPERATIONS.with(std::cell::Cell::get)
 }
 
 pub(crate) struct OwnerCandidate {
