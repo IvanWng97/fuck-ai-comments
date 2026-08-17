@@ -43,8 +43,7 @@ impl LanguageSpec for Swift {
         AttachmentIndex::with_syntax(
             root,
             source,
-            AttachmentSyntax::default()
-                .with_physical_scope_barrier(is_swift_physical_scope_barrier),
+            AttachmentSyntax::default().with_physical_lines(),
         )
     }
 
@@ -80,10 +79,6 @@ impl LanguageSpec for Swift {
             _ => None,
         }
     }
-}
-
-fn is_swift_physical_scope_barrier(kind: &str) -> bool {
-    is_swift_callable(kind) || matches!(kind, "class_declaration" | "protocol_declaration")
 }
 
 fn owner_from_node(
@@ -161,10 +156,14 @@ fn swiftlint_directive(comment: &str) -> Option<DirectivePlacement> {
         .map_or(rules, |(rules, _)| rules);
     let placement = match command {
         "swiftlint:disable" | "swiftlint:enable" => DirectivePlacement::FreeStanding,
-        "swiftlint:disable:next" | "swiftlint:enable:next" => DirectivePlacement::PhysicalNextLine,
-        "swiftlint:disable:this" | "swiftlint:enable:this" => DirectivePlacement::PhysicalSameLine,
+        "swiftlint:disable:next" | "swiftlint:enable:next" => {
+            DirectivePlacement::PhysicalNextLine(0)
+        }
+        "swiftlint:disable:this" | "swiftlint:enable:this" => {
+            DirectivePlacement::PhysicalSameLine(0)
+        }
         "swiftlint:disable:previous" | "swiftlint:enable:previous" => {
-            DirectivePlacement::PhysicalPreviousLine
+            DirectivePlacement::PhysicalPreviousLine(0)
         }
         _ => return None,
     };
@@ -177,10 +176,8 @@ fn valid_swiftlint_rule_list(rules: &str) -> bool {
 
 fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
     if let Some(body) = comment.strip_prefix("//") {
-        if body.starts_with('/') {
-            return None;
-        }
         let body = body.trim();
+        let body = body.trim_start_matches(is_swiftformat_decoration);
         return (!body.contains(['\r', '\n']))
             .then(|| swiftformat_command(body))
             .flatten();
@@ -192,20 +189,11 @@ fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
 
 fn swiftformat_block_directive(body: &str) -> Option<DirectivePlacement> {
     let mut candidate = None;
-    let mut row_count = 0;
-    for row in body.split(['\r', '\n']) {
-        let row_index = row_count;
-        row_count += 1;
-        let row = row.trim();
-        if row
-            .chars()
-            .all(|character| character.is_whitespace() || character == '*')
-        {
+    for (row_index, row) in body.split('\n').enumerate() {
+        let row = row.trim_matches(is_swiftformat_decoration);
+        if row.is_empty() {
             continue;
         }
-        let row = row
-            .strip_prefix('*')
-            .map_or(row, |decorated| decorated.trim_start());
         let placement = swiftformat_command(row)?;
         if candidate.replace((placement, row_index)).is_some() {
             return None;
@@ -213,18 +201,11 @@ fn swiftformat_block_directive(body: &str) -> Option<DirectivePlacement> {
     }
 
     let (placement, candidate_row) = candidate?;
-    let starts_on_opening_row = candidate_row == 0;
-    let ends_on_closing_row = candidate_row + 1 == row_count;
-    match placement {
-        DirectivePlacement::FreeStanding => Some(placement),
-        DirectivePlacement::PhysicalNextLine if ends_on_closing_row => Some(placement),
-        DirectivePlacement::PhysicalSameLine | DirectivePlacement::PhysicalPreviousLine
-            if starts_on_opening_row =>
-        {
-            Some(placement)
-        }
-        _ => None,
-    }
+    Some(placement.with_physical_marker_row(candidate_row))
+}
+
+fn is_swiftformat_decoration(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '/' | '*')
 }
 
 fn swiftformat_command(body: &str) -> Option<DirectivePlacement> {
@@ -236,15 +217,15 @@ fn swiftformat_command(body: &str) -> Option<DirectivePlacement> {
             valid_swiftformat_rule_list(arguments),
         ),
         "swiftformat:disable:next" | "swiftformat:enable:next" => (
-            DirectivePlacement::PhysicalNextLine,
+            DirectivePlacement::PhysicalNextLine(0),
             valid_swiftformat_rule_list(arguments),
         ),
         "swiftformat:disable:this" | "swiftformat:enable:this" => (
-            DirectivePlacement::PhysicalSameLine,
+            DirectivePlacement::PhysicalSameLine(0),
             valid_swiftformat_rule_list(arguments),
         ),
         "swiftformat:disable:previous" | "swiftformat:enable:previous" => (
-            DirectivePlacement::PhysicalPreviousLine,
+            DirectivePlacement::PhysicalPreviousLine(0),
             valid_swiftformat_rule_list(arguments),
         ),
         _ => return None,

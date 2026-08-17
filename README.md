@@ -19,7 +19,7 @@ comments.
 | Rule                             | Required policy                                                                                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                  |
-| Type budget                      | Classes, structs, protocols, extensions, and equivalent type owners use the same relative narrative budget as functions                           |
+| Type budget                      | Recognized type owners in Python, JavaScript/TypeScript, Kotlin, Objective-C, and Swift use the same relative narrative budget as functions       |
 | Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, template, and TOML owners allow at most 3 total                                        |
 | Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                           |
 | File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                              |

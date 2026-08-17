@@ -768,7 +768,7 @@ fn swiftformat_next_survives_a_comment_sibling_before_the_target_line() {
 }
 
 #[test]
-fn swiftlint_previous_does_not_attach_to_code_outside_its_closure_frame() {
+fn swiftlint_previous_attaches_across_a_closure_boundary() {
     let source = concat!(
         "func work() {\n",
         "    outerTarget()\n",
@@ -787,15 +787,13 @@ fn swiftlint_previous_does_not_attach_to_code_outside_its_closure_frame() {
     .expect("valid Swift should parse");
 
     assert!(
-        findings
-            .iter()
-            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
-        "SwiftLint :previous cannot borrow target code from an enclosing syntax frame: {findings:#?}"
+        findings.is_empty(),
+        "SwiftLint :previous follows physical lines across closure syntax: {findings:#?}"
     );
 }
 
 #[test]
-fn swiftlint_previous_does_not_attach_to_code_outside_its_type_frame() {
+fn swiftlint_previous_attaches_across_a_type_boundary() {
     let source = concat!(
         "outerTarget()\n",
         "class Worker { // swiftlint:disable:previous custom-rule\n",
@@ -810,10 +808,54 @@ fn swiftlint_previous_does_not_attach_to_code_outside_its_type_frame() {
     .expect("valid Swift should parse");
 
     assert!(
-        findings
-            .iter()
-            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
-        "SwiftLint :previous cannot borrow target code from outside its type frame: {findings:#?}"
+        findings.is_empty(),
+        "SwiftLint :previous follows physical lines across type syntax: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftlint_next_attaches_across_a_closure_boundary() {
+    let source = concat!(
+        "func work() {\n",
+        "    // swiftlint:disable:next custom-rule\n",
+        "    let nested = {\n",
+        "        // ordinary rationale\n",
+        "        inner()\n",
+        "    }\n",
+        "    consume(nested)\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftLint :next follows physical lines into closure syntax: {findings:#?}"
+    );
+}
+
+#[test]
+fn swiftlint_this_attaches_to_code_on_a_type_declaration_row() {
+    let source = concat!(
+        "class Worker { // swiftlint:disable:this custom-rule\n",
+        "    // ordinary rationale\n",
+        "    func work() {}\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftLint :this sees code on a type declaration row: {findings:#?}"
     );
 }
 
@@ -886,6 +928,101 @@ fn multiline_swiftformat_next_on_closing_row_does_not_consume_narrative_budget()
     assert!(
         findings.is_empty(),
         "a SwiftFormat :next marker on the block's closing row stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn multiline_swiftformat_next_uses_the_marker_row() {
+    let source = concat!(
+        "func work() {\n",
+        "    /*\n",
+        "     swiftformat:disable:next redundantSelf\n",
+        "     */ self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :next targets the row after its marker inside a block: {findings:#?}"
+    );
+}
+
+#[test]
+fn multiline_swiftformat_previous_uses_the_marker_row() {
+    let source = concat!(
+        "func work() {\n",
+        "    self.perform() /*\n",
+        "     swiftformat:disable:previous redundantSelf\n",
+        "     */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :previous targets the row before its marker inside a block: {findings:#?}"
+    );
+}
+
+#[test]
+fn multiline_swiftformat_this_uses_the_marker_row() {
+    let source = concat!(
+        "func work() {\n",
+        "    /*\n",
+        "     swiftformat:disable:this redundantSelf */ self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat :this targets its marker row inside a block: {findings:#?}"
+    );
+}
+
+#[test]
+fn multiline_swiftformat_marker_row_handles_crlf() {
+    let source = concat!(
+        "func work() {\r\n",
+        "    /*\r\n",
+        "     swiftformat:disable:next redundantSelf\r\n",
+        "     */ self.perform()\r\n",
+        "    // ordinary explanation\r\n",
+        "    finish()\r\n",
+        "}\r\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat marker rows follow CRLF physical lines: {findings:#?}"
     );
 }
 
@@ -1049,7 +1186,7 @@ fn multiline_swiftformat_boundary_modifier_with_narrative_row_remains_narrative(
 }
 
 #[test]
-fn multiline_swiftformat_line_modifiers_remain_narrative() {
+fn multiline_swiftformat_modifiers_remain_narrative_without_code_on_the_target_row() {
     let sources = [
         (
             "next",
@@ -1102,7 +1239,7 @@ fn multiline_swiftformat_line_modifiers_remain_narrative() {
             findings
                 .iter()
                 .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
-            "a multiline SwiftFormat :{modifier} block remains narrative: {findings:#?}"
+            "SwiftFormat :{modifier} remains narrative when its exact target row has no code: {findings:#?}"
         );
     }
 }
@@ -1177,19 +1314,134 @@ fn swiftformat_directive_must_be_the_only_comment_content_before_arguments() {
 }
 
 #[test]
+fn doc_line_swiftformat_directive_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    /// swiftformat:disable:next spaceAroundOperators\n",
+        "    self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat recognizes a directive behind doc-line decoration: {findings:#?}"
+    );
+}
+
+#[test]
+fn nested_structural_swiftformat_block_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    /*\n",
+        "     /* swiftformat:disable spaceAroundOperators */\n",
+        "    */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat recognizes a directive inside structural nested block decoration: {findings:#?}"
+    );
+}
+
+#[test]
+fn nested_doc_star_swiftformat_block_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    /*\n",
+        "     * /* swiftformat:disable spaceAroundOperators */\n",
+        "     */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "SwiftFormat recognizes nested block decoration behind an outer doc star: {findings:#?}"
+    );
+}
+
+#[test]
+fn nested_swiftformat_block_with_prose_remains_narrative() {
+    let source = concat!(
+        "func work() {\n",
+        "    /*\n",
+        "     /* swiftformat:disable spaceAroundOperators */\n",
+        "     rationale\n",
+        "    */\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "structural decoration cannot launder prose beside a SwiftFormat marker: {findings:#?}"
+    );
+}
+
+#[test]
+fn nested_swiftformat_block_with_two_markers_remains_narrative() {
+    let source = concat!(
+        "func work() {\n",
+        "    /*\n",
+        "     /* swiftformat:disable spaceAroundOperators */\n",
+        "     /* swiftformat:enable spaceAroundOperators */\n",
+        "    */\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "an ambiguous nested block cannot become SwiftFormat metadata: {findings:#?}"
+    );
+}
+
+#[test]
 fn malformed_or_unattached_swiftformat_prefixes_remain_narrative() {
     let sources = [
         concat!(
             "func work() {\n",
             "    // swiftformat:disbible:next redundantSelf\n",
-            "    self.perform()\n",
-            "    // ordinary explanation\n",
-            "    finish()\n",
-            "}\n",
-        ),
-        concat!(
-            "func work() {\n",
-            "    /// swiftformat:disable:next redundantSelf\n",
             "    self.perform()\n",
             "    // ordinary explanation\n",
             "    finish()\n",
