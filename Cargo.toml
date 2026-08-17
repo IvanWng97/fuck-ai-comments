@@ -1,0 +1,39 @@
+[package]
+name = "fuck-ai-comments"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Required, owner-aware comment policy for multi-language repositories"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["comments", "lint", "tree-sitter", "ai", "github-actions"]
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+regex = "1.11"
+thiserror = "2.0"
+tree-sitter = "0.26.11"
+tree-sitter-astro-next = "0.1.1"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+
+[dev-dependencies]
+tempfile = "3.21"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
