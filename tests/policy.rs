@@ -309,3 +309,90 @@ fn toml_key_change_rejects_unchanged_comment() {
         "expected TOML stale-owner finding, got {findings:#?}"
     );
 }
+
+#[test]
+fn html_rejects_four_line_template_comment() {
+    let source = "<!-- first\nsecond\nthird\nfourth -->\n<main>hello</main>\n";
+
+    let findings = analyze_file(Path::new("index.html"), source, &Selection::all(source))
+        .expect("valid HTML should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/template-comment-budget"),
+        "expected HTML template budget finding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn css_rejects_four_line_comment() {
+    let source = "/* first\nsecond\nthird\nfourth */\nmain { display: block; }\n";
+
+    let findings = analyze_file(Path::new("site.css"), source, &Selection::all(source))
+        .expect("valid CSS should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/template-comment-budget"),
+        "expected CSS comment budget finding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_rejects_four_line_template_comment() {
+    let source = "---\nconst title = 'Hello';\n---\n<!-- first\nsecond\nthird\nfourth -->\n<h1>{title}</h1>\n";
+
+    let findings = analyze_file(Path::new("Page.astro"), source, &Selection::all(source))
+        .expect("valid Astro should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/template-comment-budget"),
+        "expected Astro template budget finding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_uses_typescript_owner_policy() {
+    let mut source = String::from("---\nfunction work(): number {\n");
+    for number in 1..=10 {
+        source.push_str(&format!(
+            "  // narration {number}\n  const value{number} = {number};\n"
+        ));
+    }
+    source.push_str("  return value10;\n}\n---\n<div>{work()}</div>\n");
+
+    let findings = analyze_file(Path::new("Page.astro"), &source, &Selection::all(&source))
+        .expect("valid Astro should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "expected embedded TypeScript function finding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn html_script_uses_javascript_owner_policy() {
+    let mut source = String::from("<script>\nfunction work() {\n");
+    for number in 1..=10 {
+        source.push_str(&format!(
+            "  // narration {number}\n  const value{number} = {number};\n"
+        ));
+    }
+    source.push_str("  return value10;\n}\n</script>\n");
+
+    let findings = analyze_file(Path::new("index.html"), &source, &Selection::all(&source))
+        .expect("valid HTML should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "expected embedded JavaScript function finding, got {findings:#?}"
+    );
+}

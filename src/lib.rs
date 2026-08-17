@@ -8,6 +8,7 @@ use tree_sitter::{Node, Parser};
 const FUNCTION_COMMENT_ABSOLUTE_MAX: usize = 8;
 const FUNCTION_CODE_LINES_PER_COMMENT: usize = 4;
 const LEAF_COMMENT_MAX_LINES: usize = 3;
+const TEMPLATE_COMMENT_MAX_LINES: usize = 3;
 
 /// One required policy violation.
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -61,6 +62,9 @@ pub fn analyze_file(
         Some("ts") => analyze_tree(path, source, selection, TreeLanguage::TypeScript),
         Some("tsx") => analyze_tree(path, source, selection, TreeLanguage::Tsx),
         Some("toml") => analyze_toml(path, source, selection),
+        Some("html" | "htm") => analyze_container(path, source, selection, ContainerLanguage::Html),
+        Some("css") => analyze_container(path, source, selection, ContainerLanguage::Css),
+        Some("astro") => analyze_container(path, source, selection, ContainerLanguage::Astro),
         _ => Err(AnalysisError::Unsupported(path.display().to_string())),
     }
 }
@@ -154,6 +158,31 @@ enum TreeLanguage {
     JavaScript,
     TypeScript,
     Tsx,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ContainerLanguage {
+    Html,
+    Css,
+    Astro,
+}
+
+impl ContainerLanguage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Html => "HTML",
+            Self::Css => "CSS",
+            Self::Astro => "Astro",
+        }
+    }
+
+    fn grammar(self) -> tree_sitter::Language {
+        match self {
+            Self::Html => tree_sitter_html::LANGUAGE.into(),
+            Self::Css => tree_sitter_css::LANGUAGE.into(),
+            Self::Astro => tree_sitter_astro_next::LANGUAGE.into(),
+        }
+    }
 }
 
 impl TreeLanguage {
@@ -283,6 +312,170 @@ fn analyze_tree(
         language.label(),
         language.leaf_stop_prefixes(),
     ));
+    Ok(findings)
+}
+
+#[derive(Debug)]
+struct EmbeddedRegion {
+    span: Span,
+    language: TreeLanguage,
+}
+
+fn analyze_container(
+    path: &Path,
+    source: &str,
+    selection: &Selection,
+    language: ContainerLanguage,
+) -> Result<Vec<Finding>, AnalysisError> {
+    let mut parser = Parser::new();
+    let grammar = language.grammar();
+    parser
+        .set_language(&grammar)
+        .map_err(|error| AnalysisError::ParserInit {
+            language: language.label(),
+            detail: error.to_string(),
+        })?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| AnalysisError::Parse {
+            path: path.display().to_string(),
+            language: language.label(),
+        })?;
+    if tree.root_node().has_error() {
+        return Err(AnalysisError::Parse {
+            path: path.display().to_string(),
+            language: language.label(),
+        });
+    }
+
+    let mut comments = Vec::new();
+    let mut regions = Vec::new();
+    collect_container_nodes(
+        tree.root_node(),
+        source,
+        language,
+        &mut comments,
+        &mut regions,
+    );
+    let mut findings = template_comment_findings(path, selection, &comments);
+    for region in regions {
+        findings.extend(analyze_embedded_region(path, source, selection, &region)?);
+    }
+    Ok(findings)
+}
+
+fn collect_container_nodes(
+    node: Node<'_>,
+    source: &str,
+    language: ContainerLanguage,
+    comments: &mut Vec<Comment>,
+    regions: &mut Vec<EmbeddedRegion>,
+) {
+    if node.kind() == "comment" {
+        comments.push(Comment {
+            span: Span::from_node(node),
+            text: node_text(node, source).to_owned(),
+        });
+    }
+    if matches!(language, ContainerLanguage::Astro) && node.kind() == "frontmatter_js_block" {
+        regions.push(EmbeddedRegion {
+            span: Span::from_node(node),
+            language: TreeLanguage::TypeScript,
+        });
+    }
+    if !matches!(language, ContainerLanguage::Css)
+        && node.kind() == "script_element"
+        && let Some(raw) = first_descendant_with_kind(node, "raw_text")
+    {
+        let opening = source
+            .get(node.start_byte()..raw.start_byte())
+            .unwrap_or_default();
+        if let Some(language) = script_language(opening) {
+            regions.push(EmbeddedRegion {
+                span: Span::from_node(raw),
+                language,
+            });
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_container_nodes(child, source, language, comments, regions);
+    }
+}
+
+fn script_language(opening_tag: &str) -> Option<TreeLanguage> {
+    let normalized = opening_tag.to_ascii_lowercase();
+    if normalized.contains("lang=\"ts\"")
+        || normalized.contains("lang='ts'")
+        || normalized.contains("type=\"text/typescript\"")
+        || normalized.contains("type='text/typescript'")
+    {
+        return Some(TreeLanguage::TypeScript);
+    }
+    let data_only = [
+        "application/json",
+        "application/ld+json",
+        "importmap",
+        "speculationrules",
+    ];
+    (!data_only.iter().any(|kind| normalized.contains(kind))).then_some(TreeLanguage::JavaScript)
+}
+
+fn template_comment_findings(
+    path: &Path,
+    selection: &Selection,
+    comments: &[Comment],
+) -> Vec<Finding> {
+    comments
+        .iter()
+        .filter(|comment| {
+            comment.span.lines().count() > TEMPLATE_COMMENT_MAX_LINES
+                && comment
+                    .span
+                    .lines()
+                    .any(|line| selection.owners.contains(&line))
+        })
+        .map(|comment| Finding {
+            path: path.display().to_string(),
+            line: comment.span.start_line,
+            rule: "comment-policy/template-comment-budget",
+            message: format!(
+                "template comment spans {} lines; allowance is {TEMPLATE_COMMENT_MAX_LINES}",
+                comment.span.lines().count()
+            ),
+        })
+        .collect()
+}
+
+fn analyze_embedded_region(
+    path: &Path,
+    source: &str,
+    selection: &Selection,
+    region: &EmbeddedRegion,
+) -> Result<Vec<Finding>, AnalysisError> {
+    let Some(embedded) = source.get(region.span.start_byte..region.span.end_byte) else {
+        return Err(AnalysisError::Parse {
+            path: path.display().to_string(),
+            language: region.language.label(),
+        });
+    };
+    let line_offset = region.span.start_line - 1;
+    let map_lines = |lines: &BTreeSet<usize>| {
+        lines
+            .iter()
+            .filter(|line| region.span.start_line <= **line && **line <= region.span.end_line)
+            .map(|line| line - line_offset)
+            .collect()
+    };
+    let embedded_selection = Selection {
+        changed: map_lines(&selection.changed),
+        owners: map_lines(&selection.owners),
+    };
+    let mut findings = analyze_tree(path, embedded, &embedded_selection, region.language)?;
+    for finding in &mut findings {
+        finding.line += line_offset;
+    }
     Ok(findings)
 }
 
