@@ -439,15 +439,92 @@ fn clang_format_markers_do_not_consume_narrative_budget() {
 }
 
 #[test]
+fn trailing_exact_clang_format_markers_do_not_consume_narrative_budget() {
+    let source = concat!(
+        "@implementation Formatter\n",
+        "- (NSInteger)work {\n",
+        "    NSInteger first = 1; // clang-format off\n",
+        "    NSInteger second = 2; // clang-format on\n",
+        "    // ordinary explanation\n",
+        "    return first + second;\n",
+        "}\n",
+        "@end\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Formatter.m"),
+        text: source,
+    })
+    .expect("valid Objective-C should parse");
+
+    assert!(
+        findings.is_empty(),
+        "clang-format recognizes exact line markers after code: {findings:#?}"
+    );
+}
+
+#[test]
+fn empty_colon_suffix_clang_format_markers_do_not_consume_narrative_budget() {
+    let source = concat!(
+        "@implementation Formatter\n",
+        "- (NSInteger)work {\n",
+        "    // clang-format off:\n",
+        "    NSInteger value = 1;\n",
+        "    // clang-format on:\n",
+        "    // ordinary explanation\n",
+        "    return value;\n",
+        "}\n",
+        "@end\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Formatter.m"),
+        text: source,
+    })
+    .expect("valid Objective-C should parse");
+
+    assert!(
+        findings.is_empty(),
+        "clang-format accepts an empty colon suffix: {findings:#?}"
+    );
+}
+
+#[test]
+fn inline_exact_block_clang_format_markers_do_not_consume_narrative_budget() {
+    let source = concat!(
+        "@implementation Formatter\n",
+        "- (NSInteger)work {\n",
+        "    NSInteger first = 1; /* clang-format off */ NSInteger second = 2;\n",
+        "    NSInteger third = 3; /* clang-format on */ NSInteger fourth = 4;\n",
+        "    // ordinary explanation\n",
+        "    return first + second + third + fourth;\n",
+        "}\n",
+        "@end\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Formatter.m"),
+        text: source,
+    })
+    .expect("valid Objective-C should parse");
+
+    assert!(
+        findings.is_empty(),
+        "clang-format recognizes exact block markers at any token position: {findings:#?}"
+    );
+}
+
+#[test]
 fn inexact_clang_format_prefixes_remain_narrative() {
     for candidate in [
         "// clang-format off because prose",
+        "//clang-format off",
+        "//  clang-format off",
         "/// clang-format off",
-        "// clang-format off:",
+        "/*  clang-format off */",
         "/* clang-format off: generated table */",
         "// clang-format OFF",
-        "NSInteger inlineValue = 0; // clang-format off",
-        "/* clang-format off */ NSInteger inlineValue = 0;",
+        "NSInteger inlineValue = 0; // clang-format off because prose",
     ] {
         let source = format!(
             "@implementation Formatter\n- (NSInteger)work {{\n    {candidate}\n    NSInteger value = 1;\n    // ordinary explanation\n    return value;\n}}\n@end\n"

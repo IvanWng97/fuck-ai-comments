@@ -176,7 +176,13 @@ fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
         let body = comment.strip_prefix("/*")?.strip_suffix("*/")?;
         (body, body.contains(['\r', '\n']))
     };
+    let starts_on_opening_row =
+        !body[..body.len() - body.trim_start().len()].contains(['\r', '\n']);
+    let ends_on_closing_row = !body[body.trim_end().len()..].contains(['\r', '\n']);
     let body = body.trim();
+    if body.contains(['\r', '\n']) {
+        return None;
+    }
     let separator = body.find(' ')?;
     let (command, arguments) = body.split_at(separator);
     let (placement, valid_arguments) = match command {
@@ -198,8 +204,16 @@ fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
         ),
         _ => return None,
     };
-    (valid_arguments && (!multiline_block || matches!(placement, DirectivePlacement::FreeStanding)))
-        .then_some(placement)
+    let block_placement_is_valid = !multiline_block
+        || match placement {
+            DirectivePlacement::FreeStanding => true,
+            DirectivePlacement::NextLine => ends_on_closing_row,
+            DirectivePlacement::SameLine | DirectivePlacement::PreviousLine => {
+                starts_on_opening_row
+            }
+            _ => false,
+        };
+    (valid_arguments && block_placement_is_valid).then_some(placement)
 }
 
 fn valid_swiftformat_rule_list(rules: &str) -> bool {

@@ -124,7 +124,6 @@ pub(crate) fn callable_frontier_counts() -> (usize, usize, usize) {
 
 #[derive(Clone, Copy)]
 pub(crate) enum DirectivePlacement {
-    Region,
     NextLine,
     NextNode,
     SameLine,
@@ -188,7 +187,6 @@ impl AttachmentIndex {
             return false;
         };
         match placement {
-            DirectivePlacement::Region => attachment.starts_line,
             DirectivePlacement::NextLine => attachment.next_line,
             DirectivePlacement::NextNode => attachment.next_node,
             DirectivePlacement::SameLine => attachment.same_line,
@@ -202,6 +200,7 @@ impl AttachmentIndex {
 #[derive(Clone, Copy, Default)]
 struct CommentAttachment {
     starts_line: bool,
+    end_row: usize,
     next_line: bool,
     next_node: bool,
     same_line: bool,
@@ -291,13 +290,14 @@ impl AttachmentFrame {
         if !node.is_named() {
             return;
         }
-        let child = NamedChild::new(node);
+        let child = NamedChild::new(node, starts_line);
         if let Some(previous) = self.last_named_child.as_ref() {
             previous.record_next(&child, comments);
         }
         if child.is_comment {
             let attachment = comments.entry(child.node_id).or_default();
             attachment.starts_line = starts_line;
+            attachment.end_row = child.end_row;
             if let Some(previous) = self.last_named_child.as_ref() {
                 attachment.same_line = !previous.is_comment && previous.end_row == child.start_row;
                 attachment.previous_line =
@@ -331,16 +331,18 @@ struct NamedChild {
     node_id: usize,
     start_row: usize,
     end_row: usize,
+    starts_line: bool,
     is_comment: bool,
     transparent_comments: Vec<usize>,
 }
 
 impl NamedChild {
-    fn new(node: Node<'_>) -> Self {
+    fn new(node: Node<'_>, starts_line: bool) -> Self {
         Self {
             node_id: node.id(),
             start_row: node.start_position().row,
             end_row: node.end_position().row,
+            starts_line,
             is_comment: is_comment_kind(node.kind()),
             transparent_comments: Vec::new(),
         }
@@ -349,12 +351,19 @@ impl NamedChild {
     fn record_next(&self, next: &NamedChild, comments: &mut HashMap<usize, CommentAttachment>) {
         if self.is_comment {
             let attachment = comments.entry(self.node_id).or_default();
-            attachment.next_node = !next.is_comment;
+            attachment.next_node =
+                !next.is_comment && (attachment.starts_line || self.end_row == next.start_row);
             attachment.next_line =
                 !next.is_comment && next.start_row == self.end_row.saturating_add(1);
         }
         for comment in &self.transparent_comments {
-            comments.entry(*comment).or_default().next_node = !next.is_comment;
+            let attachment = comments.entry(*comment).or_default();
+            attachment.next_node = !next.is_comment
+                && (attachment.starts_line
+                    || self.starts_line
+                    || attachment.end_row == next.start_row);
+            attachment.next_line =
+                !next.is_comment && next.start_row == attachment.end_row.saturating_add(1);
         }
     }
 }

@@ -605,6 +605,102 @@ fn swiftformat_block_directive_does_not_consume_narrative_budget() {
 }
 
 #[test]
+fn multiline_swiftformat_next_on_closing_row_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    /*\n",
+        "     swiftformat:disable:next redundantSelf */\n",
+        "    self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a SwiftFormat :next marker on the block's closing row stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn multiline_swiftformat_this_on_opening_row_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    self.perform() /* swiftformat:disable:this redundantSelf\n",
+        "     */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a SwiftFormat :this marker on the block's opening row stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn multiline_swiftformat_previous_on_opening_row_does_not_consume_narrative_budget() {
+    let source = concat!(
+        "func work() {\n",
+        "    self.perform()\n",
+        "    /* swiftformat:disable:previous redundantSelf\n",
+        "     */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a SwiftFormat :previous marker on the block's opening row stays outside the narrative ratio: {findings:#?}"
+    );
+}
+
+#[test]
+fn multiline_swiftformat_boundary_modifier_with_narrative_row_remains_narrative() {
+    let source = concat!(
+        "func work() {\n",
+        "    self.perform() /* swiftformat:disable:this redundantSelf\n",
+        "     rationale */\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "a separate narrative row keeps a multiline SwiftFormat block narrative: {findings:#?}"
+    );
+}
+
+#[test]
 fn multiline_swiftformat_line_modifiers_remain_narrative() {
     let sources = [
         (

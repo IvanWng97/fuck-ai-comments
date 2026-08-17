@@ -135,9 +135,8 @@ pub(crate) fn classify_comment(
     if node.kind() != "comment" {
         return None;
     }
-    let kind = if node.start_position().row == node.end_position().row
-        && tool_directive(node_text(node, source))
-            .is_some_and(|placement| attachments.is_attached(node, placement))
+    let kind = if tool_directive(node_text(node, source))
+        .is_some_and(|placement| attachments.is_attached(node, placement))
     {
         CommentKind::ToolDirective
     } else {
@@ -154,6 +153,15 @@ enum CommentStyle {
 
 fn tool_directive(comment: &str) -> Option<DirectivePlacement> {
     let comment = comment.trim();
+    if typescript_suppression_directive(comment) {
+        return Some(DirectivePlacement::NextLine);
+    }
+    if comment.contains(['\r', '\n']) {
+        return None;
+    }
+    if typescript_preamble_directive(comment) {
+        return Some(DirectivePlacement::FilePreamble);
+    }
     let (style, body) = if let Some(body) = comment.strip_prefix("//") {
         (CommentStyle::Line, body.trim())
     } else {
@@ -173,24 +181,21 @@ fn tool_directive(comment: &str) -> Option<DirectivePlacement> {
     {
         return Some(DirectivePlacement::FreeStanding);
     }
-    if eslint_env_directive(body)
-        || style == CommentStyle::Line && matches!(body, "@ts-check" | "@ts-nocheck")
-        || style == CommentStyle::Block && body == "istanbul ignore file"
+    if eslint_env_directive(body) || style == CommentStyle::Block && body == "istanbul ignore file"
     {
         return Some(DirectivePlacement::FilePreamble);
     }
     if body == "prettier-ignore" {
         return Some(DirectivePlacement::NextNode);
     }
-    if style == CommentStyle::Line && typescript_line_directive(body)
-        || style == CommentStyle::Block
-            && matches!(
-                body,
-                "istanbul ignore next"
-                    | "istanbul ignore if"
-                    | "istanbul ignore else"
-                    | "c8 ignore next"
-            )
+    if style == CommentStyle::Block
+        && matches!(
+            body,
+            "istanbul ignore next"
+                | "istanbul ignore if"
+                | "istanbul ignore else"
+                | "c8 ignore next"
+        )
         || style == CommentStyle::Block && numbered_directive(body, "istanbul ignore next")
         || style == CommentStyle::Block && numbered_directive(body, "c8 ignore next")
     {
@@ -249,13 +254,38 @@ fn eslint_env_directive(body: &str) -> bool {
     })
 }
 
-fn typescript_line_directive(body: &str) -> bool {
-    ["@ts-ignore", "@ts-expect-error"].iter().any(|directive| {
-        body == *directive
-            || body
-                .strip_prefix(directive)
-                .and_then(|suffix| suffix.strip_prefix(':'))
-                .is_some_and(|description| !description.trim().is_empty())
+fn typescript_line_comment_body(comment: &str) -> Option<&str> {
+    let body = comment.strip_prefix("//")?;
+    Some(body.strip_prefix('/').unwrap_or(body).trim_start())
+}
+
+fn typescript_suppression_directive(comment: &str) -> bool {
+    let candidate = if let Some(body) = typescript_line_comment_body(comment) {
+        body
+    } else if comment.starts_with("/*") && comment.ends_with("*/") {
+        comment
+            .rsplit(['\r', '\n'])
+            .next()
+            .unwrap_or(comment)
+            .trim_start()
+            .trim_start_matches(['/', '*'])
+            .trim_start()
+    } else {
+        return false;
+    };
+    ["@ts-ignore", "@ts-expect-error"]
+        .iter()
+        .any(|directive| candidate.starts_with(directive))
+}
+
+fn typescript_preamble_directive(comment: &str) -> bool {
+    let Some(body) = typescript_line_comment_body(comment) else {
+        return false;
+    };
+    ["@ts-check", "@ts-nocheck"].iter().any(|directive| {
+        body.strip_prefix(directive).is_some_and(|suffix| {
+            suffix.is_empty() || suffix.starts_with(':') || suffix.starts_with(char::is_whitespace)
+        })
     })
 }
 

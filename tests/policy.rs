@@ -1972,8 +1972,6 @@ fn malformed_javascript_and_typescript_directive_prefixes_are_narrative() {
     for path in ["worker.js", "worker.ts"] {
         for candidate in [
             "// eslint-disable-next-line: this is prose",
-            "// @ts-ignore this is prose",
-            "/* @ts-ignore */",
             "// istanbul ignore totally this is prose",
             "// c8 ignore totally this is prose",
         ] {
@@ -1990,6 +1988,112 @@ fn malformed_javascript_and_typescript_directive_prefixes_are_narrative() {
                 "magic prefix must not classify malformed prose as metadata ({path}, {candidate}): {findings:#?}"
             );
         }
+    }
+}
+
+#[test]
+fn typescript_suppression_directives_match_compiler_comment_forms() {
+    for path in ["worker.js", "worker.ts"] {
+        for directive in [
+            "// @ts-ignore because the declaration is supplied at runtime",
+            "// @ts-expect-error this call intentionally exercises the fallback",
+            "// @ts-ignoreThisTokenStillMatchesTheScanner",
+            "/// @ts-ignore accepted by the TypeScript scanner",
+            "/* @ts-ignore */",
+            "/* context\n   * @ts-expect-error */",
+        ] {
+            let source = format!(
+                "function work() {{\n  {directive}\n  perform();\n  // ordinary explanation\n  finish();\n}}\n"
+            );
+
+            let findings = analyze(Path::new(path), &source).expect("valid source should parse");
+
+            assert!(
+                findings.is_empty(),
+                "an attached TypeScript suppression directive is compiler metadata ({path}, {directive}): {findings:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn typescript_suppression_block_directive_must_appear_on_the_last_line() {
+    let source = concat!(
+        "function work() {\n",
+        "  /* @ts-ignore\n",
+        "   * ordinary explanation */\n",
+        "  perform();\n",
+        "  // another ordinary explanation\n",
+        "  finish();\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("worker.ts"), source).expect("valid TypeScript should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "only the last line of a block comment is scanned for suppression directives: {findings:#?}"
+    );
+}
+
+#[test]
+fn typescript_suppression_block_treats_a_carriage_return_as_a_line_break() {
+    let source = concat!(
+        "function work() {\n",
+        "  /* context\r   * @ts-ignore */\n",
+        "  perform();\n",
+        "  // ordinary explanation\n",
+        "  finish();\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("worker.ts"), source).expect("valid TypeScript should parse");
+
+    assert!(
+        findings.is_empty(),
+        "the TypeScript scanner treats a lone carriage return as a block-comment line break: {findings:#?}"
+    );
+}
+
+#[test]
+fn typescript_check_pragmas_accept_compiler_suffix_forms_in_the_preamble() {
+    for path in ["worker.js", "worker.ts"] {
+        for pragma in [
+            "// @ts-check checked by the JavaScript project",
+            "// @ts-nocheck: generated declaration shim",
+            "/// @ts-check checked through a triple-slash comment",
+        ] {
+            let source = format!(
+                "{pragma}\n// ordinary explanation\nfunction work() {{\n  perform();\n}}\n"
+            );
+
+            let findings = analyze(Path::new(path), &source).expect("valid source should parse");
+
+            assert!(
+                findings.is_empty(),
+                "a leading TypeScript check pragma accepts the compiler's suffix grammar ({path}, {pragma}): {findings:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn typescript_check_pragma_name_requires_a_compiler_delimiter() {
+    for pragma in ["// @ts-checking", "// @ts-nocheck-generated"] {
+        let source =
+            format!("{pragma}\n// ordinary explanation\nfunction work() {{\n  perform();\n}}\n");
+
+        let findings =
+            analyze(Path::new("worker.ts"), &source).expect("valid TypeScript should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "a concatenated pragma-like name is ordinary narrative ({pragma}): {findings:#?}"
+        );
     }
 }
 
