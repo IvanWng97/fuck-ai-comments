@@ -293,9 +293,9 @@ fn cross_language_rename_analyzes_the_new_file_as_added() {
 }
 
 #[test]
-fn literal_pathspecs_handle_git_metacharacters_and_control_characters() {
+fn literal_pathspecs_handle_git_metacharacters_and_unicode() {
     let root = repository();
-    let path = "-:(exclude)*雪\nsource.rs";
+    let path = "-[literal]雪.rs";
     write(&root, path, SLOPPY_RUST);
 
     let output = command(&root)
@@ -308,9 +308,10 @@ fn literal_pathspecs_handle_git_metacharacters_and_control_characters() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(stdout.contains("comment-policy/leaf-comment-budget"));
-    assert!(stdout.contains("\\nsource.rs:1:"));
+    assert!(stdout.contains("-[literal]雪.rs:1:"));
 }
 
+#[cfg(unix)]
 #[test]
 fn finding_paths_cannot_inject_github_workflow_commands() {
     let root = repository();
@@ -346,6 +347,24 @@ fn finding_paths_escape_unicode_bidi_controls() {
 }
 
 #[test]
+fn parse_errors_fail_closed() {
+    let root = repository();
+    write(&root, "broken.rs", "fn {");
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("error: could not analyze broken.rs"));
+    assert!(stderr.contains("could not parse broken.rs as Rust"));
+}
+
+#[cfg(unix)]
+#[test]
 fn parse_errors_escape_control_characters_in_paths() {
     let root = repository();
     write(&root, "broken\n::warning::pwn.rs", "fn {");
@@ -363,6 +382,23 @@ fn parse_errors_escape_control_characters_in_paths() {
     assert!(!stderr.lines().any(|line| line.starts_with("::")));
 }
 
+#[test]
+fn invalid_utf8_errors_fail_closed() {
+    let root = repository();
+    write(&root, "broken.rs", [0xff, 0xfe]);
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("error: broken.rs is not valid UTF-8"));
+}
+
+#[cfg(unix)]
 #[test]
 fn invalid_utf8_errors_escape_control_characters_in_paths() {
     let root = repository();
