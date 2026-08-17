@@ -16,17 +16,17 @@ comments.
 
 ## Rules
 
-| Rule | Required policy |
-| --- | --- |
-| Function budget | At most `min(8, max(1, code_lines / 4))` narrative comment lines |
-| Type budget | Classes use the same relative narrative budget as functions |
-| Comment block | Three or more consecutive narrative-only lines fail |
-| Leaf budget | Constants, statics, and equivalent leaves get at most 3 narrative lines |
-| File budget | At most `min(8, max(2, code_lines / 16))` file-level narrative lines |
-| Template budget | HTML, CSS, and Astro template owners get at most 3 narrative lines |
-| Absolute owner cap | Non-public comments, including directives and safety proofs, cannot exceed 8 lines on function/type/file owners or 3 on leaf/template/TOML owners |
-| Stale comment | An unchanged comment fails when its owning code or semantic role changes |
-| Reparented comment | An unchanged comment fails when it moves to another owner |
+| Rule                             | Required policy                                                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                  |
+| Python class budget              | Python classes use the same relative narrative budget as functions                                                                                |
+| Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, template, and TOML owners allow at most 3 total                                        |
+| Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                           |
+| File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                              |
+| Template budget                  | HTML, CSS, and Astro template owners get at most 3 narrative lines                                                                                |
+| Absolute owner cap               | Non-public comments, including directives and safety proofs, cannot exceed 8 lines on function/type/file owners or 3 on leaf/template/TOML owners |
+| Stale comment                    | An unchanged comment fails when its owning code or semantic role changes                                                                          |
+| Reparented comment               | An unchanged comment fails when it moves to another owner                                                                                         |
 
 Rust public API docs do not consume a length budget. Structurally valid safety
 proofs and tool directives do not consume the relative narrative budget, but
@@ -85,6 +85,9 @@ allocation.
 
 ## GitHub Action
 
+The Action becomes available when the first stable release creates the `v0`
+compatibility tag.
+
 The default Action mode is the fail-closed `base` mode: callers must provide a
 base revision, and the CLI compares the base/head merge base to the head. A bare
 Action invocation fails instead of silently running a clean-worktree scan that
@@ -131,9 +134,9 @@ workflows must likewise pass an explicit before/after range for drift checks,
 or deliberately use `mode: all` when the job exists only to establish a new
 baseline.
 
-The Action ref follows the package major (`0.x` uses `@v0`). After a versioned
-release succeeds, release automation advances that moving major ref to the
-released commit; consumers do not need an exact Action commit SHA.
+The first stable `0.x` release creates `@v0`; subsequent stable `0.x` releases
+advance it to the released commit. Consumers do not need an exact Action commit
+SHA.
 
 ## Install
 
@@ -148,9 +151,24 @@ Tagged releases provide native archives for x86-64 Linux, x86-64 Windows,
 x86-64 macOS, and Apple Silicon macOS. Each release includes `sha256.sum`, a
 dist manifest, and GitHub build attestations.
 
-```console
-gh attestation verify fuck-ai-comments-*.tar.xz \
-  --repo IvanWng97/fuck-ai-comments
+On macOS or Linux, download and verify the native archives:
+
+```sh
+gh release download --repo IvanWng97/fuck-ai-comments \
+  --pattern 'fuck-ai-comments-*.tar.xz'
+for artifact in fuck-ai-comments-*.tar.xz; do
+  gh attestation verify "$artifact" --repo IvanWng97/fuck-ai-comments
+done
+```
+
+On Windows PowerShell, download and verify the Windows archive:
+
+```powershell
+gh release download --repo IvanWng97/fuck-ai-comments `
+  --pattern 'fuck-ai-comments-*.zip'
+Get-ChildItem -File fuck-ai-comments-*.zip | ForEach-Object {
+  gh attestation verify $_.FullName --repo IvanWng97/fuck-ai-comments
+}
 ```
 
 ## Architecture
@@ -182,6 +200,9 @@ npm run lint
 npm run bundle:check
 npm run release:check
 ```
+
+The release-workflow commands require cargo-dist 0.32.0's `dist` executable on
+`PATH`.
 
 The Rust MSRV is 1.88.0. The Action is bundled. `release.yml` is generated from
 the dist configuration, then narrowed to job-level permissions by

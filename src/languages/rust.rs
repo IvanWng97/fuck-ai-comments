@@ -116,10 +116,10 @@ fn rust_namespace_segment(node: Node<'_>, source: &str) -> Option<String> {
         "impl_item" => {
             let target = node
                 .child_by_field_name("type")
-                .map(|target| node_text(target, source))?;
+                .map(|target| canonical_syntax(target, source))?;
             let trait_name = node
                 .child_by_field_name("trait")
-                .map(|item| node_text(item, source));
+                .map(|item| canonical_syntax(item, source));
             Some(trait_name.map_or_else(
                 || format!("impl:{target}"),
                 |trait_name| format!("impl:{trait_name} for {target}"),
@@ -127,12 +127,40 @@ fn rust_namespace_segment(node: Node<'_>, source: &str) -> Option<String> {
         }
         "trait_item" => node
             .child_by_field_name("name")
-            .map(|name| format!("trait:{}", node_text(name, source))),
+            .map(|name| format!("trait:{}", canonical_syntax(name, source))),
         "mod_item" => node
             .child_by_field_name("name")
             .map(|name| format!("mod:{}", node_text(name, source))),
         _ => None,
     }
+}
+
+fn canonical_syntax(node: Node<'_>, source: &str) -> String {
+    let mut identity = String::new();
+    let mut excluded_depth = 0_usize;
+    for event in events(node) {
+        match event {
+            WalkEvent::Enter(_) if excluded_depth > 0 => excluded_depth += 1,
+            WalkEvent::Enter(current) if is_comment(current) => excluded_depth = 1,
+            WalkEvent::Enter(current) if current.child_count() == 0 => {
+                let text = node_text(current, source);
+                if !text.trim().is_empty() {
+                    push_length_prefixed(&mut identity, current.kind());
+                    push_length_prefixed(&mut identity, text);
+                }
+            }
+            WalkEvent::Enter(_) => {}
+            WalkEvent::Leave(_) if excluded_depth > 0 => excluded_depth -= 1,
+            WalkEvent::Leave(_) => {}
+        }
+    }
+    identity
+}
+
+fn push_length_prefixed(output: &mut String, value: &str) {
+    output.push_str(&value.len().to_string());
+    output.push(':');
+    output.push_str(value);
 }
 
 fn is_comment(node: Node<'_>) -> bool {
@@ -317,10 +345,7 @@ fn is_safety_proof(node: Node<'_>, source: &str) -> bool {
     if !is_adjacent(last, next, source) {
         return false;
     }
-    let target = attached_expression(next);
-    is_unsafe_construct(target)
-        || (ancestors(node).any(|ancestor| ancestor.kind() == "unsafe_block")
-            && is_raw_pointer_dereference(target))
+    is_unsafe_construct(attached_expression(next))
 }
 
 fn attached_expression(node: Node<'_>) -> Node<'_> {
@@ -356,11 +381,6 @@ fn has_unsafe_keyword(node: Node<'_>) -> bool {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .any(|child| child.kind() == "unsafe")
-}
-
-fn is_raw_pointer_dereference(node: Node<'_>) -> bool {
-    node.kind() == "unary_expression"
-        && node.child(0).is_some_and(|operator| operator.kind() == "*")
 }
 
 fn is_adjacent(left: Node<'_>, right: Node<'_>, source: &str) -> bool {

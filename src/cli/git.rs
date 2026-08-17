@@ -24,19 +24,17 @@ pub(super) enum Mode {
 }
 
 pub(super) fn scan(scope: &Path, mode: Mode) -> Result<Report> {
-    let scope_exists = match fs::symlink_metadata(scope) {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error).with_context(|| format!("could not inspect {}", scope.display()));
-        }
-    };
     let repository = Repository::discover(scope)?;
     let changes = repository.changes(mode)?;
-    if !scope_exists && changes.is_empty() {
+    if !changes.scope_exists {
         bail!("scope {} does not exist", scope.display());
     }
-    analyze_changes(&repository, changes)
+    analyze_changes(&repository, changes.files)
+}
+
+struct ScopeChanges {
+    files: Vec<FileChange>,
+    scope_exists: bool,
 }
 
 struct Repository {
@@ -89,21 +87,80 @@ impl Repository {
         Ok(Self { root, scope })
     }
 
-    fn changes(&self, mode: Mode) -> Result<Vec<FileChange>> {
+    fn changes(&self, mode: Mode) -> Result<ScopeChanges> {
         match mode {
-            Mode::Worktree => self.worktree_changes(),
+            Mode::Worktree => {
+                let head = self.verify_revision("HEAD")?;
+                let in_head = self.scope_exists_in_tree(&head)?;
+                let in_worktree = self.scope_exists_in_worktree()?;
+                Ok(ScopeChanges {
+                    files: self.worktree_changes(&head)?,
+                    scope_exists: in_head || in_worktree,
+                })
+            }
             Mode::Staged => {
                 let head = self.verify_revision("HEAD")?;
-                self.diff_changes(DiffTarget::Index, &head, None)
+                let in_head = self.scope_exists_in_tree(&head)?;
+                let in_index = self.scope_exists_in_index()?;
+                Ok(ScopeChanges {
+                    files: self.diff_changes(DiffTarget::Index, &head, None)?,
+                    scope_exists: in_head || in_index,
+                })
             }
             Mode::Commits { base, head } => {
                 let base_id = self.verify_revision(&base)?;
                 let head_name = head.as_deref().unwrap_or("HEAD");
                 let head_id = self.verify_revision(head_name)?;
                 let merge_base = self.merge_base(&base_id, &head_id)?;
-                self.diff_changes(DiffTarget::Commit, &merge_base, Some(&head_id))
+                let in_merge_base = self.scope_exists_in_tree(&merge_base)?;
+                let in_head = self.scope_exists_in_tree(&head_id)?;
+                Ok(ScopeChanges {
+                    files: self.diff_changes(DiffTarget::Commit, &merge_base, Some(&head_id))?,
+                    scope_exists: in_merge_base || in_head,
+                })
             }
         }
+    }
+
+    fn scope_exists_in_worktree(&self) -> Result<bool> {
+        let path = self.root.join(&self.scope);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => {
+                Err(error).with_context(|| format!("could not inspect {}", path.display()))
+            }
+        }
+    }
+
+    fn scope_exists_in_index(&self) -> Result<bool> {
+        if self.scope == Path::new(".") {
+            return Ok(true);
+        }
+        let output = self.git([
+            OsStr::new("ls-files"),
+            OsStr::new("--cached"),
+            OsStr::new("--full-name"),
+            OsStr::new("-z"),
+            OsStr::new("--"),
+            self.scope.as_os_str(),
+        ])?;
+        Ok(!parse_nul_paths(&output)?.is_empty())
+    }
+
+    fn scope_exists_in_tree(&self, tree: &ObjectId) -> Result<bool> {
+        if self.scope == Path::new(".") {
+            return Ok(true);
+        }
+        let output = self.git([
+            OsStr::new("ls-tree"),
+            OsStr::new("-z"),
+            OsStr::new("--name-only"),
+            OsStr::new(tree.as_str()),
+            OsStr::new("--"),
+            self.scope.as_os_str(),
+        ])?;
+        Ok(!parse_nul_paths(&output)?.is_empty())
     }
 
     fn merge_base(&self, base: &ObjectId, head: &ObjectId) -> Result<ObjectId> {
@@ -118,9 +175,8 @@ impl Repository {
         ObjectId::parse(one_line(&output, "merge base")?)
     }
 
-    fn worktree_changes(&self) -> Result<Vec<FileChange>> {
-        let head = self.verify_revision("HEAD")?;
-        let mut changes = self.diff_changes(DiffTarget::Worktree, &head, None)?;
+    fn worktree_changes(&self, head: &ObjectId) -> Result<Vec<FileChange>> {
+        let mut changes = self.diff_changes(DiffTarget::Worktree, head, None)?;
         let output = self.git([
             OsStr::new("ls-files"),
             OsStr::new("--others"),

@@ -867,13 +867,14 @@ fn rust_safety_comment_must_be_physically_adjacent_to_unsafe_code() {
 }
 
 #[test]
-fn rust_short_safety_proof_can_attach_inside_an_unsafe_block() {
+fn rust_safety_proof_cannot_attach_to_safe_reference_dereference() {
     let source = concat!(
-        "unsafe fn read(ptr: *const u8) -> u8 {\n",
+        "fn read(value: &u8) -> u8 {\n",
         "    unsafe {\n",
-        "        // SAFETY: the caller guarantees ptr is valid.\n",
-        "        // It is aligned and alive for this read.\n",
-        "        *ptr\n",
+        "        // SAFETY: this safe reference needs no unsafe justification.\n",
+        "        // second narrative line\n",
+        "        // third narrative line\n",
+        "        *value\n",
         "    }\n",
         "}\n",
     );
@@ -881,9 +882,59 @@ fn rust_short_safety_proof_can_attach_inside_an_unsafe_block() {
     let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
 
     assert!(
-        findings.is_empty(),
-        "an adjacent short proof inside its unsafe block remains exempt: {findings:#?}"
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
+        "a unary star is not syntactic proof of a raw-pointer dereference: {findings:#?}"
     );
+}
+
+#[test]
+fn rust_safety_proofs_attach_to_explicit_unsafe_item_boundaries() {
+    let sources = [
+        concat!(
+            "// SAFETY: callers uphold the function contract.\n",
+            "// The input is valid for the call.\n",
+            "// The input remains live for the call.\n",
+            "unsafe fn call() {}\n",
+        ),
+        concat!(
+            "// SAFETY: implementors uphold the marker contract.\n",
+            "// Implementations preserve the invariant.\n",
+            "// Implementations document their proof.\n",
+            "unsafe trait Contract {}\n",
+        ),
+        concat!(
+            "unsafe trait Contract {}\n",
+            "struct Worker;\n",
+            "// SAFETY: Worker upholds the trait contract.\n",
+            "// Its state has the required representation.\n",
+            "// Its methods preserve that representation.\n",
+            "unsafe impl Contract for Worker {}\n",
+        ),
+        concat!(
+            "// SAFETY: these declarations match the foreign ABI.\n",
+            "// The symbol names are provided by the linked library.\n",
+            "// Their signatures match the library definitions.\n",
+            "unsafe extern \"C\" { fn foreign_call(); }\n",
+        ),
+        concat!(
+            "trait Contract {\n",
+            "    // SAFETY: callers uphold the method contract.\n",
+            "    // The input is valid for the call.\n",
+            "    // The input remains live for the call.\n",
+            "    unsafe fn call();\n",
+            "}\n",
+        ),
+    ];
+
+    for source in sources {
+        let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+        assert!(
+            findings.is_empty(),
+            "an explicit unsafe boundary accepts its adjacent proof: {findings:#?}\n{source}"
+        );
+    }
 }
 
 #[test]

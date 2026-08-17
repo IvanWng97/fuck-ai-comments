@@ -1278,6 +1278,77 @@ fn rust_impl_namespaces_disambiguate_reordered_methods() {
 }
 
 #[test]
+fn rust_impl_namespace_ignores_generic_header_trivia() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "impl<T> Contract<T> for Worker<T> {\n",
+            "    fn run(&self) {\n",
+            "        // Coupled to this implementation.\n",
+            "        work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "impl<T> Contract /* separator */ < T > for Worker < T > {\n",
+            "    fn run(&self) {\n",
+            "        // Coupled to this implementation.\n",
+            "        work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust formatting change");
+
+    assert!(
+        findings.iter().all(|finding| {
+            finding.rule != "comment-policy/comment-reparented"
+                && finding.rule != "comment-policy/comment-owner-changed"
+        }),
+        "whitespace and comments cannot change an impl namespace identity: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_impl_namespace_detects_semantic_target_rename() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "impl<T> Worker<T> {\n",
+            "    fn run(&self) {\n",
+            "        // Coupled to this implementation.\n",
+            "        work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "impl<T> RenamedWorker<T> {\n",
+            "    fn run(&self) {\n",
+            "        // Coupled to this implementation.\n",
+            "        work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust semantic change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 3
+        }),
+        "a renamed impl target must stale its unchanged method comment: {findings:#?}"
+    );
+}
+
+#[test]
 fn python_class_namespaces_disambiguate_reordered_methods() {
     let before = SourceFile {
         path: Path::new("worker.py"),

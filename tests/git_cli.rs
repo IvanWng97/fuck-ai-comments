@@ -329,6 +329,23 @@ fn finding_paths_cannot_inject_github_workflow_commands() {
 }
 
 #[test]
+fn finding_paths_escape_unicode_bidi_controls() {
+    let root = repository();
+    write(&root, "safe\u{202e}evil.rs", SLOPPY_RUST);
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("safe\\u{202e}evil.rs:1:"));
+    assert!(!stdout.contains('\u{202e}'));
+}
+
+#[test]
 fn parse_errors_escape_control_characters_in_paths() {
     let root = repository();
     write(&root, "broken\n::warning::pwn.rs", "fn {");
@@ -365,6 +382,23 @@ fn invalid_utf8_errors_escape_control_characters_in_paths() {
 }
 
 #[test]
+fn error_paths_escape_unicode_bidi_controls() {
+    let root = repository();
+    write(&root, "broken\u{2067}source.rs", "fn {");
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("broken\\u{2067}source.rs"));
+    assert!(!stderr.contains('\u{2067}'));
+}
+
+#[test]
 fn invalid_revision_fails_closed() {
     let root = repository();
 
@@ -392,6 +426,73 @@ fn nonexistent_scope_fails_closed() {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
     assert!(stderr.contains("error: scope missing-directory does not exist"));
+}
+
+#[test]
+fn staged_scope_must_exist_in_head_or_index() {
+    let root = repository();
+    write(&root, "worktree-only.rs", CLEAN_RUST);
+
+    let output = command(&root)
+        .args(["check", "--staged", "worktree-only.rs"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("error: scope worktree-only.rs does not exist"));
+}
+
+#[test]
+fn staged_scope_can_exist_in_head_and_index_without_a_worktree_file() {
+    let root = repository();
+    write(&root, "index-only.rs", CLEAN_RUST);
+    commit_all(&root, "add source");
+    fs::remove_file(root.path().join("index-only.rs")).expect("source should be removed");
+
+    command(&root)
+        .args(["check", "--staged", "index-only.rs"])
+        .assert()
+        .code(0)
+        .stdout("clean: 0 files scanned\n");
+}
+
+#[test]
+fn commit_scope_must_exist_in_the_merge_base_or_head_tree() {
+    let root = repository();
+    write(&root, "worktree-only.rs", CLEAN_RUST);
+
+    let output = command(&root)
+        .args([
+            "check",
+            "--base",
+            "HEAD",
+            "--head",
+            "HEAD",
+            "worktree-only.rs",
+        ])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("error: scope worktree-only.rs does not exist"));
+}
+
+#[test]
+fn commit_scope_can_exist_only_in_the_commit_trees() {
+    let root = repository();
+    write(&root, "tree-only.rs", CLEAN_RUST);
+    commit_all(&root, "add source");
+    fs::remove_file(root.path().join("tree-only.rs")).expect("source should be removed");
+
+    command(&root)
+        .args(["check", "--base", "HEAD", "--head", "HEAD", "tree-only.rs"])
+        .assert()
+        .code(0)
+        .stdout("clean: 0 files scanned\n");
 }
 
 #[test]
