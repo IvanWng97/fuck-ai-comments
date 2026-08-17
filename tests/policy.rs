@@ -2000,7 +2000,7 @@ fn typescript_suppression_directives_match_compiler_comment_forms() {
             "// @ts-ignoreThisTokenStillMatchesTheScanner",
             "/// @ts-ignore accepted by the TypeScript scanner",
             "/* @ts-ignore */",
-            "/* context\n   * @ts-expect-error */",
+            "/*\n   * @ts-expect-error */",
         ] {
             let source = format!(
                 "function work() {{\n  {directive}\n  perform();\n  // ordinary explanation\n  finish();\n}}\n"
@@ -2013,6 +2013,30 @@ fn typescript_suppression_directives_match_compiler_comment_forms() {
                 "an attached TypeScript suppression directive is compiler metadata ({path}, {directive}): {findings:#?}"
             );
         }
+    }
+}
+
+#[test]
+fn typescript_suppression_block_with_prior_prose_is_narrative() {
+    for path in ["worker.js", "worker.ts"] {
+        let source = concat!(
+            "function work() {\n",
+            "  /* context\n",
+            "   * @ts-expect-error */\n",
+            "  perform();\n",
+            "  // ordinary explanation\n",
+            "  finish();\n",
+            "}\n",
+        );
+
+        let findings = analyze(Path::new(path), source).expect("valid source should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "prose before a suppression token makes the whole block narrative ({path}): {findings:#?}"
+        );
     }
 }
 
@@ -2042,7 +2066,7 @@ fn typescript_suppression_block_directive_must_appear_on_the_last_line() {
 fn typescript_suppression_block_treats_a_carriage_return_as_a_line_break() {
     let source = concat!(
         "function work() {\n",
-        "  /* context\r   * @ts-ignore */\n",
+        "  /*\r   * @ts-ignore */\n",
         "  perform();\n",
         "  // ordinary explanation\n",
         "  finish();\n",
@@ -2139,6 +2163,73 @@ fn valid_attached_javascript_and_typescript_directives_remain_metadata() {
                 "one attached operational directive stays outside the narrative ratio ({path}, {directive}): {findings:#?}"
             );
         }
+    }
+}
+
+#[test]
+fn prettier_ignore_skips_comment_siblings_before_its_next_node() {
+    for path in ["render.js", "render.ts"] {
+        let source = concat!(
+            "function render() {\n",
+            "  // prettier-ignore\n",
+            "  // ordinary explanation\n",
+            "  renderValue();\n",
+            "  finish();\n",
+            "}\n",
+        );
+
+        let findings = analyze(Path::new(path), source).expect("valid source should parse");
+
+        assert!(
+            findings.is_empty(),
+            "Prettier targets the next non-comment node across comment siblings ({path}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn next_line_directives_do_not_skip_comment_siblings() {
+    for path in ["render.js", "render.ts"] {
+        let source = concat!(
+            "function render() {\n",
+            "  // @ts-ignore\n",
+            "  // ordinary explanation\n",
+            "  renderValue();\n",
+            "  finish();\n",
+            "}\n",
+        );
+
+        let findings = analyze(Path::new(path), source).expect("valid source should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "a next-line directive cannot skip an intervening comment ({path}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn prettier_ignore_at_frame_end_has_no_next_node() {
+    for path in ["render.js", "render.ts"] {
+        let source = concat!(
+            "function render() {\n",
+            "  // ordinary explanation\n",
+            "  renderValue();\n",
+            "  // prettier-ignore\n",
+            "}\n",
+            "finish();\n",
+        );
+
+        let findings = analyze(Path::new(path), source).expect("valid source should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "a pending next-node directive cannot escape its parent frame ({path}): {findings:#?}"
+        );
     }
 }
 

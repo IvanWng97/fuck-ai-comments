@@ -800,7 +800,7 @@ fn semantic_selection(
             let mut parent = owner.parent;
             while let Some(parent_index) = parent {
                 let parent_owner = &after.owners[parent_index];
-                if parent_owner.kind == OwnerKind::Function {
+                if is_scoped_budget_owner(parent_owner.kind) {
                     selection.select_owner(
                         parent_owner.kind,
                         parent_owner.span.start_byte,
@@ -813,6 +813,10 @@ fn semantic_selection(
         }
     }
     selection
+}
+
+fn is_scoped_budget_owner(kind: OwnerKind) -> bool {
+    matches!(kind, OwnerKind::Function | OwnerKind::Type)
 }
 
 fn change_findings(

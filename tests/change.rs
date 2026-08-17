@@ -33,6 +33,27 @@ fn assert_parent_type_rename_stales_nested_comment(
     );
 }
 
+fn assert_leaf_comment_addition_activates_type_budget(path: &str, before: &str, after: &str) {
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new(path),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new(path),
+            text: after,
+        },
+    )
+    .expect("valid leaf comment addition");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "a new leaf comment must activate the type budget it consumes ({path}): {findings:#?}"
+    );
+}
+
 #[test]
 fn registered_extensions_share_one_registry() {
     let supported = [
@@ -1532,6 +1553,131 @@ fn inner_function_change_does_not_activate_outer_function_budget() {
             .iter()
             .all(|finding| finding.rule != "comment-policy/function-comment-budget"),
         "an inner owner must not activate its ancestor's pre-existing debt: {findings:#?}"
+    );
+}
+
+#[test]
+fn swift_leaf_comment_addition_activates_its_type_budget() {
+    assert_leaf_comment_addition_activates_type_budget(
+        "Worker.swift",
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    let first = { 1 }\n",
+            "    let second = { 2 }\n",
+            "}\n",
+        ),
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    let first = { 1 }\n",
+            "    // Second.\n",
+            "    let second = { 2 }\n",
+            "}\n",
+        ),
+    );
+}
+
+#[test]
+fn kotlin_leaf_comment_addition_activates_its_type_budget() {
+    assert_leaf_comment_addition_activates_type_budget(
+        "Worker.kt",
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    val first = { 1 }\n",
+            "    val second = { 2 }\n",
+            "}\n",
+        ),
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    val first = { 1 }\n",
+            "    // Second.\n",
+            "    val second = { 2 }\n",
+            "}\n",
+        ),
+    );
+}
+
+#[test]
+fn tsx_leaf_comment_addition_activates_its_type_budget() {
+    assert_leaf_comment_addition_activates_type_budget(
+        "Worker.tsx",
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    static first = () => 1;\n",
+            "    static second = () => 2;\n",
+            "}\n",
+        ),
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    static first = () => 1;\n",
+            "    // Second.\n",
+            "    static second = () => 2;\n",
+            "}\n",
+        ),
+    );
+}
+
+#[test]
+fn leaf_inside_function_selects_nearest_budget_without_activating_type_debt() {
+    let before_text = concat!(
+        "class Worker {\n",
+        "    // First type rationale.\n",
+        "    first = 1;\n",
+        "    // Second type rationale.\n",
+        "    second = 2;\n",
+        "    // Third type rationale.\n",
+        "    third = 3;\n",
+        "    // Fourth type rationale.\n",
+        "    fourth = 4;\n",
+        "    run() {\n",
+        "        // First local rationale.\n",
+        "        const first = () => 1;\n",
+        "        const second = () => 2;\n",
+        "    }\n",
+        "}\n",
+    );
+    let after_text = before_text.replace(
+        "        const second = () => 2;",
+        "        // Local rationale.\n        const second = () => 2;",
+    );
+    let baseline = analyze_all(SourceFile {
+        path: Path::new("Worker.tsx"),
+        text: before_text,
+    })
+    .expect("valid TSX baseline");
+    assert!(
+        baseline
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "the fixture must put the outer type over budget"
+    );
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Worker.tsx"),
+            text: before_text,
+        },
+        SourceFile {
+            path: Path::new("Worker.tsx"),
+            text: &after_text,
+        },
+    )
+    .expect("valid nested TSX change");
+    let has_function_budget = findings
+        .iter()
+        .any(|finding| finding.rule == "comment-policy/function-comment-budget");
+    let has_type_budget = findings
+        .iter()
+        .any(|finding| finding.rule == "comment-policy/type-comment-budget");
+
+    assert!(
+        has_function_budget && !has_type_budget,
+        "the nearest function budget must be selected without activating the type parent: {findings:#?}"
     );
 }
 

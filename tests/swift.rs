@@ -676,11 +676,65 @@ fn multiline_swiftformat_previous_on_opening_row_does_not_consume_narrative_budg
 }
 
 #[test]
+fn decorated_multiline_swiftformat_boundary_modifiers_do_not_consume_narrative_budget() {
+    let sources = [
+        (
+            "next",
+            concat!(
+                "func work() {\n",
+                "    /*\n",
+                "     * swiftformat:disable:next redundantSelf */\n",
+                "    self.perform()\n",
+                "    // ordinary explanation\n",
+                "    finish()\n",
+                "}\n",
+            ),
+        ),
+        (
+            "this",
+            concat!(
+                "func work() {\n",
+                "    self.perform() /* * swiftformat:disable:this redundantSelf\n",
+                "     */\n",
+                "    // ordinary explanation\n",
+                "    finish()\n",
+                "}\n",
+            ),
+        ),
+        (
+            "previous",
+            concat!(
+                "func work() {\n",
+                "    self.perform()\n",
+                "    /* * swiftformat:disable:previous redundantSelf\n",
+                "     */\n",
+                "    // ordinary explanation\n",
+                "    finish()\n",
+                "}\n",
+            ),
+        ),
+    ];
+
+    for (modifier, source) in sources {
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings.is_empty(),
+            "a structural leading star does not turn a SwiftFormat :{modifier} boundary marker into narrative: {findings:#?}"
+        );
+    }
+}
+
+#[test]
 fn multiline_swiftformat_boundary_modifier_with_narrative_row_remains_narrative() {
     let source = concat!(
         "func work() {\n",
-        "    self.perform() /* swiftformat:disable:this redundantSelf\n",
-        "     rationale */\n",
+        "    self.perform() /* * swiftformat:disable:this redundantSelf\n",
+        "     * rationale */\n",
         "    // ordinary explanation\n",
         "    finish()\n",
         "}\n",

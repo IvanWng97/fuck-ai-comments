@@ -105,7 +105,7 @@ fn owner_from_node(
 }
 
 fn clang_format_directive(comment: &str) -> bool {
-    let comment = comment.trim_end_matches(|character: char| character.is_ascii_whitespace());
+    let comment = comment.trim_end_matches(['\r', '\n']);
     if matches!(comment, "/* clang-format off */" | "/* clang-format on */") {
         return true;
     }

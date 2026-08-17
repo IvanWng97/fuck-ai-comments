@@ -183,6 +183,14 @@ fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
     if body.contains(['\r', '\n']) {
         return None;
     }
+    let body = if multiline_block
+        && let Some(decorated) = body.strip_prefix('*')
+        && decorated.starts_with(char::is_whitespace)
+    {
+        decorated.trim_start()
+    } else {
+        body
+    };
     let separator = body.find(' ')?;
     let (command, arguments) = body.split_at(separator);
     let (placement, valid_arguments) = match command {

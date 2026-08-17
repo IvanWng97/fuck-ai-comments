@@ -230,18 +230,12 @@ impl<'source> AttachmentIndexBuilder<'source> {
         record_attachment_index_visit();
         let starts_line = self.source_position.starts_line_at(node.start_byte());
         let is_root = self.frames.is_empty();
-        if let Some(parent) = self.frames.last_mut() {
-            parent.record_child(
-                node,
-                starts_line,
-                (self.syntax.preamble_trivia)(node.kind()),
-                &mut self.comments,
-            );
-        }
         self.frames.push(AttachmentFrame::new(
             node,
             is_root,
             (self.syntax.transparent_comment_wrapper)(node.kind()),
+            starts_line,
+            (self.syntax.preamble_trivia)(node.kind()),
         ));
     }
 
@@ -251,10 +245,14 @@ impl<'source> AttachmentIndexBuilder<'source> {
         let Some(frame) = frame else {
             return;
         };
-        if !frame.transparent_comments.is_empty()
-            && let Some(parent) = self.frames.last_mut()
-        {
-            parent.record_transparent_comments(node.id(), frame.transparent_comments);
+        if let Some(parent) = self.frames.last_mut() {
+            parent.record_child(
+                node,
+                frame.starts_line,
+                frame.is_preamble_trivia,
+                frame.transparent_comments,
+                &mut self.comments,
+            );
         }
     }
 }
@@ -263,19 +261,31 @@ struct AttachmentFrame {
     node_id: usize,
     is_root: bool,
     is_transparent_comment_wrapper: bool,
+    starts_line: bool,
+    is_preamble_trivia: bool,
     preamble_open: bool,
     last_named_child: Option<NamedChild>,
+    pending_next_node_comments: Vec<PendingNextNodeComment>,
     transparent_comments: Vec<usize>,
 }
 
 impl AttachmentFrame {
-    fn new(node: Node<'_>, is_root: bool, is_transparent_comment_wrapper: bool) -> Self {
+    fn new(
+        node: Node<'_>,
+        is_root: bool,
+        is_transparent_comment_wrapper: bool,
+        starts_line: bool,
+        is_preamble_trivia: bool,
+    ) -> Self {
         Self {
             node_id: node.id(),
             is_root,
             is_transparent_comment_wrapper,
+            starts_line,
+            is_preamble_trivia,
             preamble_open: true,
             last_named_child: None,
+            pending_next_node_comments: Vec::new(),
             transparent_comments: Vec::new(),
         }
     }
@@ -285,46 +295,60 @@ impl AttachmentFrame {
         node: Node<'_>,
         starts_line: bool,
         is_preamble_trivia: bool,
+        transparent_comments: Vec<usize>,
         comments: &mut HashMap<usize, CommentAttachment>,
     ) {
         if !node.is_named() {
             return;
         }
-        let child = NamedChild::new(node, starts_line);
-        if let Some(previous) = self.last_named_child.as_ref() {
-            previous.record_next(&child, comments);
-        }
+        let child = NamedChild::new(node, starts_line, transparent_comments);
         if child.is_comment {
             let attachment = comments.entry(child.node_id).or_default();
             attachment.starts_line = starts_line;
             attachment.end_row = child.end_row;
             if let Some(previous) = self.last_named_child.as_ref() {
-                attachment.same_line = !previous.is_comment && previous.end_row == child.start_row;
-                attachment.previous_line =
-                    !previous.is_comment && previous.end_row.saturating_add(1) == child.start_row;
+                attachment.same_line =
+                    !previous.is_comment_boundary() && previous.end_row == child.start_row;
+                attachment.previous_line = !previous.is_comment_boundary()
+                    && previous.end_row.saturating_add(1) == child.start_row;
             }
             if self.is_root && self.preamble_open {
                 attachment.file_preamble = true;
             }
-            if self.is_transparent_comment_wrapper {
-                self.transparent_comments.push(child.node_id);
+        }
+        if let Some(previous) = self.last_named_child.as_ref() {
+            previous.record_immediate_next(&child, comments);
+        }
+        if child.is_comment_boundary() {
+            for comment in child.comment_ids() {
+                let attachment = comments.entry(comment).or_default();
+                self.pending_next_node_comments
+                    .push(PendingNextNodeComment {
+                        node_id: comment,
+                        starts_line: attachment.starts_line || child.starts_line,
+                        end_row: attachment.end_row,
+                    });
+            }
+        } else {
+            for pending in self.pending_next_node_comments.drain(..) {
+                comments.entry(pending.node_id).or_default().next_node =
+                    pending.starts_line || pending.end_row == child.start_row;
             }
         }
-        if self.is_root && !child.is_comment && !is_preamble_trivia {
+        if self.is_transparent_comment_wrapper {
+            self.transparent_comments.extend(child.comment_ids());
+        }
+        if self.is_root && !child.is_comment_boundary() && !is_preamble_trivia {
             self.preamble_open = false;
         }
         self.last_named_child = Some(child);
     }
+}
 
-    fn record_transparent_comments(&mut self, node_id: usize, comments: Vec<usize>) {
-        if let Some(child) = self
-            .last_named_child
-            .as_mut()
-            .filter(|child| child.node_id == node_id)
-        {
-            child.transparent_comments = comments;
-        }
-    }
+struct PendingNextNodeComment {
+    node_id: usize,
+    starts_line: bool,
+    end_row: usize,
 }
 
 struct NamedChild {
@@ -337,33 +361,39 @@ struct NamedChild {
 }
 
 impl NamedChild {
-    fn new(node: Node<'_>, starts_line: bool) -> Self {
+    fn new(node: Node<'_>, starts_line: bool, transparent_comments: Vec<usize>) -> Self {
         Self {
             node_id: node.id(),
             start_row: node.start_position().row,
             end_row: node.end_position().row,
             starts_line,
             is_comment: is_comment_kind(node.kind()),
-            transparent_comments: Vec::new(),
+            transparent_comments,
         }
     }
 
-    fn record_next(&self, next: &NamedChild, comments: &mut HashMap<usize, CommentAttachment>) {
-        if self.is_comment {
-            let attachment = comments.entry(self.node_id).or_default();
-            attachment.next_node =
-                !next.is_comment && (attachment.starts_line || self.end_row == next.start_row);
-            attachment.next_line =
-                !next.is_comment && next.start_row == self.end_row.saturating_add(1);
+    fn is_comment_boundary(&self) -> bool {
+        self.is_comment || !self.transparent_comments.is_empty()
+    }
+
+    fn comment_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.is_comment
+            .then_some(self.node_id)
+            .into_iter()
+            .chain(self.transparent_comments.iter().copied())
+    }
+
+    fn record_immediate_next(
+        &self,
+        next: &NamedChild,
+        comments: &mut HashMap<usize, CommentAttachment>,
+    ) {
+        if next.is_comment_boundary() {
+            return;
         }
-        for comment in &self.transparent_comments {
-            let attachment = comments.entry(*comment).or_default();
-            attachment.next_node = !next.is_comment
-                && (attachment.starts_line
-                    || self.starts_line
-                    || attachment.end_row == next.start_row);
-            attachment.next_line =
-                !next.is_comment && next.start_row == attachment.end_row.saturating_add(1);
+        for comment in self.comment_ids() {
+            let attachment = comments.entry(comment).or_default();
+            attachment.next_line = next.start_row == attachment.end_row.saturating_add(1);
         }
     }
 }

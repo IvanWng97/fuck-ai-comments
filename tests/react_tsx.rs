@@ -381,7 +381,69 @@ fn jsx_line_start_prettier_ignore_targets_across_blank_lines() {
 }
 
 #[test]
+fn jsx_prettier_ignore_skips_comment_wrappers_before_its_next_node() {
+    let source = concat!(
+        "const Card = () => (\n",
+        "  <main>\n",
+        "    {/* prettier-ignore */}\n",
+        "    {/* ordinary one */}\n",
+        "    <span data-id='one' />\n",
+        "    {/* ordinary two */}\n",
+        "    <span data-id='two' />\n",
+        "    {/* ordinary three */}\n",
+        "    <span data-id='three' />\n",
+        "  </main>\n",
+        ");\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Card.tsx"),
+        text: source,
+    })
+    .expect("valid TSX should parse");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
+        "Prettier targets the next JSX node across comment wrappers: {findings:#?}"
+    );
+}
+
+#[test]
 fn jsx_typescript_suppression_directive_targets_the_next_line() {
+    let source = concat!(
+        "const Card = () => (\n",
+        "  <main>\n",
+        "    {/*\n",
+        "      * @ts-expect-error */}\n",
+        "    <Missing data-id='one' />\n",
+        "    {/* ordinary one */}\n",
+        "    <span data-id='two' />\n",
+        "    {/* ordinary two */}\n",
+        "    <span data-id='three' />\n",
+        "    {/* ordinary three */}\n",
+        "    <span data-id='four' />\n",
+        "  </main>\n",
+        ");\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Card.tsx"),
+        text: source,
+    })
+    .expect("valid TSX should parse");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
+        "a JSX-wrapped TypeScript suppression directive remains attached to the next line: {findings:#?}"
+    );
+}
+
+#[test]
+fn jsx_typescript_suppression_with_prior_prose_is_narrative() {
     let source = concat!(
         "const Card = () => (\n",
         "  <main>\n",
@@ -407,8 +469,8 @@ fn jsx_typescript_suppression_directive_targets_the_next_line() {
     assert!(
         findings
             .iter()
-            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
-        "a JSX-wrapped TypeScript suppression directive remains attached to the next line: {findings:#?}"
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "prose before a JSX suppression token makes the whole block narrative: {findings:#?}"
     );
 }
 

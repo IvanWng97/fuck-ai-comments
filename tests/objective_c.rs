@@ -464,6 +464,51 @@ fn trailing_exact_clang_format_markers_do_not_consume_narrative_budget() {
 }
 
 #[test]
+fn trailing_horizontal_whitespace_clang_format_markers_remain_narrative() {
+    for suffix in [" ", "\t"] {
+        let source = format!(
+            "@implementation Formatter\n- (NSInteger)work {{\n    NSInteger first = 1; // clang-format off{suffix}\n    NSInteger second = 2; // clang-format on{suffix}\n    // ordinary explanation\n    return first + second;\n}}\n@end\n"
+        );
+
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Formatter.m"),
+            text: &source,
+        })
+        .expect("valid Objective-C should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "clang-format rejects a marker with trailing horizontal whitespace ({suffix:?}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn crlf_clang_format_markers_do_not_consume_narrative_budget() {
+    for (off, on) in [
+        ("// clang-format off", "// clang-format on"),
+        ("// clang-format off: generated", "// clang-format on:"),
+    ] {
+        let source = format!(
+            "@implementation Formatter\r\n- (NSInteger)work {{\r\n    {off}\r\n    NSInteger value = 1;\r\n    {on}\r\n    // ordinary explanation\r\n    return value;\r\n}}\r\n@end\r\n"
+        );
+
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Formatter.m"),
+            text: &source,
+        })
+        .expect("valid Objective-C should parse");
+
+        assert!(
+            findings.is_empty(),
+            "CRLF does not change clang-format marker syntax ({off}): {findings:#?}"
+        );
+    }
+}
+
+#[test]
 fn empty_colon_suffix_clang_format_markers_do_not_consume_narrative_budget() {
     let source = concat!(
         "@implementation Formatter\n",

@@ -262,16 +262,25 @@ fn typescript_line_comment_body(comment: &str) -> Option<&str> {
 fn typescript_suppression_directive(comment: &str) -> bool {
     let candidate = if let Some(body) = typescript_line_comment_body(comment) {
         body
-    } else if comment.starts_with("/*") && comment.ends_with("*/") {
-        comment
-            .rsplit(['\r', '\n'])
-            .next()
-            .unwrap_or(comment)
-            .trim_start()
-            .trim_start_matches(['/', '*'])
-            .trim_start()
     } else {
-        return false;
+        let Some(body) = comment
+            .strip_prefix("/*")
+            .and_then(|comment| comment.strip_suffix("*/"))
+        else {
+            return false;
+        };
+        let candidate_start = body.rfind(['\r', '\n']).map_or(0, |index| index + 1);
+        let (preceding_rows, candidate) = body.split_at(candidate_start);
+        if !preceding_rows
+            .chars()
+            .all(|character| character.is_whitespace() || character == '*')
+        {
+            return false;
+        }
+        candidate
+            .trim_start_matches(char::is_whitespace)
+            .trim_start_matches('*')
+            .trim_start()
     };
     ["@ts-ignore", "@ts-expect-error"]
         .iter()
@@ -482,6 +491,7 @@ fn class_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tree_sitter::Parser;
 
     #[test]
     fn unbound_nested_callable_names_do_not_scan_descendants() {
@@ -564,6 +574,18 @@ mod tests {
         crate::languages::tree::attachment_index_visits()
     }
 
+    fn syntax_node_count(language: tree_sitter::Language, source: &str) -> usize {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&language)
+            .expect("JavaScript-family grammar should load");
+        parser
+            .parse(source, None)
+            .expect("parser should return a tree")
+            .root_node()
+            .descendant_count()
+    }
+
     #[test]
     fn chained_assignment_frontier_work_is_linear_when_deep() {
         let shallow = chained_assignment_frontier_counts(64, 1);
@@ -638,5 +660,40 @@ mod tests {
         let medium = nested_directive_attachment_visits(32);
         let deep = nested_directive_attachment_visits(64);
         assert_eq!(deep - medium, 2 * (medium - shallow));
+    }
+
+    #[test]
+    fn attachment_index_visits_each_javascript_family_node_once() {
+        let cases = [
+            (
+                Path::new("render.js"),
+                "// prettier-ignore\n// context\nrender();\n",
+                tree_sitter_javascript::LANGUAGE.into(),
+            ),
+            (
+                Path::new("render.ts"),
+                "// prettier-ignore\n// context\nrender<string>();\n",
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            ),
+            (
+                Path::new("Card.tsx"),
+                "const Card = () => <main>{/* prettier-ignore */}{/* context */}<span /></main>;\n",
+                tree_sitter_typescript::LANGUAGE_TSX.into(),
+            ),
+        ];
+
+        for (path, source, language) in cases {
+            let expected = syntax_node_count(language, source);
+            crate::languages::tree::reset_attachment_index_visits();
+
+            crate::analyze_all(crate::SourceFile { path, text: source })
+                .expect("valid JavaScript-family source");
+
+            assert_eq!(
+                crate::languages::tree::attachment_index_visits(),
+                expected,
+                "{path:?} must use one forward attachment visit per syntax node"
+            );
+        }
     }
 }
