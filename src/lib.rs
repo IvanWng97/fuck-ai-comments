@@ -7,6 +7,7 @@ use tree_sitter::{Node, Parser};
 
 const FUNCTION_COMMENT_ABSOLUTE_MAX: usize = 8;
 const FUNCTION_CODE_LINES_PER_COMMENT: usize = 4;
+const LEAF_COMMENT_MAX_LINES: usize = 3;
 
 /// One required policy violation.
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -53,7 +54,13 @@ pub fn analyze_file(
     selection: &Selection,
 ) -> Result<Vec<Finding>, AnalysisError> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("rs") => analyze_rust(path, source, selection),
+        Some("rs") => analyze_tree(path, source, selection, TreeLanguage::Rust),
+        Some("py" | "pyi") => analyze_tree(path, source, selection, TreeLanguage::Python),
+        Some("js" | "mjs") => analyze_tree(path, source, selection, TreeLanguage::JavaScript),
+        Some("jsx") => analyze_tree(path, source, selection, TreeLanguage::JavaScript),
+        Some("ts") => analyze_tree(path, source, selection, TreeLanguage::TypeScript),
+        Some("tsx") => analyze_tree(path, source, selection, TreeLanguage::Tsx),
+        Some("toml") => analyze_toml(path, source, selection),
         _ => Err(AnalysisError::Unsupported(path.display().to_string())),
     }
 }
@@ -79,6 +86,14 @@ pub enum AnalysisError {
         path: String,
         /// Language selected from the file extension.
         language: &'static str,
+    },
+    /// TOML syntax or string boundaries were invalid.
+    #[error("could not parse {path} as TOML: {detail}")]
+    Toml {
+        /// File that failed to parse.
+        path: String,
+        /// Parser or lexer error.
+        detail: String,
     },
 }
 
@@ -125,79 +140,449 @@ struct Comment {
     text: String,
 }
 
-fn analyze_rust(
+#[derive(Debug)]
+struct Leaf {
+    span: Span,
+    name: String,
+    public: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TreeLanguage {
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
+    Tsx,
+}
+
+impl TreeLanguage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Python => "Python",
+            Self::JavaScript => "JavaScript",
+            Self::TypeScript | Self::Tsx => "TypeScript",
+        }
+    }
+
+    fn grammar(self) -> tree_sitter::Language {
+        match self {
+            Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Self::Python => tree_sitter_python::LANGUAGE.into(),
+            Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        }
+    }
+
+    fn is_function(self, kind: &str) -> bool {
+        match self {
+            Self::Rust => kind == "function_item",
+            Self::Python => kind == "function_definition",
+            Self::JavaScript | Self::TypeScript | Self::Tsx => matches!(
+                kind,
+                "function_declaration"
+                    | "function_expression"
+                    | "arrow_function"
+                    | "method_definition"
+            ),
+        }
+    }
+
+    fn is_comment(self, kind: &str) -> bool {
+        match self {
+            Self::Rust => matches!(kind, "line_comment" | "block_comment"),
+            Self::Python | Self::JavaScript | Self::TypeScript | Self::Tsx => kind == "comment",
+        }
+    }
+
+    fn directives(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["SAFETY:"],
+            Self::Python => &["noqa", "type: ignore", "fmt:", "pragma:", "nosec"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                &["eslint", "@ts-", "istanbul ignore", "c8 ignore"]
+            }
+        }
+    }
+
+    fn leaf_stop_prefixes(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["//!"],
+            Self::Python => &[
+                "#!",
+                "# -*-",
+                "# coding",
+                "# noqa",
+                "# type:",
+                "# fmt:",
+                "# pragma:",
+                "# nosec",
+            ],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                &["// eslint", "/* eslint", "// @ts-", "/* istanbul", "/* c8"]
+            }
+        }
+    }
+}
+
+fn analyze_tree(
     path: &Path,
     source: &str,
     selection: &Selection,
+    language: TreeLanguage,
 ) -> Result<Vec<Finding>, AnalysisError> {
     let mut parser = Parser::new();
+    let grammar = language.grammar();
     parser
-        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .set_language(&grammar)
         .map_err(|error| AnalysisError::ParserInit {
-            language: "Rust",
+            language: language.label(),
             detail: error.to_string(),
         })?;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| AnalysisError::Parse {
             path: path.display().to_string(),
-            language: "Rust",
+            language: language.label(),
         })?;
     if tree.root_node().has_error() {
         return Err(AnalysisError::Parse {
             path: path.display().to_string(),
-            language: "Rust",
+            language: language.label(),
         });
     }
 
     let mut functions = Vec::new();
     let mut comments = Vec::new();
-    collect_rust_nodes(tree.root_node(), source, &mut functions, &mut comments);
-    Ok(function_findings(
+    let mut leaves = Vec::new();
+    collect_tree_nodes(
+        tree.root_node(),
+        source,
+        language,
+        0,
+        &mut functions,
+        &mut comments,
+        &mut leaves,
+    );
+    let mut findings = function_findings(
         path,
         source,
         selection,
         &functions,
         &comments,
-        &["SAFETY:"],
-    ))
+        language.directives(),
+    );
+    findings.extend(leaf_findings(
+        path,
+        source,
+        selection,
+        &leaves,
+        &comments,
+        language.label(),
+        language.leaf_stop_prefixes(),
+    ));
+    Ok(findings)
 }
 
-fn collect_rust_nodes(
+fn collect_tree_nodes(
     node: Node<'_>,
     source: &str,
+    language: TreeLanguage,
+    function_depth: usize,
     functions: &mut Vec<Function>,
     comments: &mut Vec<Comment>,
+    leaves: &mut Vec<Leaf>,
 ) {
-    match node.kind() {
-        "function_item" => {
-            let name = node
-                .child_by_field_name("name")
-                .and_then(|name| name.utf8_text(source.as_bytes()).ok())
-                .unwrap_or("<anonymous>")
-                .to_owned();
-            functions.push(Function {
-                span: Span::from_node(node),
-                name,
-            });
-        }
-        "line_comment" | "block_comment" => {
-            let text = node
-                .utf8_text(source.as_bytes())
-                .unwrap_or_default()
-                .to_owned();
-            comments.push(Comment {
-                span: Span::from_node(node),
-                text,
-            });
-        }
-        _ => {}
+    let is_function = language.is_function(node.kind());
+    if is_function {
+        functions.push(Function {
+            span: Span::from_node(node),
+            name: function_name(node, source),
+        });
+    }
+    if language.is_comment(node.kind()) {
+        comments.push(Comment {
+            span: Span::from_node(node),
+            text: node_text(node, source).to_owned(),
+        });
+    }
+    if let Some(leaf) = leaf_from_node(node, source, language, function_depth) {
+        leaves.push(leaf);
     }
 
+    let child_function_depth = function_depth + usize::from(is_function);
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_rust_nodes(child, source, functions, comments);
+        collect_tree_nodes(
+            child,
+            source,
+            language,
+            child_function_depth,
+            functions,
+            comments,
+            leaves,
+        );
     }
+}
+
+fn function_name(node: Node<'_>, source: &str) -> String {
+    node.child_by_field_name("name")
+        .or_else(|| {
+            node.parent()
+                .and_then(|parent| parent.child_by_field_name("name"))
+        })
+        .map_or("<anonymous>", |name| node_text(name, source))
+        .to_owned()
+}
+
+fn leaf_from_node(
+    node: Node<'_>,
+    source: &str,
+    language: TreeLanguage,
+    function_depth: usize,
+) -> Option<Leaf> {
+    match language {
+        TreeLanguage::Rust if matches!(node.kind(), "const_item" | "static_item") => {
+            let mut cursor = node.walk();
+            let public = node
+                .children(&mut cursor)
+                .any(|child| child.kind() == "visibility_modifier");
+            Some(Leaf {
+                span: Span::from_node(node),
+                name: node
+                    .child_by_field_name("name")
+                    .map_or("<unknown>", |name| node_text(name, source))
+                    .to_owned(),
+                public,
+            })
+        }
+        TreeLanguage::Python if node.kind() == "assignment" && function_depth == 0 => {
+            let name = node
+                .child_by_field_name("left")
+                .filter(|left| left.kind() == "identifier")
+                .map(|left| node_text(left, source))?;
+            let uppercase = name.bytes().any(|byte| byte.is_ascii_uppercase())
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+            uppercase.then(|| Leaf {
+                span: Span::from_node(node),
+                name: name.to_owned(),
+                public: false,
+            })
+        }
+        TreeLanguage::JavaScript | TreeLanguage::TypeScript | TreeLanguage::Tsx
+            if node.kind() == "lexical_declaration"
+                && node_text(node, source).trim_start().starts_with("const ") =>
+        {
+            let declarator = first_descendant_with_kind(node, "variable_declarator")?;
+            let name = declarator
+                .child_by_field_name("name")
+                .map_or("<destructured>", |name| node_text(name, source));
+            Some(Leaf {
+                span: Span::from_node(node),
+                name: name.to_owned(),
+                public: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn first_descendant_with_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find_map(|child| first_descendant_with_kind(child, kind))
+}
+
+fn node_text<'source>(node: Node<'_>, source: &'source str) -> &'source str {
+    source.get(node.byte_range()).unwrap_or_default()
+}
+
+fn analyze_toml(
+    path: &Path,
+    source: &str,
+    selection: &Selection,
+) -> Result<Vec<Finding>, AnalysisError> {
+    toml::from_str::<toml::Table>(source).map_err(|error| AnalysisError::Toml {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    })?;
+
+    let mut findings = Vec::new();
+    let mut pending = Vec::new();
+    let mut mode = None;
+    for (index, raw) in source.lines().enumerate() {
+        let line_number = index + 1;
+        let (code, has_comment) =
+            toml_line_parts(raw, &mut mode).map_err(|detail| AnalysisError::Toml {
+                path: path.display().to_string(),
+                detail: detail.to_owned(),
+            })?;
+        if has_comment && code.trim().is_empty() {
+            pending.push(line_number);
+            continue;
+        }
+        if code.trim().is_empty() {
+            continue;
+        }
+
+        let owner = toml_key(code);
+        let mut owned = pending.clone();
+        if owner.is_some() && has_comment {
+            owned.push(line_number);
+        }
+        let owner_touched = selection.owners.contains(&line_number);
+        let comment_touched = owned.iter().any(|line| selection.changed.contains(line));
+        if let Some(owner) = owner {
+            if !owned.is_empty() && owner_touched && !comment_touched {
+                findings.push(Finding {
+                    path: path.display().to_string(),
+                    line: owned[0],
+                    rule: "comment-policy/comment-owner-changed",
+                    message: format!(
+                        "TOML key `{owner}` changed while its comment did not; edit or delete the comment to attest that it remains true"
+                    ),
+                });
+            }
+            if owned.len() > LEAF_COMMENT_MAX_LINES && (owner_touched || comment_touched) {
+                findings.push(Finding {
+                    path: path.display().to_string(),
+                    line: owned[0],
+                    rule: "comment-policy/leaf-comment-budget",
+                    message: format!(
+                        "{} comment lines own TOML key `{owner}`; allowance is {LEAF_COMMENT_MAX_LINES}",
+                        owned.len()
+                    ),
+                });
+            }
+        }
+        pending.clear();
+    }
+    if mode.is_some() {
+        return Err(AnalysisError::Toml {
+            path: path.display().to_string(),
+            detail: "unterminated multiline string".to_owned(),
+        });
+    }
+    Ok(findings)
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TomlStringMode {
+    Basic,
+    Literal,
+    MultilineBasic,
+    MultilineLiteral,
+}
+
+fn toml_line_parts<'line>(
+    line: &'line str,
+    mode: &mut Option<TomlStringMode>,
+) -> Result<(&'line str, bool), &'static str> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match *mode {
+            Some(TomlStringMode::MultilineBasic) => {
+                if bytes[index..].starts_with(b"\"\"\"") {
+                    *mode = None;
+                    index += 3;
+                } else if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else {
+                    index += 1;
+                }
+            }
+            Some(TomlStringMode::MultilineLiteral) => {
+                if bytes[index..].starts_with(b"'''") {
+                    *mode = None;
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+            }
+            Some(TomlStringMode::Basic) => {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else {
+                    if bytes[index] == b'\"' {
+                        *mode = None;
+                    }
+                    index += 1;
+                }
+            }
+            Some(TomlStringMode::Literal) => {
+                if bytes[index] == b'\'' {
+                    *mode = None;
+                }
+                index += 1;
+            }
+            None => {
+                if bytes[index] == b'#' {
+                    return Ok((&line[..index], true));
+                }
+                if bytes[index..].starts_with(b"\"\"\"") {
+                    *mode = Some(TomlStringMode::MultilineBasic);
+                    index += 3;
+                } else if bytes[index..].starts_with(b"'''") {
+                    *mode = Some(TomlStringMode::MultilineLiteral);
+                    index += 3;
+                } else if bytes[index] == b'\"' {
+                    *mode = Some(TomlStringMode::Basic);
+                    index += 1;
+                } else if bytes[index] == b'\'' {
+                    *mode = Some(TomlStringMode::Literal);
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+    if matches!(mode, Some(TomlStringMode::Basic | TomlStringMode::Literal)) {
+        return Err("unterminated single-line string");
+    }
+    Ok((line, false))
+}
+
+fn toml_key(code: &str) -> Option<&str> {
+    let stripped = code.trim();
+    if stripped.is_empty() || stripped.starts_with('[') {
+        return None;
+    }
+
+    let bytes = stripped.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match quote {
+            Some(b'\"') => {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'\"' {
+                    quote = None;
+                }
+            }
+            Some(b'\'') => {
+                if byte == b'\'' {
+                    quote = None;
+                }
+            }
+            Some(_) => return None,
+            None if matches!(byte, b'\"' | b'\'') => quote = Some(byte),
+            None if byte == b'=' => return Some(stripped[..index].trim()),
+            None => {}
+        }
+    }
+    None
 }
 
 fn function_findings(
@@ -351,4 +736,100 @@ fn code_line_count(source: &str, function: &Span, comments: &[Comment]) -> usize
 
 fn first_line(lines: &BTreeSet<usize>) -> usize {
     lines.first().copied().unwrap_or(1)
+}
+
+fn leaf_findings(
+    path: &Path,
+    source: &str,
+    selection: &Selection,
+    leaves: &[Leaf],
+    comments: &[Comment],
+    language: &str,
+    stop_prefixes: &[&str],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for leaf in leaves {
+        let mut owned =
+            preceding_comment_lines(source, comments, leaf.span.start_line, stop_prefixes);
+        owned.extend(
+            comments
+                .iter()
+                .filter(|comment| {
+                    comment.span.start_line == leaf.span.end_line
+                        && comment.span.start_byte >= leaf.span.end_byte
+                })
+                .flat_map(|comment| comment.span.lines()),
+        );
+        let owner_touched = leaf
+            .span
+            .lines()
+            .any(|line| selection.owners.contains(&line));
+        let comment_touched = owned.iter().any(|line| selection.changed.contains(line));
+        if !owner_touched && !comment_touched {
+            continue;
+        }
+        if !owned.is_empty() && owner_touched && !comment_touched {
+            findings.push(Finding {
+                path: path.display().to_string(),
+                line: first_line(&owned),
+                rule: "comment-policy/comment-owner-changed",
+                message: format!(
+                    "{language} leaf `{}` changed while its comment did not; edit or delete the comment to attest that it remains true",
+                    leaf.name
+                ),
+            });
+        }
+        if !leaf.public && owned.len() > LEAF_COMMENT_MAX_LINES {
+            findings.push(Finding {
+                path: path.display().to_string(),
+                line: first_line(&owned),
+                rule: "comment-policy/leaf-comment-budget",
+                message: format!(
+                    "{} comment lines own {language} leaf `{}`; allowance is {LEAF_COMMENT_MAX_LINES}",
+                    owned.len(),
+                    leaf.name
+                ),
+            });
+        }
+    }
+    findings
+}
+
+fn preceding_comment_lines(
+    source: &str,
+    comments: &[Comment],
+    owner_start_line: usize,
+    stop_prefixes: &[&str],
+) -> BTreeSet<usize> {
+    let physical: Vec<&str> = source.lines().collect();
+    let mut by_line = std::collections::BTreeMap::new();
+    for comment in comments {
+        for line in comment.span.lines() {
+            by_line.insert(line, comment);
+        }
+    }
+
+    let mut lines = BTreeSet::new();
+    let mut cursor = owner_start_line.saturating_sub(1);
+    while cursor > 0 {
+        if physical
+            .get(cursor - 1)
+            .is_some_and(|line| line.trim().is_empty())
+        {
+            cursor -= 1;
+            continue;
+        }
+        let Some(comment) = by_line.get(&cursor) else {
+            break;
+        };
+        if stop_prefixes
+            .iter()
+            .any(|prefix| comment.text.trim_start().starts_with(prefix))
+        {
+            break;
+        }
+        lines.extend(comment.span.lines());
+        cursor = comment.span.start_line.saturating_sub(1);
+    }
+    lines
 }
