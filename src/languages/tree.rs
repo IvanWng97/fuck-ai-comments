@@ -633,6 +633,16 @@ pub(crate) fn parse(
     label: &'static str,
     grammar: Language,
 ) -> Result<Tree, AnalysisError> {
+    let tree = parse_recovering(path, source, label, grammar)?;
+    reject_errors(path, label, tree)
+}
+
+pub(crate) fn parse_recovering(
+    path: &Path,
+    source: &str,
+    label: &'static str,
+    grammar: Language,
+) -> Result<Tree, AnalysisError> {
     let mut parser = Parser::new();
     parser
         .set_language(&grammar)
@@ -640,12 +650,19 @@ pub(crate) fn parse(
             language: label,
             detail: error.to_string(),
         })?;
-    let tree = parser
+    parser
         .parse(source, None)
         .ok_or_else(|| AnalysisError::Parse {
             path: path.display().to_string(),
             language: label,
-        })?;
+        })
+}
+
+pub(crate) fn reject_errors(
+    path: &Path,
+    label: &'static str,
+    tree: Tree,
+) -> Result<Tree, AnalysisError> {
     if tree.root_node().has_error() {
         return Err(AnalysisError::Parse {
             path: path.display().to_string(),

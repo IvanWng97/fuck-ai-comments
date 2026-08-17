@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use tree_sitter::{Language, Node};
+use tree_sitter::{Language, Node, Tree};
 
 use super::walk::{WalkEvent, events};
 use super::{css, javascript, tree, typescript};
@@ -14,6 +14,10 @@ use crate::policy::{
 pub(crate) trait ContainerSpec: Copy {
     fn label(self) -> &'static str;
     fn grammar(self) -> Language;
+
+    fn parse_outer(self, path: &Path, source: &str) -> Result<Tree, AnalysisError> {
+        tree::parse(path, source, self.label(), self.grammar())
+    }
 
     fn is_comment(self, node: Node<'_>) -> bool {
         node.kind() == "comment"
@@ -120,7 +124,7 @@ fn parse_facts<S: ContainerSpec>(
     source: &str,
     spec: S,
 ) -> Result<Facts, AnalysisError> {
-    let tree = tree::parse(path, source, spec.label(), spec.grammar())?;
+    let tree = spec.parse_outer(path, source)?;
     let mut syntax = Vec::new();
     let mut comments = Vec::new();
     let mut regions = Vec::new();
