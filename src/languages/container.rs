@@ -176,7 +176,7 @@ pub(crate) fn script_region(node: Node<'_>, source: &str) -> Option<EmbeddedRegi
     if node.kind() != "script_element" {
         return None;
     }
-    let start_tag = direct_named_child_with_kind(node, "start_tag")?;
+    let start_tag = tree::direct_named_child(node, "start_tag")?;
     let raw = tree::first_descendant_with_kind(node, "raw_text")?;
     html_script_language(start_tag, source).map(|language| EmbeddedRegion {
         span: Span::from_node(raw),
@@ -189,7 +189,7 @@ pub(crate) fn astro_script_region(node: Node<'_>, source: &str) -> Option<Embedd
     if node.kind() != "script_element" {
         return None;
     }
-    let start_tag = direct_named_child_with_kind(node, "start_tag")?;
+    let start_tag = tree::direct_named_child(node, "start_tag")?;
     let raw = tree::first_descendant_with_kind(node, "raw_text")?;
     let language = if has_only_src_attributes(start_tag, source) {
         Some(EmbeddedLanguage::TypeScript)
@@ -207,7 +207,7 @@ pub(crate) fn style_region(node: Node<'_>, source: &str) -> Option<EmbeddedRegio
     if node.kind() != "style_element" {
         return None;
     }
-    let start_tag = direct_named_child_with_kind(node, "start_tag")?;
+    let start_tag = tree::direct_named_child(node, "start_tag")?;
     let raw = tree::first_descendant_with_kind(node, "raw_text")?;
     style_is_css(start_tag, source).then(|| EmbeddedRegion {
         span: Span::from_node(raw),
@@ -220,7 +220,7 @@ pub(crate) fn astro_style_region(node: Node<'_>, source: &str) -> Option<Embedde
     if node.kind() != "style_element" {
         return None;
     }
-    let start_tag = direct_named_child_with_kind(node, "start_tag")?;
+    let start_tag = tree::direct_named_child(node, "start_tag")?;
     let raw = tree::first_descendant_with_kind(node, "raw_text")?;
     astro_style_is_css(start_tag, source).then(|| EmbeddedRegion {
         span: Span::from_node(raw),
@@ -329,7 +329,7 @@ fn attribute_value<'source>(
         .named_children(&mut cursor)
         .filter(|node| node.kind() == "attribute")
         .find_map(|attribute| {
-            let name = direct_named_child_with_kind(attribute, "attribute_name")?;
+            let name = tree::direct_named_child(attribute, "attribute_name")?;
             tree::node_text(name, source)
                 .eq_ignore_ascii_case(wanted_name)
                 .then_some(attribute)
@@ -359,15 +359,9 @@ fn has_only_src_attributes(start_tag: Node<'_>, source: &str) -> bool {
         .named_children(&mut cursor)
         .filter(|node| node.kind() == "attribute")
         .all(|attribute| {
-            direct_named_child_with_kind(attribute, "attribute_name")
+            tree::direct_named_child(attribute, "attribute_name")
                 .is_some_and(|name| tree::node_text(name, source).eq_ignore_ascii_case("src"))
         })
-}
-
-fn direct_named_child_with_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
-    let mut cursor = node.walk();
-    node.named_children(&mut cursor)
-        .find(|child| child.kind() == kind)
 }
 
 fn trim_attribute_value(value: &str) -> &str {

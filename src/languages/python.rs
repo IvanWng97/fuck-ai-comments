@@ -2,9 +2,12 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use super::tree::{LanguageSpec, analyze, document, first_descendant_with_kind, node_text};
+use super::tree::{
+    LanguageSpec, OwnerCandidate, OwnerLocation, analyze, document, first_descendant_with_kind,
+    function_name, node_text, starts_physical_line,
+};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, Leaf, ParsedFile, Span, TypeOwner};
+use crate::policy::{CommentKind, ParsedFile, Span};
 
 const BANDIT_NUMERIC_TEST_ID_DIGITS: usize = 3;
 
@@ -34,55 +37,42 @@ impl LanguageSpec for Python {
         tree_sitter_python::LANGUAGE.into()
     }
 
-    fn function_span(self, node: Node<'_>, _source: &str) -> Option<Span> {
-        ((node.kind() == "decorated_definition"
-            && decorated_body(node, "function_definition").is_some())
-            || (node.kind() == "function_definition"
-                && node
-                    .parent()
-                    .is_none_or(|parent| parent.kind() != "decorated_definition")))
-        .then(|| Span::from_node(node))
-    }
-
-    fn function_namespace(self, node: Node<'_>, source: &str) -> Vec<String> {
-        let mut namespace: Vec<_> =
-            std::iter::successors(node.parent(), |ancestor| ancestor.parent())
-                .filter(|ancestor| ancestor.kind() == "class_definition")
-                .filter_map(|class| class.child_by_field_name("name"))
-                .map(|name| format!("class:{}", node_text(name, source)))
-                .collect();
-        namespace.reverse();
-        namespace
-    }
-
-    fn type_owner(self, node: Node<'_>, source: &str) -> Option<TypeOwner> {
-        let class = match node.kind() {
-            "decorated_definition" => decorated_body(node, "class_definition")?,
-            "class_definition"
-                if node
-                    .parent()
-                    .is_none_or(|parent| parent.kind() != "decorated_definition") =>
-            {
-                node
-            }
-            _ => return None,
-        };
-        let name = class
-            .child_by_field_name("name")
-            .map(|name| node_text(name, source))?;
-        let mut identity: Vec<_> =
-            std::iter::successors(node.parent(), |ancestor| ancestor.parent())
-                .filter(|ancestor| ancestor.kind() == "class_definition")
-                .filter_map(|ancestor| ancestor.child_by_field_name("name"))
-                .map(|ancestor| format!("class:{}", node_text(ancestor, source)))
-                .collect();
-        identity.reverse();
-        identity.push(format!("class:{name}"));
-        Some(TypeOwner {
-            span: Span::from_node(node),
-            name: name.to_owned(),
-            identity,
-        })
+    fn owner(
+        self,
+        node: Node<'_>,
+        location: OwnerLocation<'_>,
+        source: &str,
+        function_depth: usize,
+    ) -> Option<OwnerCandidate> {
+        if let Some(class) = class_owner_node(node, location) {
+            let name = class
+                .child_by_field_name("name")
+                .map(|name| node_text(name, source).to_owned())?;
+            return Some(OwnerCandidate::type_owner(
+                Span::from_node(node),
+                name.clone(),
+                vec![format!("class:{name}")],
+            ));
+        }
+        if function_owner_node(node, location).is_some() {
+            return Some(OwnerCandidate::function(
+                Span::from_node(node),
+                function_name(node, location, source),
+                Vec::new(),
+            ));
+        }
+        if node.kind() != "assignment" || function_depth != 0 {
+            return None;
+        }
+        let name = node
+            .child_by_field_name("left")
+            .filter(|left| left.kind() == "identifier")
+            .map(|left| node_text(left, source))?;
+        let uppercase = name.bytes().any(|byte| byte.is_ascii_uppercase())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+        uppercase.then(|| OwnerCandidate::leaf(Span::from_node(node), name.to_owned()))
     }
 
     fn classify_comment(
@@ -106,23 +96,39 @@ impl LanguageSpec for Python {
             }
         })
     }
+}
 
-    fn leaf(self, node: Node<'_>, source: &str, function_depth: usize) -> Option<Leaf> {
-        if node.kind() != "assignment" || function_depth != 0 {
-            return None;
+fn class_owner_node<'tree>(
+    node: Node<'tree>,
+    location: OwnerLocation<'tree>,
+) -> Option<Node<'tree>> {
+    match node.kind() {
+        "decorated_definition" => decorated_body(node, "class_definition"),
+        "class_definition"
+            if location
+                .parent()
+                .is_none_or(|parent| parent.kind() != "decorated_definition") =>
+        {
+            Some(node)
         }
-        let name = node
-            .child_by_field_name("left")
-            .filter(|left| left.kind() == "identifier")
-            .map(|left| node_text(left, source))?;
-        let uppercase = name.bytes().any(|byte| byte.is_ascii_uppercase())
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
-        uppercase.then(|| Leaf {
-            span: Span::from_node(node),
-            name: name.to_owned(),
-        })
+        _ => None,
+    }
+}
+
+fn function_owner_node<'tree>(
+    node: Node<'tree>,
+    location: OwnerLocation<'tree>,
+) -> Option<Node<'tree>> {
+    match node.kind() {
+        "decorated_definition" => decorated_body(node, "function_definition"),
+        "function_definition"
+            if location
+                .parent()
+                .is_none_or(|parent| parent.kind() != "decorated_definition") =>
+        {
+            Some(node)
+        }
+        _ => None,
     }
 }
 
@@ -292,15 +298,6 @@ fn has_direct_block(node: Node<'_>) -> bool {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
         .any(|child| child.kind() == "block")
-}
-
-fn starts_physical_line(node: Node<'_>, source: &str) -> bool {
-    let line_start = source[..node.start_byte()]
-        .rfind('\n')
-        .map_or(0, |index| index + 1);
-    source.as_bytes()[line_start..node.start_byte()]
-        .iter()
-        .all(u8::is_ascii_whitespace)
 }
 
 #[derive(Clone, Copy)]

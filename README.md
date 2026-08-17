@@ -19,7 +19,7 @@ comments.
 | Rule                             | Required policy                                                                                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                  |
-| Python class budget              | Python classes use the same relative narrative budget as functions                                                                                |
+| Type budget                      | Classes, structs, protocols, extensions, and equivalent type owners use the same relative narrative budget as functions                           |
 | Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, template, and TOML owners allow at most 3 total                                        |
 | Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                           |
 | File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                              |
@@ -40,12 +40,26 @@ docstrings consume the file budget.
 - Python: `.py`, `.pyi`, `.pyw`
 - TOML: `.toml`
 - JavaScript: `.js`, `.cjs`, `.mjs`, `.jsx`
-- TypeScript: `.ts`, `.cts`, `.mts`, `.tsx`
+- TypeScript and React TSX: `.ts`, `.cts`, `.mts`, `.tsx`
+- Objective-C: `.m`
+- Swift: `.swift`
+- Kotlin: `.kt`, `.kts`
 - Web: `.html`, `.htm`, `.css`, `.astro`
 
 HTML and Astro use their native grammar and then dispatch embedded scripts and
 styles to the JavaScript, TypeScript, or CSS adapter. Data scripts and explicit
 unsupported preprocessors remain opaque.
+
+React uses the TypeScript TSX grammar and the same callable-owner rules as
+JavaScript; it is not a duplicate language adapter. Objective-C headers are not
+registered because `.h` is ambiguous across C, C++, and Objective-C, and `.mm`
+is not registered because the upstream Objective-C grammar does not implement
+complete Objective-C++.
+
+Tool-directive recognition validates source syntax and placement, not whether
+an external linter configuration enables a rule identifier. Custom rule IDs
+make a baked-in catalog incorrect; directives still count toward the absolute
+owner cap and still require stale-comment attestation.
 
 ## CLI
 
@@ -175,7 +189,7 @@ Get-ChildItem -File fuck-ai-comments-*.zip | ForEach-Object {
 
 The implementation deliberately delegates mechanical work:
 
-- `tree-sitter` and official language grammars parse source;
+- `tree-sitter` and maintained upstream language grammars parse source;
 - `toml_edit` plus the official `toml_parser` lexer preserve TOML structure and
   exact comment spans;
 - `similar` supplies Myers diff anchors;
@@ -187,6 +201,13 @@ The implementation deliberately delegates mechanical work:
 
 The project owns only its domain semantics: comment ownership, budgets,
 per-comment attestation, and fail-closed pairing.
+
+Language adapters do not repair or replace an upstream grammar. Valid syntax
+that the selected grammar cannot parse exits with code `2`; compatibility
+workarounds are accepted only when they preserve the upstream AST and exact
+source coordinates. Parser and grammar versions are exact-pinned because their
+AST shapes are part of the policy contract; dependency upgrades must pass the
+adapter tests and corpus scan explicitly.
 
 ## Development
 

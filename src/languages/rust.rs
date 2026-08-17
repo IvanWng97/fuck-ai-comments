@@ -3,10 +3,13 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use super::tree::{LanguageSpec, analyze, document, node_text};
+use super::tree::{
+    LanguageSpec, OwnerCandidate, OwnerLocation, analyze, ancestors, canonical_syntax, document,
+    function_name, node_text,
+};
 use super::walk::{WalkEvent, events};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, Leaf, ParsedFile, Span};
+use crate::policy::{CommentKind, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Rust {
@@ -50,33 +53,29 @@ impl LanguageSpec for Rust {
         public_type_context(root, source)
     }
 
-    fn function_span(self, node: Node<'_>, source: &str) -> Option<Span> {
-        if !matches!(node.kind(), "function_item" | "closure_expression") {
+    fn owner(
+        self,
+        node: Node<'_>,
+        location: OwnerLocation<'_>,
+        source: &str,
+        _function_depth: usize,
+    ) -> Option<OwnerCandidate> {
+        if let Some(span) = rust_function_span(node, source) {
+            return Some(OwnerCandidate::function(
+                span,
+                function_name(node, location, source),
+                rust_function_namespace(node, source),
+            ));
+        }
+        if !matches!(node.kind(), "const_item" | "static_item") {
             return None;
         }
-        let mut start = node;
-        while let Some(attribute) = start
-            .prev_named_sibling()
-            .filter(|sibling| sibling.kind() == "attribute_item")
-        {
-            let gap = source.get(attribute.end_byte()..start.start_byte())?;
-            if !gap.bytes().all(|byte| byte.is_ascii_whitespace()) {
-                break;
-            }
-            start = attribute;
-        }
-        let mut span = Span::from_node(node);
-        span.start_byte = start.start_byte();
-        span.start_line = start.start_position().row + 1;
-        Some(span)
-    }
-
-    fn function_namespace(self, node: Node<'_>, source: &str) -> Vec<String> {
-        let mut namespace: Vec<_> = ancestors(node)
-            .filter_map(|ancestor| rust_namespace_segment(ancestor, source))
-            .collect();
-        namespace.reverse();
-        namespace
+        Some(OwnerCandidate::leaf(
+            Span::from_node(node),
+            node.child_by_field_name("name")
+                .map_or("<unknown>", |name| node_text(name, source))
+                .to_owned(),
+        ))
     }
 
     fn classify_comment(
@@ -96,19 +95,35 @@ impl LanguageSpec for Rust {
         }
         Some(CommentKind::Narrative)
     }
+}
 
-    fn leaf(self, node: Node<'_>, source: &str, _function_depth: usize) -> Option<Leaf> {
-        if !matches!(node.kind(), "const_item" | "static_item") {
-            return None;
-        }
-        Some(Leaf {
-            span: Span::from_node(node),
-            name: node
-                .child_by_field_name("name")
-                .map_or("<unknown>", |name| node_text(name, source))
-                .to_owned(),
-        })
+fn rust_function_span(node: Node<'_>, source: &str) -> Option<Span> {
+    if !matches!(node.kind(), "function_item" | "closure_expression") {
+        return None;
     }
+    let mut start = node;
+    while let Some(attribute) = start
+        .prev_named_sibling()
+        .filter(|sibling| sibling.kind() == "attribute_item")
+    {
+        let gap = source.get(attribute.end_byte()..start.start_byte())?;
+        if !gap.bytes().all(|byte| byte.is_ascii_whitespace()) {
+            break;
+        }
+        start = attribute;
+    }
+    let mut span = Span::from_node(node);
+    span.start_byte = start.start_byte();
+    span.start_line = start.start_position().row + 1;
+    Some(span)
+}
+
+fn rust_function_namespace(node: Node<'_>, source: &str) -> Vec<String> {
+    let mut namespace: Vec<_> = ancestors(node)
+        .filter_map(|ancestor| rust_namespace_segment(ancestor, source))
+        .collect();
+    namespace.reverse();
+    namespace
 }
 
 fn rust_namespace_segment(node: Node<'_>, source: &str) -> Option<String> {
@@ -133,34 +148,6 @@ fn rust_namespace_segment(node: Node<'_>, source: &str) -> Option<String> {
             .map(|name| format!("mod:{}", node_text(name, source))),
         _ => None,
     }
-}
-
-fn canonical_syntax(node: Node<'_>, source: &str) -> String {
-    let mut identity = String::new();
-    let mut excluded_depth = 0_usize;
-    for event in events(node) {
-        match event {
-            WalkEvent::Enter(_) if excluded_depth > 0 => excluded_depth += 1,
-            WalkEvent::Enter(current) if is_comment(current) => excluded_depth = 1,
-            WalkEvent::Enter(current) if current.child_count() == 0 => {
-                let text = node_text(current, source);
-                if !text.trim().is_empty() {
-                    push_length_prefixed(&mut identity, current.kind());
-                    push_length_prefixed(&mut identity, text);
-                }
-            }
-            WalkEvent::Enter(_) => {}
-            WalkEvent::Leave(_) if excluded_depth > 0 => excluded_depth -= 1,
-            WalkEvent::Leave(_) => {}
-        }
-    }
-    identity
-}
-
-fn push_length_prefixed(output: &mut String, value: &str) {
-    output.push_str(&value.len().to_string());
-    output.push(':');
-    output.push_str(value);
 }
 
 fn is_comment(node: Node<'_>) -> bool {
@@ -414,8 +401,4 @@ fn comment_body(comment: &str) -> &str {
     comment
         .trim_start()
         .trim_start_matches(['/', '*', '!', ' '])
-}
-
-fn ancestors(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
-    std::iter::successors(node.parent(), |ancestor| ancestor.parent())
 }

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 
 use fuck_ai_comments::{AnalysisError, SourceFile, analyze_all, analyze_change, supports_path};
@@ -17,6 +18,10 @@ fn registered_extensions_share_one_registry() {
         "file.cts",
         "file.mts",
         "file.tsx",
+        "file.m",
+        "file.swift",
+        "file.kt",
+        "file.kts",
         "file.toml",
         "file.html",
         "file.htm",
@@ -1508,5 +1513,47 @@ fn deeply_nested_syntax_is_walked_without_using_the_call_stack() {
     assert!(
         findings.is_empty(),
         "the fixture has no comments: {findings:#?}"
+    );
+}
+
+#[test]
+fn deeply_nested_kotlin_change_preserves_owner_correspondence() {
+    const DEPTH: usize = 200;
+
+    let nested_source = |value| {
+        let mut source = String::new();
+        for level in 0..DEPTH {
+            writeln!(source, "class Level{level} {{").expect("writing to a String cannot fail");
+        }
+        writeln!(source, "fun run(): Int {{").expect("writing to a String cannot fail");
+        writeln!(source, "// Coupled to the deepest implementation.")
+            .expect("writing to a String cannot fail");
+        writeln!(source, "return {value}").expect("writing to a String cannot fail");
+        source.push_str("}\n");
+        for _ in 0..DEPTH {
+            source.push_str("}\n");
+        }
+        source
+    };
+    let before = nested_source(1);
+    let after = nested_source(2);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Deep.kt"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("Deep.kt"),
+            text: &after,
+        },
+    )
+    .expect("valid deeply nested Kotlin change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == DEPTH + 2
+        }),
+        "the deepest unchanged comment must remain attached to its changed function: {findings:#?}"
     );
 }

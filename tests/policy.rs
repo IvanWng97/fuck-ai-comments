@@ -2039,6 +2039,26 @@ fn valid_attached_javascript_and_typescript_directives_remain_metadata() {
 }
 
 #[test]
+fn deeply_nested_javascript_directives_remain_attached() {
+    let depth = 400;
+    let mut source = String::new();
+    for index in 0..depth {
+        source.push_str(&format!(
+            "function f{index}() {{\n// eslint-disable-next-line no-console\n"
+        ));
+    }
+    source.push_str("return 1;\n");
+    source.push_str(&"}\n".repeat(depth));
+
+    let findings = analyze(Path::new("deep.js"), &source).expect("valid nested JavaScript");
+
+    assert!(
+        findings.is_empty(),
+        "every nested directive must stay attached to its next line: {findings:#?}"
+    );
+}
+
+#[test]
 fn javascript_tool_directives_cannot_bypass_the_absolute_owner_cap() {
     let source = concat!(
         "function work() {\n",

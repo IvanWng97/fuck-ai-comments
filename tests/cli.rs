@@ -64,6 +64,33 @@ fn all_honors_gitignore_and_ignore_filters() {
 }
 
 #[test]
+fn all_scans_new_language_adapters_in_one_folder() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    let sources = [
+        ("Renderer.m", "@implementation Renderer\n@end\n"),
+        ("Renderer.swift", "let value = 1\n"),
+        ("Renderer.kt", "val value = 1\n"),
+        (
+            "Renderer.tsx",
+            "export const Renderer = () => <main>Hello</main>;\n",
+        ),
+    ];
+    for (path, source) in sources {
+        fs::write(root.path().join(path), source).expect("source should be written");
+    }
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert_eq!(stdout, "clean: 4 files scanned\n");
+}
+
+#[test]
 fn all_scans_hidden_supported_files() {
     let root = TempDir::new().expect("temporary directory should be created");
     fs::create_dir(root.path().join(".github")).expect("hidden directory should be created");

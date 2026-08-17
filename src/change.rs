@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+#[cfg(test)]
+use std::cell::Cell;
 
 use similar::{Algorithm, DiffTag, TextDiff, capture_diff_slices};
 
@@ -8,6 +11,11 @@ use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
 
 const STALE_RULE: &str = "comment-policy/comment-owner-changed";
 const REPARENTED_RULE: &str = "comment-policy/comment-reparented";
+
+#[cfg(test)]
+thread_local! {
+    static OWNER_FRONTIER_VISITS: Cell<usize> = const { Cell::new(0) };
+}
 
 pub(crate) fn analyze(
     before: SourceFile<'_>,
@@ -105,57 +113,95 @@ fn pair_owners(
 ) -> Result<Pairing, AnalysisError> {
     let mut pairs = Pairing::new(before.owners.len(), after.owners.len());
     pairs.insert(0, 0)?;
+    let before_children = owners_by_parent(before);
+    let after_children = owners_by_parent(after);
+    let mut frontier = VecDeque::from([(0, 0)]);
 
-    loop {
-        let mut progress = pair_unique_named_owners(before, after, &mut pairs)?;
-        progress |= pair_anchored_owners(before, after, anchors, &mut pairs)?;
-        if !progress {
-            break;
+    while let Some((before_parent, after_parent)) = frontier.pop_front() {
+        loop {
+            let stable = unique_stable_owner_pairs(
+                before,
+                after,
+                &before_children[before_parent],
+                &after_children[after_parent],
+                &pairs,
+            );
+            enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+
+            let anchored = anchored_owner_pairs(
+                before,
+                after,
+                &before_children[before_parent],
+                &after_children[after_parent],
+                anchors,
+                &pairs,
+            )?;
+            if anchored.is_empty() {
+                break;
+            }
+            enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
         }
     }
     Ok(pairs)
 }
 
-fn pair_unique_named_owners(
-    before: &ParsedFile,
-    after: &ParsedFile,
-    pairs: &mut Pairing,
-) -> Result<bool, AnalysisError> {
-    let before_by_key = owners_by_key(before, &pairs.before_to_after, |parent| {
-        pairs.before_to_after[parent]
-    });
-    let after_by_key = owners_by_key(after, &pairs.after_to_before, Some);
-
-    let mut progress = false;
-    for (key, before_indexes) in before_by_key {
-        let Some(after_indexes) = after_by_key.get(&key) else {
-            continue;
-        };
-        if before_indexes.len() == 1 && after_indexes.len() == 1 {
-            pairs.insert(before_indexes[0], after_indexes[0])?;
-            progress = true;
+fn owners_by_parent(document: &ParsedFile) -> Vec<Vec<usize>> {
+    let mut children = vec![Vec::new(); document.owners.len()];
+    for (index, owner) in document.owners.iter().enumerate().skip(1) {
+        if let Some(parent) = owner.parent {
+            children[parent].push(index);
         }
     }
-    Ok(progress)
+    children
 }
 
-type OwnerKey = (usize, OwnerKind, Vec<String>);
+fn enqueue_owner_pairs(
+    new_pairs: impl IntoIterator<Item = (usize, usize)>,
+    pairs: &mut Pairing,
+    frontier: &mut VecDeque<(usize, usize)>,
+) -> Result<(), AnalysisError> {
+    for (before, after) in new_pairs {
+        pairs.insert(before, after)?;
+        frontier.push_back((before, after));
+    }
+    Ok(())
+}
 
-fn owners_by_key(
-    document: &ParsedFile,
+fn unique_stable_owner_pairs(
+    before: &ParsedFile,
+    after: &ParsedFile,
+    before_children: &[usize],
+    after_children: &[usize],
+    pairs: &Pairing,
+) -> Vec<(usize, usize)> {
+    let before_by_key = stable_owners_by_key(before, before_children, &pairs.before_to_after);
+    let after_by_key = stable_owners_by_key(after, after_children, &pairs.after_to_before);
+
+    before_by_key
+        .into_iter()
+        .filter_map(|(key, before_index)| {
+            before_index.zip(after_by_key.get(&key).copied().flatten())
+        })
+        .collect()
+}
+
+type StableOwnerKey<'identity> = (OwnerKind, &'identity [String]);
+
+fn stable_owners_by_key<'document>(
+    document: &'document ParsedFile,
+    children: &[usize],
     paired: &[Option<usize>],
-    parent_key: impl Fn(usize) -> Option<usize>,
-) -> BTreeMap<OwnerKey, Vec<usize>> {
+) -> BTreeMap<StableOwnerKey<'document>, Option<usize>> {
     let mut groups = BTreeMap::new();
-    for (index, owner) in document.owners.iter().enumerate().skip(1) {
-        if paired[index].is_none()
-            && has_stable_identity(owner)
-            && let Some(parent) = owner.parent.and_then(&parent_key)
-        {
+    for &index in children {
+        #[cfg(test)]
+        OWNER_FRONTIER_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let owner = &document.owners[index];
+        if paired[index].is_none() && has_stable_identity(owner) {
             groups
-                .entry((parent, owner.kind, owner.identity.clone()))
-                .or_insert_with(Vec::new)
-                .push(index);
+                .entry((owner.kind, owner.identity.as_slice()))
+                .and_modify(|unique| *unique = None)
+                .or_insert(Some(index));
         }
     }
     groups
@@ -169,26 +215,23 @@ fn has_stable_identity(owner: &OwnerSnapshot) -> bool {
     })
 }
 
-fn pair_anchored_owners(
+fn anchored_owner_pairs(
     before: &ParsedFile,
     after: &ParsedFile,
+    before_children: &[usize],
+    after_children: &[usize],
     anchors: &LineAnchors,
-    pairs: &mut Pairing,
-) -> Result<bool, AnalysisError> {
+    pairs: &Pairing,
+) -> Result<Vec<(usize, usize)>, AnalysisError> {
     let mut scores = Vec::new();
-    for (before_index, owner) in before.owners.iter().enumerate().skip(1) {
+    for &before_index in before_children {
         if pairs.before_to_after[before_index].is_some() {
             continue;
         }
-        let Some(after_parent) = owner
-            .parent
-            .and_then(|parent| pairs.before_to_after[parent])
-        else {
-            continue;
-        };
-        for (after_index, candidate) in after.owners.iter().enumerate().skip(1) {
+        let owner = &before.owners[before_index];
+        for &after_index in after_children {
+            let candidate = &after.owners[after_index];
             if pairs.after_to_before[after_index].is_none()
-                && candidate.parent == Some(after_parent)
                 && candidate.kind == owner.kind
                 && let Some(score) = anchors.score(&owner.span, &candidate.span)
             {
@@ -209,14 +252,10 @@ fn pair_anchored_owners(
             .map(|&(before, after, score)| (after, before, score)),
         "new owner",
     )?;
-    let mut progress = false;
-    for (before_index, after_index) in before_choices {
-        if after_choices.get(&after_index) == Some(&before_index) {
-            pairs.insert(before_index, after_index)?;
-            progress = true;
-        }
-    }
-    Ok(progress)
+    Ok(before_choices
+        .into_iter()
+        .filter(|(before_index, after_index)| after_choices.get(after_index) == Some(before_index))
+        .collect())
 }
 
 fn owner_choices(
@@ -708,5 +747,62 @@ impl LineAnchors {
             .filter(|line| new.start_line.saturating_sub(1) <= **line && **line < new.end_line)
             .count();
         (anchors > 0).then_some(anchors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+    use std::path::Path;
+
+    use super::*;
+
+    fn nested_kotlin(depth: usize, value: usize) -> String {
+        let mut source = String::new();
+        for level in 0..depth {
+            writeln!(source, "class Level{level} {{").expect("writing to a String cannot fail");
+        }
+        writeln!(source, "fun run(): Int {{").expect("writing to a String cannot fail");
+        writeln!(source, "// Coupled to the deepest implementation.")
+            .expect("writing to a String cannot fail");
+        writeln!(source, "return {value}").expect("writing to a String cannot fail");
+        source.push_str("}\n");
+        for _ in 0..depth {
+            source.push_str("}\n");
+        }
+        source
+    }
+
+    fn owner_frontier_visits(depth: usize) -> usize {
+        let before = nested_kotlin(depth, 1);
+        let after = nested_kotlin(depth, 2);
+        OWNER_FRONTIER_VISITS.with(|visits| visits.set(0));
+
+        analyze(
+            SourceFile {
+                path: Path::new("Deep.kt"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("Deep.kt"),
+                text: &after,
+            },
+        )
+        .expect("valid deeply nested Kotlin change");
+
+        OWNER_FRONTIER_VISITS.with(Cell::get)
+    }
+
+    #[test]
+    fn deep_stable_owner_pairing_visits_each_owner_once_per_snapshot() {
+        for depth in [25, 50, 100, 200] {
+            let visits = owner_frontier_visits(depth);
+
+            assert_eq!(
+                visits,
+                2 * (depth + 1),
+                "each non-file owner must enter exactly one frontier per snapshot"
+            );
+        }
     }
 }
