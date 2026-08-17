@@ -557,6 +557,31 @@ fn attached_swiftformat_directive_does_not_consume_narrative_budget() {
 }
 
 #[test]
+fn swiftformat_directive_requires_ascii_space_before_rules() {
+    let source = concat!(
+        "func work() {\n",
+        "    // swiftformat:disable\tredundantSelf\n",
+        "    self.perform()\n",
+        "    // ordinary explanation\n",
+        "    finish()\n",
+        "}\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Worker.swift"),
+        text: source,
+    })
+    .expect("valid Swift should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "SwiftFormat only accepts an ASCII space before rules: {findings:#?}"
+    );
+}
+
+#[test]
 fn swiftformat_block_directive_does_not_consume_narrative_budget() {
     let source = concat!(
         "func work() {\n",
@@ -577,6 +602,65 @@ fn swiftformat_block_directive_does_not_consume_narrative_budget() {
         findings.is_empty(),
         "an operational SwiftFormat block directive stays outside the narrative ratio: {findings:#?}"
     );
+}
+
+#[test]
+fn multiline_swiftformat_line_modifiers_remain_narrative() {
+    let sources = [
+        (
+            "next",
+            concat!(
+                "func work() {\n",
+                "    /*\n",
+                "     swiftformat:disable:next redundantSelf\n",
+                "     */\n",
+                "    self.perform()\n",
+                "    // ordinary explanation\n",
+                "    finish()\n",
+                "}\n",
+            ),
+        ),
+        (
+            "this",
+            concat!(
+                "func work() {\n",
+                "    self.perform() /*\n",
+                "     swiftformat:disable:this redundantSelf\n",
+                "     */\n",
+                "    // ordinary explanation\n",
+                "    finish()\n",
+                "}\n",
+            ),
+        ),
+        (
+            "previous",
+            concat!(
+                "func work() {\n",
+                "    self.perform()\n",
+                "    /*\n",
+                "     swiftformat:disable:previous redundantSelf\n",
+                "     */\n",
+                "    // ordinary explanation\n",
+                "    finish()\n",
+                "}\n",
+            ),
+        ),
+    ];
+
+    for (modifier, source) in sources {
+        let findings = analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: source,
+        })
+        .expect("valid Swift should parse");
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            "a multiline SwiftFormat :{modifier} block remains narrative: {findings:#?}"
+        );
+    }
 }
 
 #[test]

@@ -167,16 +167,17 @@ fn valid_swiftlint_rule_list(rules: &str) -> bool {
 }
 
 fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
-    let body = if let Some(body) = comment.strip_prefix("//") {
+    let (body, multiline_block) = if let Some(body) = comment.strip_prefix("//") {
         if body.starts_with('/') {
             return None;
         }
-        body
+        (body, false)
     } else {
-        comment.strip_prefix("/*")?.strip_suffix("*/")?
-    }
-    .trim();
-    let separator = body.find(char::is_whitespace)?;
+        let body = comment.strip_prefix("/*")?.strip_suffix("*/")?;
+        (body, body.contains(['\r', '\n']))
+    };
+    let body = body.trim();
+    let separator = body.find(' ')?;
     let (command, arguments) = body.split_at(separator);
     let (placement, valid_arguments) = match command {
         "swiftformat:disable" | "swiftformat:enable" => (
@@ -197,7 +198,8 @@ fn swiftformat_directive(comment: &str) -> Option<DirectivePlacement> {
         ),
         _ => return None,
     };
-    valid_arguments.then_some(placement)
+    (valid_arguments && (!multiline_block || matches!(placement, DirectivePlacement::FreeStanding)))
+        .then_some(placement)
 }
 
 fn valid_swiftformat_rule_list(rules: &str) -> bool {
