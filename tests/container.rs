@@ -481,6 +481,194 @@ fn astro_frontmatter_opening_fence_can_be_inline() {
 }
 
 #[test]
+fn astro_frontmatter_opening_fence_can_follow_markup() {
+    let source = concat!(
+        "lead---const pattern = /`/g;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "const value = pattern;---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits content before an inline opening fence");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "prefixed frontmatter comments must stay in TypeScript policy scope: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_opening_fence_can_follow_comments() {
+    let source = concat!(
+        "<!-- --- -->\n",
+        "<!-- second -->\n",
+        "<!-- third -->\n",
+        "<!-- fourth -->\n",
+        "---const pattern = /`/g;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "const value = pattern;---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits comments before an inline opening fence");
+
+    for rule in [
+        "comment-policy/template-comment-budget",
+        "comment-policy/leaf-comment-budget",
+    ] {
+        assert!(
+            findings.iter().any(|finding| finding.rule == rule),
+            "the prefix and frontmatter must keep their policy scopes: {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn astro_frontmatter_opening_fence_can_follow_bang_closed_comment() {
+    let source = concat!(
+        "<!-- fake ---\n",
+        "second\n",
+        "third\n",
+        "fourth --!>---const pattern = /`/g;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "const value = pattern;---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro recognizes the alternate HTML comment terminator");
+
+    for rule in [
+        "comment-policy/template-comment-budget",
+        "comment-policy/leaf-comment-budget",
+    ] {
+        assert!(
+            findings.iter().any(|finding| finding.rule == rule),
+            "the comment and frontmatter must keep their policy scopes: {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn astro_frontmatter_opening_fence_can_follow_doctype() {
+    let source = concat!(
+        "<!doctype html>---const pattern = /`/g;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "const value = pattern;---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits a doctype before an inline opening fence");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "doctype-prefixed frontmatter must keep its TypeScript scope: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_element_closes_frontmatter_eligibility() {
+    let source = concat!(
+        "<div data-note=\"---\"></div>---const value = 1;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("triple dashes after an element are ordinary template text");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
+        "an attribute or later fence must not create frontmatter: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_quoted_text_closes_frontmatter_eligibility() {
+    let source = concat!(
+        "\"---\"---const value = 1;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("triple dashes after quoted text are ordinary template text");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
+        "quoted text must not create frontmatter: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_expression_closes_frontmatter_eligibility() {
+    let source = concat!(
+        "{\"---\"}---const value = 1;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("the pinned grammar accepts the expression as template content");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
+        "an expression prefix must not create frontmatter: {findings:#?}"
+    );
+}
+
+#[test]
 fn inline_astro_frontmatter_keeps_typescript_policy_scope() {
     let source = concat!(
         "---const pattern = /`/g;\n",
