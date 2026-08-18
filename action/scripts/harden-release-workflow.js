@@ -9,6 +9,8 @@ const releasePath = ".github/workflows/release.yml";
 const configPath = "dist-workspace.toml";
 const dirtyCiSetting = 'allow-dirty = ["ci"]\n';
 const copyExcludes = new Set([".git", "node_modules", "target"]);
+const generatedCheckoutReference = "actions/checkout@v6";
+const releaseCheckoutReference = "actions/checkout@v7";
 
 function replaceOnce(source, before, after, label) {
   const first = source.indexOf(before);
@@ -16,6 +18,13 @@ function replaceOnce(source, before, after, label) {
     throw new Error(`cargo-dist output must contain exactly one ${label}`);
   }
   return source.slice(0, first) + after + source.slice(first + before.length);
+}
+
+function replaceEvery(source, before, after, label) {
+  if (!source.includes(before)) {
+    throw new Error(`cargo-dist output must contain at least one ${label}`);
+  }
+  return source.replaceAll(before, after);
 }
 
 function transformJob(source, jobName, nextJobName, transform) {
@@ -40,8 +49,15 @@ function transformJob(source, jobName, nextJobName, transform) {
 }
 
 export function hardenReleaseWorkflow(generated) {
-  let hardened = replaceOnce(
+  let hardened = replaceEvery(
     generated,
+    generatedCheckoutReference,
+    releaseCheckoutReference,
+    "checkout reference",
+  );
+
+  hardened = replaceOnce(
+    hardened,
     'permissions:\n  "contents": "write"\n',
     'permissions:\n  "contents": "read"\n',
     "workflow contents permission",

@@ -1,6 +1,58 @@
+use std::fmt::Write as _;
 use std::path::Path;
 
 use fuck_ai_comments::{AnalysisError, SourceFile, analyze_all, analyze_change, supports_path};
+
+fn assert_parent_type_rename_stales_nested_comment(
+    path: &str,
+    before: &str,
+    after: &str,
+    comment_line: usize,
+) {
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new(path),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new(path),
+            text: after,
+        },
+    )
+    .expect("the unchanged child owner anchors its renamed parent type");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(
+        stale_lines,
+        [comment_line],
+        "a parent type rename changes the nested owner's semantic identity path"
+    );
+}
+
+fn assert_leaf_comment_addition_activates_type_budget(path: &str, before: &str, after: &str) {
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new(path),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new(path),
+            text: after,
+        },
+    )
+    .expect("valid leaf comment addition");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "a new leaf comment must activate the type budget it consumes ({path}): {findings:#?}"
+    );
+}
 
 #[test]
 fn registered_extensions_share_one_registry() {
@@ -17,6 +69,10 @@ fn registered_extensions_share_one_registry() {
         "file.cts",
         "file.mts",
         "file.tsx",
+        "file.m",
+        "file.swift",
+        "file.kt",
+        "file.kts",
         "file.toml",
         "file.html",
         "file.htm",
@@ -410,6 +466,167 @@ fn javascript_arrow_binding_rename_stales_its_comment() {
 }
 
 #[test]
+fn javascript_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "worker.js",
+        concat!(
+            "class OldWorker {\n",
+            "    run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare();\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+        concat!(
+            "class NewWorker {\n",
+            "    run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare();\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn python_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "worker.py",
+        concat!(
+            "class OldWorker:\n",
+            "    def run(self):\n",
+            "        # Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        return work()\n",
+        ),
+        concat!(
+            "class NewWorker:\n",
+            "    def run(self):\n",
+            "        # Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        return work()\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn kotlin_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "Worker.kt",
+        concat!(
+            "class OldWorker {\n",
+            "    fun run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        concat!(
+            "class NewWorker {\n",
+            "    fun run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn swift_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "Worker.swift",
+        concat!(
+            "class OldWorker {\n",
+            "    func run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        concat!(
+            "class NewWorker {\n",
+            "    func run() {\n",
+            "        // Coupled to the enclosing worker type.\n",
+            "        prepare()\n",
+            "        work()\n",
+            "    }\n",
+            "}\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn objective_c_parent_type_rename_stales_nested_method_comment() {
+    assert_parent_type_rename_stales_nested_comment(
+        "Worker.m",
+        concat!(
+            "@implementation OldWorker\n",
+            "- (void)run {\n",
+            "    // Coupled to the enclosing worker type.\n",
+            "    [self prepare];\n",
+            "    [self work];\n",
+            "}\n",
+            "@end\n",
+        ),
+        concat!(
+            "@implementation NewWorker\n",
+            "- (void)run {\n",
+            "    // Coupled to the enclosing worker type.\n",
+            "    [self prepare];\n",
+            "    [self work];\n",
+            "}\n",
+            "@end\n",
+        ),
+        3,
+    );
+}
+
+#[test]
+fn parent_code_change_does_not_stale_nested_child_comment() {
+    let before = SourceFile {
+        path: Path::new("worker.js"),
+        text: concat!(
+            "class Worker extends OldBase {\n",
+            "    run() {\n",
+            "        // Coupled only to the run method.\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("worker.js"),
+        text: concat!(
+            "class Worker extends NewBase {\n",
+            "    run() {\n",
+            "        // Coupled only to the run method.\n",
+            "        return work();\n",
+            "    }\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("valid parent-only JavaScript change");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/comment-owner-changed"),
+        "ancestor code cannot wash into an unchanged nested owner: {findings:#?}"
+    );
+}
+
+#[test]
 fn insertion_at_an_owner_end_does_not_expand_its_anchor_set() {
     let before = SourceFile {
         path: Path::new("worker.js"),
@@ -471,6 +688,148 @@ fn anonymous_duplicate_owners_without_exact_anchors_fail_closed() {
     assert!(
         matches!(error, AnalysisError::AmbiguousChange(_)),
         "line position cannot identify rewritten anonymous owners: {error:#?}"
+    );
+}
+
+#[test]
+fn flat_anonymous_siblings_pair_through_the_public_change_seam() {
+    const CALLBACKS: usize = 256;
+    const CHANGED: usize = CALLBACKS / 2;
+
+    let callbacks = |changed| {
+        let mut source = String::new();
+        for index in 0..CALLBACKS {
+            writeln!(source, "consume(() => {{").expect("writing to a String cannot fail");
+            writeln!(
+                source,
+                "    // Callback {index} relies on its configured target."
+            )
+            .expect("writing to a String cannot fail");
+            writeln!(source, "    stable{index}();").expect("writing to a String cannot fail");
+            if changed && index == CHANGED {
+                writeln!(source, "    changed{index}();").expect("writing to a String cannot fail");
+            } else {
+                writeln!(source, "    original{index}();")
+                    .expect("writing to a String cannot fail");
+            }
+            writeln!(source, "}});").expect("writing to a String cannot fail");
+        }
+        source
+    };
+    let before = callbacks(false);
+    let after = callbacks(true);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &after,
+        },
+    )
+    .expect("exact anchors disambiguate flat anonymous callbacks");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(stale_lines, [CHANGED * 5 + 2]);
+}
+
+#[test]
+fn same_line_anonymous_siblings_fail_closed_through_the_public_change_seam() {
+    const CALLBACKS: usize = 256;
+
+    let callbacks = |version| {
+        let mut source = format!("const VERSION = {version};\n");
+        for index in 0..CALLBACKS {
+            write!(source, "(() => {{ stable{index}(); }})();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push('\n');
+        source
+    };
+    let before = callbacks(1);
+    let after = callbacks(2);
+
+    let error = analyze_change(
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &after,
+        },
+    )
+    .expect_err("one shared line cannot prove anonymous sibling correspondence");
+
+    assert!(
+        matches!(error, AnalysisError::AmbiguousChange(_)),
+        "ambiguous same-line evidence must fail closed: {error:#?}"
+    );
+}
+
+#[test]
+fn regrouped_anonymous_preference_chain_fails_closed_through_the_public_change_seam() {
+    const CALLBACKS: usize = 32;
+
+    fn emit_callback(
+        source: &mut String,
+        statements: &mut impl Iterator<Item = usize>,
+        count: usize,
+    ) {
+        source.push_str("(() => {\n");
+        for statement in statements.take(count) {
+            writeln!(source, "  statement_{statement:08}();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("})();\n");
+    }
+
+    let statement_count = 2 * CALLBACKS * CALLBACKS - CALLBACKS;
+    let mut before = String::new();
+    let mut before_statements = 0..statement_count;
+    for index in 0..CALLBACKS - 1 {
+        emit_callback(
+            &mut before,
+            &mut before_statements,
+            (2 * index + 1) + (2 * index + 2),
+        );
+    }
+    emit_callback(&mut before, &mut before_statements, 2 * (CALLBACKS - 1) + 1);
+
+    let mut after = String::new();
+    let mut after_statements = 0..statement_count;
+    emit_callback(&mut after, &mut after_statements, 1);
+    for index in 1..CALLBACKS {
+        emit_callback(
+            &mut after,
+            &mut after_statements,
+            2 * index + (2 * index + 1),
+        );
+    }
+    assert_eq!(before_statements.next(), None);
+    assert_eq!(after_statements.next(), None);
+
+    let error = analyze_change(
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("callbacks.js"),
+            text: &after,
+        },
+    )
+    .expect_err("iterative preferences cannot prove anonymous owner correspondence");
+
+    assert!(
+        matches!(error, AnalysisError::AmbiguousChange(_)),
+        "the analyzer must fail closed instead of peeling guessed pairs: {error:#?}"
     );
 }
 
@@ -1198,6 +1557,131 @@ fn inner_function_change_does_not_activate_outer_function_budget() {
 }
 
 #[test]
+fn swift_leaf_comment_addition_activates_its_type_budget() {
+    assert_leaf_comment_addition_activates_type_budget(
+        "Worker.swift",
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    let first = { 1 }\n",
+            "    let second = { 2 }\n",
+            "}\n",
+        ),
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    let first = { 1 }\n",
+            "    // Second.\n",
+            "    let second = { 2 }\n",
+            "}\n",
+        ),
+    );
+}
+
+#[test]
+fn kotlin_leaf_comment_addition_activates_its_type_budget() {
+    assert_leaf_comment_addition_activates_type_budget(
+        "Worker.kt",
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    val first = { 1 }\n",
+            "    val second = { 2 }\n",
+            "}\n",
+        ),
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    val first = { 1 }\n",
+            "    // Second.\n",
+            "    val second = { 2 }\n",
+            "}\n",
+        ),
+    );
+}
+
+#[test]
+fn tsx_leaf_comment_addition_activates_its_type_budget() {
+    assert_leaf_comment_addition_activates_type_budget(
+        "Worker.tsx",
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    static first = () => 1;\n",
+            "    static second = () => 2;\n",
+            "}\n",
+        ),
+        concat!(
+            "class Worker {\n",
+            "    // First.\n",
+            "    static first = () => 1;\n",
+            "    // Second.\n",
+            "    static second = () => 2;\n",
+            "}\n",
+        ),
+    );
+}
+
+#[test]
+fn leaf_inside_function_selects_nearest_budget_without_activating_type_debt() {
+    let before_text = concat!(
+        "class Worker {\n",
+        "    // First type rationale.\n",
+        "    first = 1;\n",
+        "    // Second type rationale.\n",
+        "    second = 2;\n",
+        "    // Third type rationale.\n",
+        "    third = 3;\n",
+        "    // Fourth type rationale.\n",
+        "    fourth = 4;\n",
+        "    run() {\n",
+        "        // First local rationale.\n",
+        "        const first = () => 1;\n",
+        "        const second = () => 2;\n",
+        "    }\n",
+        "}\n",
+    );
+    let after_text = before_text.replace(
+        "        const second = () => 2;",
+        "        // Local rationale.\n        const second = () => 2;",
+    );
+    let baseline = analyze_all(SourceFile {
+        path: Path::new("Worker.tsx"),
+        text: before_text,
+    })
+    .expect("valid TSX baseline");
+    assert!(
+        baseline
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "the fixture must put the outer type over budget"
+    );
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Worker.tsx"),
+            text: before_text,
+        },
+        SourceFile {
+            path: Path::new("Worker.tsx"),
+            text: &after_text,
+        },
+    )
+    .expect("valid nested TSX change");
+    let has_function_budget = findings
+        .iter()
+        .any(|finding| finding.rule == "comment-policy/function-comment-budget");
+    let has_type_budget = findings
+        .iter()
+        .any(|finding| finding.rule == "comment-policy/type-comment-budget");
+
+    assert!(
+        has_function_budget && !has_type_budget,
+        "the nearest function budget must be selected without activating the type parent: {findings:#?}"
+    );
+}
+
+#[test]
 fn javascript_automatic_semicolon_insertion_changes_the_owner_fingerprint() {
     let before = SourceFile {
         path: Path::new("worker.js"),
@@ -1508,5 +1992,47 @@ fn deeply_nested_syntax_is_walked_without_using_the_call_stack() {
     assert!(
         findings.is_empty(),
         "the fixture has no comments: {findings:#?}"
+    );
+}
+
+#[test]
+fn deeply_nested_kotlin_change_preserves_owner_correspondence() {
+    const DEPTH: usize = 200;
+
+    let nested_source = |value| {
+        let mut source = String::new();
+        for level in 0..DEPTH {
+            writeln!(source, "class Level{level} {{").expect("writing to a String cannot fail");
+        }
+        writeln!(source, "fun run(): Int {{").expect("writing to a String cannot fail");
+        writeln!(source, "// Coupled to the deepest implementation.")
+            .expect("writing to a String cannot fail");
+        writeln!(source, "return {value}").expect("writing to a String cannot fail");
+        source.push_str("}\n");
+        for _ in 0..DEPTH {
+            source.push_str("}\n");
+        }
+        source
+    };
+    let before = nested_source(1);
+    let after = nested_source(2);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Deep.kt"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("Deep.kt"),
+            text: &after,
+        },
+    )
+    .expect("valid deeply nested Kotlin change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == DEPTH + 2
+        }),
+        "the deepest unchanged comment must remain attached to its changed function: {findings:#?}"
     );
 }
