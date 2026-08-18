@@ -38,12 +38,15 @@ test("keeps action targets aligned with generated dist configuration", async () 
   const configuration = parseToml(
     await readFile("dist-workspace.toml", "utf8"),
   );
+  const licenses = parseToml(await readFile("about.toml", "utf8"));
 
   assert.deepEqual(configuration.dist.targets.toSorted(), SUPPORTED_TARGETS);
+  assert.deepEqual(licenses.targets.toSorted(), SUPPORTED_TARGETS);
   assert.deepEqual(configuration.dist.installers, []);
   assert.equal(configuration.dist.checksum, "sha256");
   assert.equal(configuration.dist["source-tarball"], false);
   assert.equal(configuration.dist["github-attestations"], true);
+  assert.deepEqual(configuration.dist.include, ["THIRD_PARTY_LICENSES"]);
 });
 
 test("selects archives from a real dist 0.32 manifest fixture", async () => {

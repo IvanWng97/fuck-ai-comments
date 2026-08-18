@@ -1,0 +1,20 @@
+THIRD-PARTY SOFTWARE NOTICES
+
+This file lists the licenses for third-party Rust components distributed with
+fuck-ai-comments. It is generated from Cargo.lock by the pinned cargo-about
+tool; do not edit it manually. This document is provided for attribution and
+is not legal advice.
+
+{{#each licenses}}
+{{#if used_by.[0].crate.source}}
+================================================================================
+{{name}} ({{id}})
+{{#unless source_path}}UNRESOLVED-LICENSE-SOURCE{{/unless}}
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/if}}
+{{/each}}

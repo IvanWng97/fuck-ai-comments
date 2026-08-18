@@ -1,11 +1,40 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import * as toolCache from "@actions/tool-cache";
+
+test("every native archive carries project and dependency licenses", async () => {
+  const manifest = JSON.parse(
+    await readFile("action/test/fixtures/dist-manifest-0.32.0.json", "utf8"),
+  );
+  const archives = Object.values(manifest.artifacts).filter(
+    (artifact) => artifact.kind === "executable-zip",
+  );
+
+  assert.equal(archives.length, 4);
+  for (const archive of archives) {
+    const assets = new Set(archive.assets.map((asset) => asset.name));
+    for (const required of [
+      "LICENSE",
+      "README.md",
+      "THIRD_PARTY_LICENSES",
+      "fuck-ai-comments",
+    ]) {
+      assert.ok(assets.has(required), `${archive.name}: missing ${required}`);
+    }
+  }
+});
 
 test(
   "tool-cache preserves the executable in cargo-dist tar layouts",

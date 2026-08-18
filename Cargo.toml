@@ -13,6 +13,8 @@ exclude = [
     ".github/**",
     "action/**",
     "action.yml",
+    "about.hbs",
+    "about.toml",
     "dist/**",
     "dist-workspace.toml",
     "eslint.config.js",

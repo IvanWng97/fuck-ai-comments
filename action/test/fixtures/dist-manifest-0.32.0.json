@@ -13,6 +13,16 @@
           "kind": "license"
         },
         {
+          "name": "README.md",
+          "path": "README.md",
+          "kind": "readme"
+        },
+        {
+          "name": "THIRD_PARTY_LICENSES",
+          "path": "THIRD_PARTY_LICENSES",
+          "kind": "unknown"
+        },
+        {
           "id": "fuck-ai-comments-aarch64-apple-darwin-exe-fuck-ai-comments",
           "name": "fuck-ai-comments",
           "path": "fuck-ai-comments",
@@ -35,6 +45,16 @@
           "name": "LICENSE",
           "path": "LICENSE",
           "kind": "license"
+        },
+        {
+          "name": "README.md",
+          "path": "README.md",
+          "kind": "readme"
+        },
+        {
+          "name": "THIRD_PARTY_LICENSES",
+          "path": "THIRD_PARTY_LICENSES",
+          "kind": "unknown"
         },
         {
           "id": "fuck-ai-comments-x86_64-apple-darwin-exe-fuck-ai-comments",
@@ -61,6 +81,16 @@
           "kind": "license"
         },
         {
+          "name": "README.md",
+          "path": "README.md",
+          "kind": "readme"
+        },
+        {
+          "name": "THIRD_PARTY_LICENSES",
+          "path": "THIRD_PARTY_LICENSES",
+          "kind": "unknown"
+        },
+        {
           "id": "fuck-ai-comments-x86_64-pc-windows-msvc-exe-fuck-ai-comments",
           "name": "fuck-ai-comments",
           "path": "fuck-ai-comments.exe",
@@ -83,6 +113,16 @@
           "name": "LICENSE",
           "path": "LICENSE",
           "kind": "license"
+        },
+        {
+          "name": "README.md",
+          "path": "README.md",
+          "kind": "readme"
+        },
+        {
+          "name": "THIRD_PARTY_LICENSES",
+          "path": "THIRD_PARTY_LICENSES",
+          "kind": "unknown"
         },
         {
           "id": "fuck-ai-comments-x86_64-unknown-linux-gnu-exe-fuck-ai-comments",
