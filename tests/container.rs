@@ -638,6 +638,45 @@ fn astro_frontmatter_mask_preserves_crlf_unicode_coordinates() {
 }
 
 #[test]
+fn astro_frontmatter_mask_preserves_lf_embedded_script_coordinates() {
+    let before = concat!(
+        "---\n",
+        "const pattern = /`/g;\n",
+        "---\n",
+        "<script>\n",
+        "function work() {\n",
+        "  // Coupled to the returned protocol value.\n",
+        "  return 1;\n",
+        "}\n",
+        "</script>\n",
+    );
+    let after = before.replacen("return 1", "return 2", 1);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: &after,
+        },
+    )
+    .expect("masking must preserve post-frontmatter source coordinates");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(
+        stale_lines,
+        vec![6],
+        "the embedded comment must retain its original LF line"
+    );
+}
+
+#[test]
 fn html_markup_change_stales_its_template_comment() {
     let before = "<!-- Coupled to the rendered label. -->\n<main>before</main>\n";
     let after = "<!-- Coupled to the rendered label. -->\n<main>after</main>\n";
