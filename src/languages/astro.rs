@@ -15,7 +15,45 @@ use crate::policy::{ParsedFile, Span};
 #[derive(Clone, Copy)]
 enum Astro {
     Strict,
-    Recovering,
+    Recovering(RecoveredFrontmatter),
+}
+
+#[derive(Clone, Copy)]
+struct RecoveredFrontmatter {
+    body_start: usize,
+    fence_start: usize,
+    start_line: usize,
+    end_line: usize,
+}
+
+impl RecoveredFrontmatter {
+    fn new(source: &str, body_start: usize, fence_start: usize) -> Self {
+        let start_line = source.as_bytes()[..body_start]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count()
+            + 1;
+        let end_line = start_line
+            + source.as_bytes()[body_start..fence_start]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count();
+        Self {
+            body_start,
+            fence_start,
+            start_line,
+            end_line,
+        }
+    }
+
+    fn span(self) -> Span {
+        Span {
+            start_byte: self.body_start,
+            end_byte: self.fence_start,
+            start_line: self.start_line,
+            end_line: self.end_line,
+        }
+    }
 }
 
 const FRONTMATTER_FENCE: &str = "---";
@@ -25,18 +63,23 @@ pub(crate) fn analyze_file(
     source: &str,
     selection: &Selection,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    retry_with_frontmatter_recovery(|spec| analyze(path, source, selection, spec))
+    retry_with_frontmatter_recovery(path, source, |spec| analyze(path, source, selection, spec))
 }
 
 pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
-    retry_with_frontmatter_recovery(|spec| parse(path, source, spec))
+    retry_with_frontmatter_recovery(path, source, |spec| parse(path, source, spec))
 }
 
 fn retry_with_frontmatter_recovery<T>(
+    path: &Path,
+    source: &str,
     mut operation: impl FnMut(Astro) -> Result<T, AnalysisError>,
 ) -> Result<T, AnalysisError> {
     match operation(Astro::Strict) {
-        Err(AnalysisError::Parse { .. }) => operation(Astro::Recovering),
+        Err(error @ AnalysisError::Parse { .. }) => match recover_frontmatter(path, source)? {
+            Some(frontmatter) => operation(Astro::Recovering(frontmatter)),
+            None => Err(error),
+        },
         result => result,
     }
 }
@@ -51,25 +94,28 @@ impl ContainerSpec for Astro {
     }
 
     fn parse_outer(self, path: &Path, source: &str) -> Result<Tree, AnalysisError> {
-        if matches!(self, Self::Strict) {
-            let tree = tree::parse(path, source, self.label(), self.grammar())?;
-            if frontmatter_has_ambiguous_fence(source, &tree) {
-                return Err(astro_parse_error(path));
+        match self {
+            Self::Strict => {
+                let tree = tree::parse(path, source, self.label(), self.grammar())?;
+                if frontmatter_has_ambiguous_fence(source, &tree) {
+                    return Err(astro_parse_error(path));
+                }
+                Ok(tree)
             }
-            return Ok(tree);
-        }
-        let tree = tree::parse_recovering(path, source, self.label(), self.grammar())?;
-        // Astro misreads regex backticks, so TypeScript lexical nodes establish the fence.
-        match mask_frontmatter(path, source, &tree)? {
-            Some(masked) => tree::parse(path, &masked, self.label(), self.grammar()),
-            None => tree::reject_errors(path, self.label(), tree),
+            Self::Recovering(frontmatter) => {
+                let masked = mask_frontmatter(source, frontmatter)?;
+                tree::parse(path, &masked, self.label(), self.grammar())
+            }
         }
     }
 
     fn embedded_region(self, node: Node<'_>, source: &str) -> Option<EmbeddedRegion> {
         if node.kind() == "frontmatter_js_block" {
             return Some(EmbeddedRegion {
-                span: Span::from_node(node),
+                span: match self {
+                    Self::Strict => Span::from_node(node),
+                    Self::Recovering(frontmatter) => frontmatter.span(),
+                },
                 language: EmbeddedLanguage::TypeScript,
                 owner_name: "<frontmatter>",
             });
@@ -91,38 +137,33 @@ fn frontmatter_has_ambiguous_fence(source: &str, tree: &Tree) -> bool {
         .get(frontmatter.byte_range())
         .is_some_and(|frontmatter| {
             frontmatter
-                .split_inclusive('\n')
-                .filter(|line| is_frontmatter_fence(line))
+                .match_indices(FRONTMATTER_FENCE)
                 .nth(2)
                 .is_some()
         })
 }
 
-fn mask_frontmatter(
+fn recover_frontmatter(
     path: &Path,
     source: &str,
-    tree: &Tree,
-) -> Result<Option<String>, AnalysisError> {
-    let root = tree.root_node();
-    let mut cursor = root.walk();
-    let Some(frontmatter) = root
-        .named_children(&mut cursor)
-        .find(|node| node.kind() == "frontmatter")
-    else {
+) -> Result<Option<RecoveredFrontmatter>, AnalysisError> {
+    let tree = tree::parse_recovering(
+        path,
+        source,
+        "Astro",
+        tree_sitter_astro_next::LANGUAGE.into(),
+    )?;
+    let Some(opening_start) = frontmatter_opening_start(&tree) else {
         return Ok(None);
     };
-    let opening_start = frontmatter.start_byte();
-    let opening_len = source[opening_start..]
-        .find('\n')
-        .map(|offset| offset + 1)
-        .ok_or_else(|| astro_parse_error(path))?;
     let body_start = opening_start
-        .checked_add(opening_len)
+        .checked_add(FRONTMATTER_FENCE.len())
         .ok_or_else(|| astro_parse_error(path))?;
-    if !is_frontmatter_fence(&source[opening_start..body_start]) {
+    if source.get(opening_start..body_start) != Some(FRONTMATTER_FENCE) {
         return Err(astro_parse_error(path));
     }
 
+    // Astro misreads regex backticks, so TypeScript lexical nodes establish the fence.
     let body_and_markup = &source[body_start..];
     let typescript = tree::parse_recovering(
         path,
@@ -132,48 +173,48 @@ fn mask_frontmatter(
     )?;
     let literal_intervals = outermost_typescript_literal_intervals(typescript.root_node());
     let mut literal_index = 0;
-    let mut line_start = body_start;
-    for line in body_and_markup.split_inclusive('\n') {
-        if let Some(fence_offset) = frontmatter_fence_offset(line) {
-            let relative_offset = line_start
-                .checked_sub(body_start)
-                .and_then(|offset| offset.checked_add(fence_offset))
-                .ok_or_else(|| astro_parse_error(path))?;
-            let relative_end = relative_offset
-                .checked_add(FRONTMATTER_FENCE.len())
-                .ok_or_else(|| astro_parse_error(path))?;
-            while literal_intervals
-                .get(literal_index)
-                .is_some_and(|interval| interval.end <= relative_offset)
-            {
-                literal_index += 1;
-            }
-            if literal_intervals
-                .get(literal_index)
-                .is_some_and(|interval| {
-                    interval.start <= relative_offset && relative_end <= interval.end
-                })
-            {
-                line_start += line.len();
-                continue;
-            }
-            let body = &source[body_start..line_start];
-            tree::parse(
-                path,
-                body,
-                "TypeScript",
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            )?;
-            return Ok(Some(mask_frontmatter_body(
-                source,
-                body_start,
-                line_start,
-                fence_offset,
-            )?));
+    for (relative_offset, _) in body_and_markup.match_indices(FRONTMATTER_FENCE) {
+        let relative_end = relative_offset
+            .checked_add(FRONTMATTER_FENCE.len())
+            .ok_or_else(|| astro_parse_error(path))?;
+        while literal_intervals
+            .get(literal_index)
+            .is_some_and(|interval| interval.end <= relative_offset)
+        {
+            literal_index += 1;
         }
-        line_start += line.len();
+        if literal_intervals
+            .get(literal_index)
+            .is_some_and(|interval| interval.start < relative_end && relative_offset < interval.end)
+        {
+            continue;
+        }
+        let fence_start = body_start
+            .checked_add(relative_offset)
+            .ok_or_else(|| astro_parse_error(path))?;
+        let body = &source[body_start..fence_start];
+        tree::parse(
+            path,
+            body,
+            "TypeScript",
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        )?;
+        return Ok(Some(RecoveredFrontmatter::new(
+            source,
+            body_start,
+            fence_start,
+        )));
     }
     Err(astro_parse_error(path))
+}
+
+fn frontmatter_opening_start(tree: &Tree) -> Option<usize> {
+    events(tree.root_node()).find_map(|event| {
+        let WalkEvent::Enter(node) = event else {
+            return None;
+        };
+        (node.kind() == FRONTMATTER_FENCE).then_some(node.start_byte())
+    })
 }
 
 fn outermost_typescript_literal_intervals(root: Node<'_>) -> Vec<Range<usize>> {
@@ -208,18 +249,6 @@ fn astro_parse_error(path: &Path) -> AnalysisError {
     }
 }
 
-fn is_frontmatter_fence(line: &str) -> bool {
-    frontmatter_fence_offset(line).is_some()
-}
-
-fn frontmatter_fence_offset(line: &str) -> Option<usize> {
-    let content = line_content(line);
-    let candidate = content.trim_start_matches([' ', '\t']);
-    candidate
-        .starts_with(FRONTMATTER_FENCE)
-        .then_some(content.len() - candidate.len())
-}
-
 #[cfg(test)]
 thread_local! {
     static LITERAL_TREE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -240,25 +269,22 @@ fn literal_tree_visits() -> usize {
     LITERAL_TREE_VISITS.with(std::cell::Cell::get)
 }
 
-fn line_content(line: &str) -> &str {
-    let line = line.strip_suffix('\n').unwrap_or(line);
-    line.strip_suffix('\r').unwrap_or(line)
-}
-
-fn mask_frontmatter_body(
+fn mask_frontmatter(
     source: &str,
-    body_start: usize,
-    fence_line_start: usize,
-    fence_offset: usize,
+    frontmatter: RecoveredFrontmatter,
 ) -> Result<String, AnalysisError> {
-    let fence_end = fence_line_start
-        .checked_add(fence_offset)
-        .and_then(|offset| offset.checked_add(FRONTMATTER_FENCE.len()))
+    let fence_end = frontmatter
+        .fence_start
+        .checked_add(FRONTMATTER_FENCE.len())
         .ok_or_else(|| AnalysisError::Invariant("Astro fence offset overflowed".to_owned()))?;
+    let line_start = source[..frontmatter.fence_start]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    let normalized_fence_start = line_start.max(frontmatter.body_start);
     // Byte length and newlines stay fixed because later nodes index the original source.
     let mut masked = String::with_capacity(source.len());
-    masked.push_str(&source[..body_start]);
-    for byte in &source.as_bytes()[body_start..fence_line_start] {
+    masked.push_str(&source[..frontmatter.body_start]);
+    for byte in &source.as_bytes()[frontmatter.body_start..normalized_fence_start] {
         masked.push(match byte {
             b'\r' => '\r',
             b'\n' => '\n',
@@ -266,7 +292,10 @@ fn mask_frontmatter_body(
         });
     }
     masked.push_str(FRONTMATTER_FENCE);
-    masked.extend(std::iter::repeat_n(' ', fence_offset));
+    masked.extend(std::iter::repeat_n(
+        ' ',
+        frontmatter.fence_start - normalized_fence_start,
+    ));
     masked.push_str(&source[fence_end..]);
     Ok(masked)
 }

@@ -449,6 +449,63 @@ fn astro_frontmatter_regex_can_match_backticks() {
 }
 
 #[test]
+fn astro_frontmatter_closing_fence_can_be_inline() {
+    let source = "---\nconst pattern = /`/g;---<main>{pattern}</main>\n";
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits markup on the closing fence line");
+
+    assert!(
+        findings.is_empty(),
+        "a comment-free Astro component should remain clean: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_opening_fence_can_be_inline() {
+    let source = "---const pattern = /`/g;---<main>{pattern}</main>\n";
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits TypeScript on the opening fence line");
+
+    assert!(
+        findings.is_empty(),
+        "a comment-free Astro component should remain clean: {findings:#?}"
+    );
+}
+
+#[test]
+fn inline_astro_frontmatter_keeps_typescript_policy_scope() {
+    let source = concat!(
+        "---const pattern = /`/g;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "const value = pattern;---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("inline fences must retain the original TypeScript body");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "inline frontmatter comments must stay in TypeScript policy scope: {findings:#?}"
+    );
+}
+
+#[test]
 fn astro_frontmatter_regex_and_template_can_share_fake_fence() {
     let source = concat!(
         "---\n",
