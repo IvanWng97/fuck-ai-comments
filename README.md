@@ -163,7 +163,8 @@ cargo install --git https://github.com/IvanWng97/fuck-ai-comments --locked
 
 Tagged releases provide native archives for x86-64 Linux, x86-64 Windows,
 x86-64 macOS, and Apple Silicon macOS. Each release includes `sha256.sum`, a
-dist manifest, and GitHub build attestations.
+dist manifest, and GitHub build attestations. Every native archive carries the
+project `LICENSE`, `README.md`, and generated `THIRD_PARTY_LICENSES` notices.
 
 On macOS or Linux, download and verify the native archives:
 
@@ -219,11 +220,14 @@ npm ci --ignore-scripts
 npm test
 npm run lint
 npm run bundle:check
+npm run rust-licenses:check
 npm run release:check
 ```
 
 The release-workflow commands require cargo-dist 0.32.0's `dist` executable on
-`PATH`.
+`PATH`. The Rust license commands require the pinned cargo-about version;
+install it with `npm run rust-licenses:install`, and regenerate the committed
+notice with `npm run rust-licenses:generate` after dependency changes.
 
 The Rust MSRV is 1.88.0. The Action is bundled. `release.yml` is generated from
 the dist configuration, then hardened by `npm run release:generate`;

@@ -40,6 +40,11 @@ jobs:
       - name: Dogfood required comment policy
         if: runner.os == 'Linux'
         run: cargo run --locked -- check --all .
+      - name: Verify distributable package
+        if: runner.os == 'Linux'
+        run: |
+          cargo package --list --locked | grep -Fx THIRD_PARTY_LICENSES
+          cargo package --locked
 
   msrv:
     name: Rust 1.88.0
@@ -86,6 +91,12 @@ jobs:
       - name: Verify committed bundle
         if: runner.os == 'Linux'
         run: npm run bundle:check
+      - name: Install cargo-about
+        if: runner.os == 'Linux'
+        run: npm run rust-licenses:install
+      - name: Verify Rust license notices
+        if: runner.os == 'Linux'
+        run: npm run rust-licenses:check
       - name: Install dist
         if: runner.os == 'Linux'
         shell: bash
