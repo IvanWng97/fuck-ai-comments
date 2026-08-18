@@ -1,13 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+#[cfg(test)]
+use std::cell::Cell;
 
 use similar::{Algorithm, DiffTag, TextDiff, capture_diff_slices};
 
 use crate::languages;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection, SourceFile};
-use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
+use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile};
 
 const STALE_RULE: &str = "comment-policy/comment-owner-changed";
 const REPARENTED_RULE: &str = "comment-policy/comment-reparented";
+
+#[cfg(test)]
+thread_local! {
+    static OWNER_FRONTIER_VISITS: Cell<usize> = const { Cell::new(0) };
+    static OWNER_ANCHOR_CANDIDATE_EVALUATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 pub(crate) fn analyze(
     before: SourceFile<'_>,
@@ -24,8 +33,15 @@ pub(crate) fn analyze(
 
     let anchors = LineAnchors::new(before.text, after.text, &before_document, &after_document);
     let owners = pair_owners(&before_document, &after_document, &anchors)?;
+    let owner_changes = OwnerChangeIndex::new(&before_document, &after_document, &owners);
     let comments = pair_comments(&before_document, &after_document, &owners, &anchors)?;
-    let selection = semantic_selection(&before_document, &after_document, &owners, &comments);
+    let selection = semantic_selection(
+        &before_document,
+        &after_document,
+        &owners,
+        &comments,
+        &owner_changes,
+    );
 
     let mut findings = languages::analyze_file(after.path, after.text, &selection)?;
     findings.extend(change_findings(
@@ -34,6 +50,7 @@ pub(crate) fn analyze(
         &after_document,
         &owners,
         &comments,
+        &owner_changes,
     ));
     findings.sort();
     findings.dedup();
@@ -98,6 +115,55 @@ impl Pairing {
     }
 }
 
+struct OwnerChangeIndex {
+    identity_path_changed: Vec<bool>,
+}
+
+impl OwnerChangeIndex {
+    fn new(before: &ParsedFile, after: &ParsedFile, pairs: &Pairing) -> Self {
+        let children = owners_by_parent(before);
+        let mut identity_path_changed = vec![true; before.owners.len()];
+        let mut frontier = VecDeque::from([0]);
+
+        while let Some(before_index) = frontier.pop_front() {
+            let old_owner = &before.owners[before_index];
+            if let Some(after_index) = pairs.before_to_after[before_index] {
+                let new_owner = &after.owners[after_index];
+                let expected_after_parent = old_owner
+                    .parent
+                    .and_then(|parent| pairs.before_to_after[parent]);
+                let parent_path_changed = old_owner.parent.is_some_and(|parent| {
+                    before.owners[parent].kind == OwnerKind::Type && identity_path_changed[parent]
+                });
+                let type_parent_changed = old_owner.parent.is_some_and(|parent| {
+                    before.owners[parent].kind == OwnerKind::Type
+                        && new_owner.parent != expected_after_parent
+                });
+                identity_path_changed[before_index] = parent_path_changed
+                    || type_parent_changed
+                    || old_owner.kind != new_owner.kind
+                    || old_owner.identity != new_owner.identity;
+            }
+            frontier.extend(children[before_index].iter().copied());
+        }
+
+        Self {
+            identity_path_changed,
+        }
+    }
+
+    fn changed(
+        &self,
+        before: &ParsedFile,
+        after: &ParsedFile,
+        before_index: usize,
+        after_index: usize,
+    ) -> bool {
+        self.identity_path_changed[before_index]
+            || before.owners[before_index].code != after.owners[after_index].code
+    }
+}
+
 fn pair_owners(
     before: &ParsedFile,
     after: &ParsedFile,
@@ -105,57 +171,111 @@ fn pair_owners(
 ) -> Result<Pairing, AnalysisError> {
     let mut pairs = Pairing::new(before.owners.len(), after.owners.len());
     pairs.insert(0, 0)?;
+    let before_children = owners_by_parent(before);
+    let after_children = owners_by_parent(after);
+    let mut frontier = VecDeque::from([(0, 0)]);
 
-    loop {
-        let mut progress = pair_unique_named_owners(before, after, &mut pairs)?;
-        progress |= pair_anchored_owners(before, after, anchors, &mut pairs)?;
-        if !progress {
-            break;
+    while let Some((before_parent, after_parent)) = frontier.pop_front() {
+        let before_siblings = &before_children[before_parent];
+        let after_siblings = &after_children[after_parent];
+        let stable =
+            unique_stable_owner_pairs(before, after, before_siblings, after_siblings, &pairs);
+        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+
+        let scores = connected_owner_scores(
+            before,
+            after,
+            before_siblings,
+            after_siblings,
+            anchors,
+            &pairs,
+        )?;
+        let anchored = anchored_owner_pairs(&scores, &pairs)?;
+        if anchored.is_empty() {
+            continue;
+        }
+        enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
+
+        let stable =
+            unique_stable_owner_pairs(before, after, before_siblings, after_siblings, &pairs);
+        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+
+        // A second anchor wave would make correspondence depend on the first wave's guesses.
+        if !anchored_owner_pairs(&scores, &pairs)?.is_empty() {
+            return Err(AnalysisError::AmbiguousChange(
+                "owner correspondence requires iterative anchor preference peeling".to_owned(),
+            ));
         }
     }
     Ok(pairs)
 }
 
-fn pair_unique_named_owners(
-    before: &ParsedFile,
-    after: &ParsedFile,
-    pairs: &mut Pairing,
-) -> Result<bool, AnalysisError> {
-    let before_by_key = owners_by_key(before, &pairs.before_to_after, |parent| {
-        pairs.before_to_after[parent]
-    });
-    let after_by_key = owners_by_key(after, &pairs.after_to_before, Some);
-
-    let mut progress = false;
-    for (key, before_indexes) in before_by_key {
-        let Some(after_indexes) = after_by_key.get(&key) else {
-            continue;
-        };
-        if before_indexes.len() == 1 && after_indexes.len() == 1 {
-            pairs.insert(before_indexes[0], after_indexes[0])?;
-            progress = true;
+fn owners_by_parent(document: &ParsedFile) -> Vec<Vec<usize>> {
+    let mut children = vec![Vec::new(); document.owners.len()];
+    for (index, owner) in document.owners.iter().enumerate().skip(1) {
+        if let Some(parent) = owner.parent {
+            children[parent].push(index);
         }
     }
-    Ok(progress)
+    for siblings in &mut children {
+        siblings.sort_unstable_by_key(|index| {
+            let span = &document.owners[*index].span;
+            (span.start_byte, span.end_byte)
+        });
+        debug_assert!(siblings.windows(2).all(|pair| {
+            document.owners[pair[0]].span.end_byte <= document.owners[pair[1]].span.start_byte
+        }));
+    }
+    children
 }
 
-type OwnerKey = (usize, OwnerKind, Vec<String>);
+fn enqueue_owner_pairs(
+    new_pairs: impl IntoIterator<Item = (usize, usize)>,
+    pairs: &mut Pairing,
+    frontier: &mut VecDeque<(usize, usize)>,
+) -> Result<(), AnalysisError> {
+    for (before, after) in new_pairs {
+        pairs.insert(before, after)?;
+        frontier.push_back((before, after));
+    }
+    Ok(())
+}
 
-fn owners_by_key(
-    document: &ParsedFile,
+fn unique_stable_owner_pairs(
+    before: &ParsedFile,
+    after: &ParsedFile,
+    before_children: &[usize],
+    after_children: &[usize],
+    pairs: &Pairing,
+) -> Vec<(usize, usize)> {
+    let before_by_key = stable_owners_by_key(before, before_children, &pairs.before_to_after);
+    let after_by_key = stable_owners_by_key(after, after_children, &pairs.after_to_before);
+
+    before_by_key
+        .into_iter()
+        .filter_map(|(key, before_index)| {
+            before_index.zip(after_by_key.get(&key).copied().flatten())
+        })
+        .collect()
+}
+
+type StableOwnerKey<'identity> = (OwnerKind, &'identity [String]);
+
+fn stable_owners_by_key<'document>(
+    document: &'document ParsedFile,
+    children: &[usize],
     paired: &[Option<usize>],
-    parent_key: impl Fn(usize) -> Option<usize>,
-) -> BTreeMap<OwnerKey, Vec<usize>> {
+) -> BTreeMap<StableOwnerKey<'document>, Option<usize>> {
     let mut groups = BTreeMap::new();
-    for (index, owner) in document.owners.iter().enumerate().skip(1) {
-        if paired[index].is_none()
-            && has_stable_identity(owner)
-            && let Some(parent) = owner.parent.and_then(&parent_key)
-        {
+    for &index in children {
+        #[cfg(test)]
+        OWNER_FRONTIER_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let owner = &document.owners[index];
+        if paired[index].is_none() && has_stable_identity(owner) {
             groups
-                .entry((parent, owner.kind, owner.identity.clone()))
-                .or_insert_with(Vec::new)
-                .push(index);
+                .entry((owner.kind, owner.identity.as_slice()))
+                .and_modify(|unique| *unique = None)
+                .or_insert(Some(index));
         }
     }
     groups
@@ -169,54 +289,178 @@ fn has_stable_identity(owner: &OwnerSnapshot) -> bool {
     })
 }
 
-fn pair_anchored_owners(
+fn anchored_owner_pairs(
+    scores: &[(usize, usize, usize)],
+    pairs: &Pairing,
+) -> Result<Vec<(usize, usize)>, AnalysisError> {
+    let remaining = || {
+        scores.iter().copied().filter(|&(before, after, _)| {
+            pairs.before_to_after[before].is_none() && pairs.after_to_before[after].is_none()
+        })
+    };
+    let before_choices = owner_choices(remaining(), "old owner")?;
+    let after_choices = owner_choices(
+        remaining().map(|(before, after, score)| (after, before, score)),
+        "new owner",
+    )?;
+    Ok(before_choices
+        .into_iter()
+        .filter(|(before_index, after_index)| after_choices.get(after_index) == Some(before_index))
+        .collect())
+}
+
+fn connected_owner_scores(
     before: &ParsedFile,
     after: &ParsedFile,
+    before_children: &[usize],
+    after_children: &[usize],
     anchors: &LineAnchors,
-    pairs: &mut Pairing,
-) -> Result<bool, AnalysisError> {
-    let mut scores = Vec::new();
-    for (before_index, owner) in before.owners.iter().enumerate().skip(1) {
-        if pairs.before_to_after[before_index].is_some() {
-            continue;
+    pairs: &Pairing,
+) -> Result<Vec<(usize, usize, usize)>, AnalysisError> {
+    let mut before_sweep = OwnerRankSweep::new(
+        before,
+        before_children
+            .iter()
+            .copied()
+            .filter(|index| pairs.before_to_after[*index].is_none()),
+        |owner| anchors.before_owner_ranks(owner),
+    );
+    let mut after_sweep = OwnerRankSweep::new(
+        after,
+        after_children
+            .iter()
+            .copied()
+            .filter(|index| pairs.after_to_before[*index].is_none()),
+        |owner| anchors.after_owner_ranks(owner),
+    );
+    if before_sweep.is_empty() || after_sweep.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut boundaries: Vec<_> = before_sweep
+        .boundaries()
+        .chain(after_sweep.boundaries())
+        .collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut scores = BTreeMap::new();
+    for segment in boundaries.windows(2) {
+        let rank = segment[0];
+        let anchor_count = segment[1] - rank;
+        let before_by_kind = unique_owner_evidence_by_kind(before, before_sweep.owners_at(rank));
+        let after_by_kind = unique_owner_evidence_by_kind(after, after_sweep.owners_at(rank));
+        for (kind, before_evidence) in before_by_kind {
+            let Some(after_evidence) = after_by_kind.get(&kind).copied() else {
+                continue;
+            };
+            let (OwnerEvidence::Unique(before_index), OwnerEvidence::Unique(after_index)) =
+                (before_evidence, after_evidence)
+            else {
+                return Err(AnalysisError::AmbiguousChange(format!(
+                    "exact line anchor {} connects multiple {kind:?} sibling owners",
+                    anchors.owner[rank].0 + 1
+                )));
+            };
+            *scores.entry((before_index, after_index)).or_insert(0) += anchor_count;
         }
-        let Some(after_parent) = owner
-            .parent
-            .and_then(|parent| pairs.before_to_after[parent])
-        else {
-            continue;
-        };
-        for (after_index, candidate) in after.owners.iter().enumerate().skip(1) {
-            if pairs.after_to_before[after_index].is_none()
-                && candidate.parent == Some(after_parent)
-                && candidate.kind == owner.kind
-                && let Some(score) = anchors.score(&owner.span, &candidate.span)
-            {
-                scores.push((before_index, after_index, score));
-            }
+    }
+    Ok(scores
+        .into_iter()
+        .map(|((before, after), score)| (before, after, score))
+        .collect())
+}
+
+#[derive(Clone, Copy)]
+enum OwnerEvidence {
+    Unique(usize),
+    Ambiguous,
+}
+
+fn unique_owner_evidence_by_kind(
+    document: &ParsedFile,
+    candidates: impl IntoIterator<Item = usize>,
+) -> BTreeMap<OwnerKind, OwnerEvidence> {
+    let mut by_kind = BTreeMap::new();
+    for index in candidates {
+        #[cfg(test)]
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| {
+            evaluations.set(evaluations.get() + 1);
+        });
+        by_kind
+            .entry(document.owners[index].kind)
+            .and_modify(|evidence| *evidence = OwnerEvidence::Ambiguous)
+            .or_insert(OwnerEvidence::Unique(index));
+    }
+    by_kind
+}
+
+struct RankedOwner {
+    index: usize,
+    start_rank: usize,
+    end_rank: usize,
+}
+
+struct OwnerRankSweep {
+    owners: Vec<RankedOwner>,
+    first_active: usize,
+    past_active: usize,
+    previous_rank: Option<usize>,
+}
+
+impl OwnerRankSweep {
+    fn new(
+        document: &ParsedFile,
+        owners: impl IntoIterator<Item = usize>,
+        rank_range: impl Fn(&OwnerSnapshot) -> std::ops::Range<usize>,
+    ) -> Self {
+        let owners = owners
+            .into_iter()
+            .filter_map(|index| {
+                let ranks = rank_range(&document.owners[index]);
+                (ranks.start < ranks.end).then_some(RankedOwner {
+                    index,
+                    start_rank: ranks.start,
+                    end_rank: ranks.end,
+                })
+            })
+            .collect();
+        Self {
+            owners,
+            first_active: 0,
+            past_active: 0,
+            previous_rank: None,
         }
     }
 
-    let before_choices = owner_choices(
-        scores
-            .iter()
-            .map(|&(before, after, score)| (before, after, score)),
-        "old owner",
-    )?;
-    let after_choices = owner_choices(
-        scores
-            .iter()
-            .map(|&(before, after, score)| (after, before, score)),
-        "new owner",
-    )?;
-    let mut progress = false;
-    for (before_index, after_index) in before_choices {
-        if after_choices.get(&after_index) == Some(&before_index) {
-            pairs.insert(before_index, after_index)?;
-            progress = true;
-        }
+    fn is_empty(&self) -> bool {
+        self.owners.is_empty()
     }
-    Ok(progress)
+
+    fn boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+        self.owners
+            .iter()
+            .flat_map(|owner| [owner.start_rank, owner.end_rank])
+    }
+
+    fn owners_at(&mut self, rank: usize) -> impl Iterator<Item = usize> + '_ {
+        debug_assert!(self.previous_rank.is_none_or(|previous| previous <= rank));
+        while self.first_active < self.owners.len()
+            && self.owners[self.first_active].end_rank <= rank
+        {
+            self.first_active += 1;
+        }
+        self.past_active = self.past_active.max(self.first_active);
+        while self.past_active < self.owners.len()
+            && self.owners[self.past_active].start_rank <= rank
+        {
+            self.past_active += 1;
+        }
+        self.previous_rank = Some(rank);
+        self.owners[self.first_active..self.past_active]
+            .iter()
+            .map(|owner| owner.index)
+    }
 }
 
 fn owner_choices(
@@ -512,12 +756,13 @@ fn semantic_selection(
     after: &ParsedFile,
     owners: &Pairing,
     comments: &Pairing,
+    owner_changes: &OwnerChangeIndex,
 ) -> Selection {
     let mut affected = BTreeSet::new();
 
     for (before_index, after_index) in owners.before_to_after.iter().enumerate() {
         if let Some(after_index) = after_index
-            && owner_changed(&before.owners[before_index], &after.owners[*after_index])
+            && owner_changes.changed(before, after, before_index, *after_index)
         {
             affected.insert(*after_index);
         }
@@ -575,7 +820,7 @@ fn semantic_selection(
             let mut parent = owner.parent;
             while let Some(parent_index) = parent {
                 let parent_owner = &after.owners[parent_index];
-                if parent_owner.kind == OwnerKind::Function {
+                if is_scoped_budget_owner(parent_owner.kind) {
                     selection.select_owner(
                         parent_owner.kind,
                         parent_owner.span.start_byte,
@@ -590,12 +835,17 @@ fn semantic_selection(
     selection
 }
 
+fn is_scoped_budget_owner(kind: OwnerKind) -> bool {
+    matches!(kind, OwnerKind::Function | OwnerKind::Type)
+}
+
 fn change_findings(
     after_file: SourceFile<'_>,
     before: &ParsedFile,
     after: &ParsedFile,
     owners: &Pairing,
     comments: &Pairing,
+    owner_changes: &OwnerChangeIndex,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (before_comment_index, after_comment_index) in comments.before_to_after.iter().enumerate() {
@@ -622,9 +872,10 @@ fn change_findings(
         let Some(after_owner_index) = paired_owner else {
             continue;
         };
-        let old_owner = &before.owners[old_comment.owner];
         let new_owner = &after.owners[after_owner_index];
-        if owner_changed(old_owner, new_owner) || old_comment.kind != new_comment.kind {
+        if owner_changes.changed(before, after, old_comment.owner, after_owner_index)
+            || old_comment.kind != new_comment.kind
+        {
             findings.push(Finding {
                 path: after_file.path.display().to_string(),
                 line: new_comment.span.start_line,
@@ -637,10 +888,6 @@ fn change_findings(
         }
     }
     findings
-}
-
-fn owner_changed(before: &OwnerSnapshot, after: &OwnerSnapshot) -> bool {
-    before.identity != after.identity || before.code != after.code
 }
 
 fn owner_label(owner: &OwnerSnapshot) -> String {
@@ -656,7 +903,7 @@ fn owner_label(owner: &OwnerSnapshot) -> String {
 
 struct LineAnchors {
     exact: BTreeMap<usize, usize>,
-    owner: BTreeMap<usize, usize>,
+    owner: Vec<(usize, usize)>,
 }
 
 impl LineAnchors {
@@ -675,7 +922,7 @@ impl LineAnchors {
         let (old_comment_lines, new_comment_lines) = (comment_lines(old), comment_lines(new));
         let source_lines: Vec<_> = before.lines().collect();
         let mut exact = BTreeMap::new();
-        let mut owner = BTreeMap::new();
+        let mut owner = Vec::new();
         for operation in diff
             .ops()
             .iter()
@@ -689,11 +936,36 @@ impl LineAnchors {
                         .get(old_line)
                         .is_some_and(|line| line.chars().any(char::is_alphanumeric))
                 {
-                    owner.insert(old_line, new_line);
+                    owner.push((old_line, new_line));
                 }
             }
         }
+        debug_assert!(
+            owner
+                .windows(2)
+                .all(|pair| { pair[0].0 < pair[1].0 && pair[0].1 < pair[1].1 })
+        );
         Self { exact, owner }
+    }
+
+    fn before_owner_ranks(&self, owner: &OwnerSnapshot) -> std::ops::Range<usize> {
+        let start_line = owner.span.start_line.saturating_sub(1);
+        let end_line = owner.span.end_line;
+        self.owner
+            .partition_point(|&(before_line, _)| before_line < start_line)
+            ..self
+                .owner
+                .partition_point(|&(before_line, _)| before_line < end_line)
+    }
+
+    fn after_owner_ranks(&self, owner: &OwnerSnapshot) -> std::ops::Range<usize> {
+        let start_line = owner.span.start_line.saturating_sub(1);
+        let end_line = owner.span.end_line;
+        self.owner
+            .partition_point(|&(_, after_line)| after_line < start_line)
+            ..self
+                .owner
+                .partition_point(|&(_, after_line)| after_line < end_line)
     }
 
     fn after_line(&self, one_based_old_line: usize) -> Option<usize> {
@@ -701,12 +973,218 @@ impl LineAnchors {
             .get(&one_based_old_line.saturating_sub(1))
             .map(|line| line + 1)
     }
+}
 
-    fn score(&self, old: &Span, new: &Span) -> Option<usize> {
-        let anchors = (old.start_line.saturating_sub(1)..old.end_line)
-            .filter_map(|line| self.owner.get(&line))
-            .filter(|line| new.start_line.saturating_sub(1) <= **line && **line < new.end_line)
-            .count();
-        (anchors > 0).then_some(anchors)
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+    use std::path::Path;
+
+    use super::*;
+
+    fn nested_kotlin(depth: usize, value: usize) -> String {
+        let mut source = String::new();
+        for level in 0..depth {
+            writeln!(source, "class Level{level} {{").expect("writing to a String cannot fail");
+        }
+        writeln!(source, "fun run(): Int {{").expect("writing to a String cannot fail");
+        writeln!(source, "// Coupled to the deepest implementation.")
+            .expect("writing to a String cannot fail");
+        writeln!(source, "return {value}").expect("writing to a String cannot fail");
+        source.push_str("}\n");
+        for _ in 0..depth {
+            source.push_str("}\n");
+        }
+        source
+    }
+
+    fn owner_frontier_visits(depth: usize) -> usize {
+        let before = nested_kotlin(depth, 1);
+        let after = nested_kotlin(depth, 2);
+        OWNER_FRONTIER_VISITS.with(|visits| visits.set(0));
+
+        analyze(
+            SourceFile {
+                path: Path::new("Deep.kt"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("Deep.kt"),
+                text: &after,
+            },
+        )
+        .expect("valid deeply nested Kotlin change");
+
+        OWNER_FRONTIER_VISITS.with(Cell::get)
+    }
+
+    fn same_line_anonymous_callbacks(count: usize, version: usize) -> String {
+        let mut source = format!("const VERSION = {version};\n");
+        for index in 0..count {
+            write!(source, "(() => {{ stable{index}(); }})();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push('\n');
+        source
+    }
+
+    fn owner_anchor_candidate_evaluations(count: usize) -> usize {
+        let before = same_line_anonymous_callbacks(count, 1);
+        let after = same_line_anonymous_callbacks(count, 2);
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| evaluations.set(0));
+
+        let error = analyze(
+            SourceFile {
+                path: Path::new("callbacks.js"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("callbacks.js"),
+                text: &after,
+            },
+        )
+        .expect_err("same-line anonymous siblings are ambiguous");
+        assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
+    }
+
+    fn deeply_nested_anonymous_callbacks(depth: usize, version: usize) -> String {
+        let mut source = format!("const VERSION = {version};\n");
+        for level in 0..depth {
+            writeln!(source, "(() => {{ stable_{level:08}();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("0\n");
+        for _ in 0..depth {
+            source.push_str("})();\n");
+        }
+        source
+    }
+
+    fn nested_anonymous_owner_anchor_evaluations(depth: usize) -> usize {
+        let before = deeply_nested_anonymous_callbacks(depth, 1);
+        let after = deeply_nested_anonymous_callbacks(depth, 2);
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| evaluations.set(0));
+
+        analyze(
+            SourceFile {
+                path: Path::new("nested.js"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("nested.js"),
+                text: &after,
+            },
+        )
+        .expect("nested anonymous owners pair by exact anchors");
+
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
+    }
+
+    fn regrouped_anonymous_callbacks(count: usize) -> (String, String) {
+        fn emit_callbacks(
+            source: &mut String,
+            statements: &mut impl Iterator<Item = usize>,
+            count: usize,
+        ) {
+            source.push_str("(() => {\n");
+            for statement in statements.take(count) {
+                writeln!(source, "  statement_{statement:08}();")
+                    .expect("writing to a String cannot fail");
+            }
+            source.push_str("})();\n");
+        }
+
+        let statement_count = 2 * count * count - count;
+        let mut before = String::new();
+        let mut before_statements = 0..statement_count;
+        for index in 0..count - 1 {
+            emit_callbacks(
+                &mut before,
+                &mut before_statements,
+                (2 * index + 1) + (2 * index + 2),
+            );
+        }
+        emit_callbacks(&mut before, &mut before_statements, 2 * (count - 1) + 1);
+
+        let mut after = String::new();
+        let mut after_statements = 0..statement_count;
+        emit_callbacks(&mut after, &mut after_statements, 1);
+        for index in 1..count {
+            emit_callbacks(
+                &mut after,
+                &mut after_statements,
+                2 * index + (2 * index + 1),
+            );
+        }
+        assert_eq!(before_statements.next(), None);
+        assert_eq!(after_statements.next(), None);
+        (before, after)
+    }
+
+    fn regrouped_owner_pairing_work(count: usize) -> (usize, usize) {
+        let (before, after) = regrouped_anonymous_callbacks(count);
+        OWNER_FRONTIER_VISITS.with(|visits| visits.set(0));
+        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| evaluations.set(0));
+
+        let error = analyze(
+            SourceFile {
+                path: Path::new("callbacks.js"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("callbacks.js"),
+                text: &after,
+            },
+        )
+        .expect_err("iterative preference peeling is not proof of owner correspondence");
+        assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+
+        (
+            OWNER_FRONTIER_VISITS.with(Cell::get),
+            OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get),
+        )
+    }
+
+    #[test]
+    fn deep_stable_owner_pairing_visits_each_owner_once_per_snapshot() {
+        for depth in [25, 50, 100, 200] {
+            let visits = owner_frontier_visits(depth);
+
+            assert_eq!(
+                visits,
+                2 * (depth + 1),
+                "each non-file owner must enter exactly one frontier per snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn same_line_anonymous_owner_anchor_candidates_are_evaluated_linearly() {
+        for count in [64, 128, 256] {
+            assert_eq!(owner_anchor_candidate_evaluations(count), 2 * count);
+        }
+    }
+
+    #[test]
+    fn deep_anonymous_owner_anchor_candidates_are_evaluated_linearly() {
+        let evaluations = [10, 20, 40, 80].map(nested_anonymous_owner_anchor_evaluations);
+
+        assert_eq!(evaluations, [20, 40, 80, 160]);
+    }
+
+    #[test]
+    fn regrouped_anonymous_owner_graph_is_built_once() {
+        for count in [10, 20, 40] {
+            let (frontier_visits, anchor_evaluations) = regrouped_owner_pairing_work(count);
+            let statement_count = 2 * count * count - count;
+
+            assert_eq!(frontier_visits, 4 * count);
+            assert!(
+                anchor_evaluations <= 2 * statement_count,
+                "each exact statement line can inspect at most one owner per snapshot"
+            );
+        }
     }
 }

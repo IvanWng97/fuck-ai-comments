@@ -3,8 +3,11 @@ mod container;
 mod css;
 mod html;
 mod javascript;
+mod kotlin;
+mod objective_c;
 mod python;
 mod rust;
+mod swift;
 mod toml;
 mod tree;
 mod typescript;
@@ -22,6 +25,9 @@ enum Adapter {
     JavaScript,
     TypeScript,
     Tsx,
+    Kotlin,
+    ObjectiveC,
+    Swift,
     Toml,
     Html,
     Css,
@@ -36,6 +42,9 @@ impl Adapter {
             Some("js" | "cjs" | "mjs" | "jsx") => Some(Self::JavaScript),
             Some("ts" | "cts" | "mts") => Some(Self::TypeScript),
             Some("tsx") => Some(Self::Tsx),
+            Some("kt" | "kts") => Some(Self::Kotlin),
+            Some("m") => Some(Self::ObjectiveC),
+            Some("swift") => Some(Self::Swift),
             Some("toml") => Some(Self::Toml),
             Some("html" | "htm") => Some(Self::Html),
             Some("css") => Some(Self::Css),
@@ -62,6 +71,9 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
         Some(Adapter::JavaScript) => javascript::parse_file(path, source),
         Some(Adapter::TypeScript) => typescript::parse_file(path, source),
         Some(Adapter::Tsx) => typescript::parse_tsx_file(path, source),
+        Some(Adapter::Kotlin) => kotlin::parse_file(path, source),
+        Some(Adapter::ObjectiveC) => objective_c::parse_file(path, source),
+        Some(Adapter::Swift) => swift::parse_file(path, source),
         Some(Adapter::Toml) => toml::parse_file(path, source),
         Some(Adapter::Html) => html::parse_file(path, source),
         Some(Adapter::Css) => css::parse_file(path, source),
@@ -81,6 +93,9 @@ pub(crate) fn analyze_file(
         Some(Adapter::JavaScript) => javascript::analyze_file(path, source, selection),
         Some(Adapter::TypeScript) => typescript::analyze_file(path, source, selection),
         Some(Adapter::Tsx) => typescript::analyze_tsx_file(path, source, selection),
+        Some(Adapter::Kotlin) => kotlin::analyze_file(path, source, selection),
+        Some(Adapter::ObjectiveC) => objective_c::analyze_file(path, source, selection),
+        Some(Adapter::Swift) => swift::analyze_file(path, source, selection),
         Some(Adapter::Toml) => toml::analyze_file(path, source, selection),
         Some(Adapter::Html) => html::analyze_file(path, source, selection),
         Some(Adapter::Css) => css::analyze_file(path, source, selection),

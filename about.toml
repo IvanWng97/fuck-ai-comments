@@ -1,0 +1,61 @@
+accepted = ["MIT", "Apache-2.0", "Unicode-3.0"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+
+# These checksums prevent cargo-about from silently replacing real copyright
+# notices with synthesized SPDX boilerplate when a crate omits or obscures them.
+[tree-sitter-astro-next.clarify]
+license = "Apache-2.0"
+
+[[tree-sitter-astro-next.clarify.files]]
+path = "LICENSE"
+checksum = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+
+[tree-sitter-html.clarify]
+license = "MIT"
+
+[[tree-sitter-html.clarify.git]]
+path = "LICENSE"
+checksum = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+
+[tree-sitter-kotlin-ng.clarify]
+license = "MIT"
+
+[[tree-sitter-kotlin-ng.clarify.git]]
+path = "LICENSE"
+checksum = "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727"
+
+[tree-sitter-objc.clarify]
+license = "MIT"
+
+[[tree-sitter-objc.clarify.git]]
+path = "LICENSE"
+checksum = "099c44248f8cf353123211318680e93465587c005a4b3730ce8cb5334de043d6"
+
+[tree-sitter-typescript.clarify]
+license = "MIT"
+
+[[tree-sitter-typescript.clarify.git]]
+path = "LICENSE"
+checksum = "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559"
+
+[windows-link.clarify]
+license = "MIT"
+
+[[windows-link.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-sys.clarify]
+license = "MIT"
+
+[[windows-sys.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"

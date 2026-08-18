@@ -73,3 +73,45 @@ test("ordinary CI exposes one stable aggregate gate", async () => {
     /RUST_RESULT.*MSRV_RESULT.*ACTION_RESULT/su,
   );
 });
+
+test("ordinary CI verifies Rust license notices and package contents", async () => {
+  const workflow = parseYaml(
+    await readFile(".github/workflows/ci.yml", "utf8"),
+  );
+  const manifest = JSON.parse(await readFile("package.json", "utf8"));
+  const actionSteps = workflow.jobs.action.steps;
+  const rustSteps = workflow.jobs.rust.steps;
+
+  assert.equal(
+    manifest.scripts["rust-licenses:install"],
+    "cargo install cargo-about --version 0.9.1 --features cli --locked",
+  );
+  assert.equal(
+    manifest.scripts["rust-licenses:check"],
+    "node action/scripts/rust-licenses.js --check",
+  );
+  assert.deepEqual(
+    actionSteps.find((step) => step.name === "Install cargo-about"),
+    {
+      name: "Install cargo-about",
+      if: "runner.os == 'Linux'",
+      run: "npm run rust-licenses:install",
+    },
+  );
+  assert.deepEqual(
+    actionSteps.find((step) => step.name === "Verify Rust license notices"),
+    {
+      name: "Verify Rust license notices",
+      if: "runner.os == 'Linux'",
+      run: "npm run rust-licenses:check",
+    },
+  );
+  assert.deepEqual(
+    rustSteps.find((step) => step.name === "Verify distributable package"),
+    {
+      name: "Verify distributable package",
+      if: "runner.os == 'Linux'",
+      run: "cargo package --list --locked | grep -Fx THIRD_PARTY_LICENSES\ncargo package --locked\n",
+    },
+  );
+});

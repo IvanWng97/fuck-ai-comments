@@ -5,12 +5,13 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
-# release.yml applies a tested least-privilege transform that cargo-dist cannot express.
+# release.yml applies tested hardening transforms that cargo-dist cannot express.
 allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
 installers = []
+include = ["THIRD_PARTY_LICENSES"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 source-tarball = false
