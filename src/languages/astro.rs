@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::Path;
 
 use tree_sitter::{Node, Tree};
@@ -7,11 +8,14 @@ use super::container::{
     astro_style_region, parse_file as parse,
 };
 use super::tree;
+use super::walk::{WalkEvent, events};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Astro;
+
+const FRONTMATTER_FENCE: &str = "---";
 
 pub(crate) fn analyze_file(
     path: &Path,
@@ -87,6 +91,8 @@ fn mask_frontmatter(
         "TypeScript",
         tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
     )?;
+    let literal_intervals = outermost_typescript_literal_intervals(typescript.root_node());
+    let mut literal_index = 0;
     let mut line_start = body_start;
     for line in body_and_markup.split_inclusive('\n') {
         if let Some(fence_offset) = frontmatter_fence_offset(line) {
@@ -94,7 +100,21 @@ fn mask_frontmatter(
                 .checked_sub(body_start)
                 .and_then(|offset| offset.checked_add(fence_offset))
                 .ok_or_else(|| astro_parse_error(path))?;
-            if is_typescript_literal(typescript.root_node(), relative_offset) {
+            let relative_end = relative_offset
+                .checked_add(FRONTMATTER_FENCE.len())
+                .ok_or_else(|| astro_parse_error(path))?;
+            while literal_intervals
+                .get(literal_index)
+                .is_some_and(|interval| interval.end <= relative_offset)
+            {
+                literal_index += 1;
+            }
+            if literal_intervals
+                .get(literal_index)
+                .is_some_and(|interval| {
+                    interval.start <= relative_offset && relative_end <= interval.end
+                })
+            {
                 line_start += line.len();
                 continue;
             }
@@ -117,6 +137,31 @@ fn mask_frontmatter(
     Err(astro_parse_error(path))
 }
 
+fn outermost_typescript_literal_intervals(root: Node<'_>) -> Vec<Range<usize>> {
+    let mut intervals = Vec::new();
+    for event in events(root) {
+        let WalkEvent::Enter(node) = event else {
+            continue;
+        };
+        #[cfg(test)]
+        record_literal_tree_visit();
+        if !matches!(
+            node.kind(),
+            "comment" | "regex" | "string" | "template_string"
+        ) {
+            continue;
+        }
+        let interval = node.byte_range();
+        if intervals
+            .last()
+            .is_none_or(|outer: &Range<usize>| outer.end <= interval.start)
+        {
+            intervals.push(interval);
+        }
+    }
+    intervals
+}
+
 fn astro_parse_error(path: &Path) -> AnalysisError {
     AnalysisError::Parse {
         path: path.display().to_string(),
@@ -132,23 +177,28 @@ fn frontmatter_fence_offset(line: &str) -> Option<usize> {
     let content = line_content(line);
     let candidate = content.trim_start_matches([' ', '\t']);
     candidate
-        .starts_with("---")
+        .starts_with(FRONTMATTER_FENCE)
         .then_some(content.len() - candidate.len())
 }
 
-fn is_typescript_literal(root: Node<'_>, offset: usize) -> bool {
-    let end = offset.saturating_add(3);
-    let mut current = root.descendant_for_byte_range(offset, end);
-    while let Some(node) = current {
-        if matches!(
-            node.kind(),
-            "comment" | "regex" | "string" | "template_string"
-        ) {
-            return true;
-        }
-        current = node.parent();
-    }
-    false
+#[cfg(test)]
+thread_local! {
+    static LITERAL_TREE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_literal_tree_visit() {
+    LITERAL_TREE_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_literal_tree_visits() {
+    LITERAL_TREE_VISITS.with(|visits| visits.set(0));
+}
+
+#[cfg(test)]
+fn literal_tree_visits() -> usize {
+    LITERAL_TREE_VISITS.with(std::cell::Cell::get)
 }
 
 fn line_content(line: &str) -> &str {
@@ -164,7 +214,7 @@ fn mask_frontmatter_body(
 ) -> Result<String, AnalysisError> {
     let fence_end = fence_line_start
         .checked_add(fence_offset)
-        .and_then(|offset| offset.checked_add(3))
+        .and_then(|offset| offset.checked_add(FRONTMATTER_FENCE.len()))
         .ok_or_else(|| AnalysisError::Invariant("Astro fence offset overflowed".to_owned()))?;
     // Byte length and newlines stay fixed because later nodes index the original source.
     let mut masked = String::with_capacity(source.len());
@@ -176,8 +226,64 @@ fn mask_frontmatter_body(
             _ => ' ',
         });
     }
-    masked.push_str("---");
+    masked.push_str(FRONTMATTER_FENCE);
     masked.extend(std::iter::repeat_n(' ', fence_offset));
     masked.push_str(&source[fence_end..]);
     Ok(masked)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{literal_tree_visits, reset_literal_tree_visits};
+    use crate::{SourceFile, analyze_all};
+
+    fn nested_template_with_fake_fences(depth: usize, fence_count: usize) -> String {
+        let mut source = String::new();
+        source.push_str("---\nconst trigger = /`/g;\nconst art = ");
+        for _ in 0..depth {
+            source.push_str("`x${");
+        }
+        source.push('`');
+        source.push('\n');
+        for _ in 0..fence_count {
+            source.push_str("---\n");
+        }
+        source.push('`');
+        for _ in 0..depth {
+            source.push_str("}`");
+        }
+        source.push_str(";\n---\n<main>{art}</main>\n");
+        source
+    }
+
+    fn recovery_literal_tree_visits(depth: usize, fence_count: usize) -> usize {
+        let source = nested_template_with_fake_fences(depth, fence_count);
+        reset_literal_tree_visits();
+        analyze_all(SourceFile {
+            path: Path::new("deep.astro"),
+            text: &source,
+        })
+        .expect("valid nested templates should recover");
+        literal_tree_visits()
+    }
+
+    #[test]
+    fn fake_fences_do_not_repeat_a_deep_literal_tree_walk() {
+        let shallow_one = recovery_literal_tree_visits(4, 1);
+        let shallow_many = recovery_literal_tree_visits(4, 64);
+        let deep_one = recovery_literal_tree_visits(64, 1);
+        let deep_many = recovery_literal_tree_visits(64, 64);
+
+        assert!(
+            shallow_one > 0 && deep_one > 0,
+            "the work counter must observe both CST walks"
+        );
+        assert_eq!(
+            [shallow_many, deep_many],
+            [shallow_one, deep_one],
+            "literal CST work must not multiply with fake-fence count at either depth"
+        );
+    }
 }

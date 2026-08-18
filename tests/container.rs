@@ -642,7 +642,7 @@ fn astro_frontmatter_mask_preserves_lf_embedded_script_coordinates() {
     let before = concat!(
         "---\n",
         "const pattern = /`/g;\n",
-        "---\n",
+        "  ---\n",
         "<script>\n",
         "function work() {\n",
         "  // Coupled to the returned protocol value.\n",
