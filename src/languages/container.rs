@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use tree_sitter::{Language, Node};
+use tree_sitter::{Language, Node, Tree};
 
 use super::walk::{WalkEvent, events};
 use super::{css, javascript, tree, typescript};
@@ -14,6 +14,22 @@ use crate::policy::{
 pub(crate) trait ContainerSpec: Copy {
     fn label(self) -> &'static str;
     fn grammar(self) -> Language;
+
+    fn outer_source<'source>(
+        self,
+        source: &'source str,
+    ) -> Result<Cow<'source, str>, AnalysisError> {
+        Ok(Cow::Borrowed(source))
+    }
+
+    fn validate_outer(
+        self,
+        _path: &Path,
+        _source: &str,
+        _tree: &Tree,
+    ) -> Result<(), AnalysisError> {
+        Ok(())
+    }
 
     fn is_comment(self, node: Node<'_>) -> bool {
         node.kind() == "comment"
@@ -34,8 +50,20 @@ pub(crate) enum EmbeddedLanguage {
 #[derive(Debug)]
 pub(crate) struct EmbeddedRegion {
     pub(crate) span: Span,
+    pub(crate) outer_span: Span,
     pub(crate) language: EmbeddedLanguage,
     pub(crate) owner_name: &'static str,
+}
+
+impl EmbeddedRegion {
+    fn new(span: Span, language: EmbeddedLanguage, owner_name: &'static str) -> Self {
+        Self {
+            outer_span: span.clone(),
+            span,
+            language,
+            owner_name,
+        }
+    }
 }
 
 struct Facts {
@@ -120,7 +148,9 @@ fn parse_facts<S: ContainerSpec>(
     source: &str,
     spec: S,
 ) -> Result<Facts, AnalysisError> {
-    let tree = tree::parse(path, source, spec.label(), spec.grammar())?;
+    let outer_source = spec.outer_source(source)?;
+    let tree = tree::parse(path, &outer_source, spec.label(), spec.grammar())?;
+    spec.validate_outer(path, &outer_source, &tree)?;
     let mut syntax = Vec::new();
     let mut comments = Vec::new();
     let mut regions = Vec::new();
@@ -132,9 +162,9 @@ fn parse_facts<S: ContainerSpec>(
                 let is_comment = spec.is_comment(node);
                 if is_comment {
                     comments.push(Comment {
-                        span: Span::from_comment_node(node, source),
+                        span: Span::from_comment_node(node, &outer_source),
                         kind: CommentKind::Narrative,
-                        text: tree::node_text(node, source).to_owned(),
+                        text: tree::node_text(node, &outer_source).to_owned(),
                     });
                 }
                 if let Some(region) = spec.embedded_region(node, source) {
@@ -143,14 +173,14 @@ fn parse_facts<S: ContainerSpec>(
                 let starts_exclusion = is_comment
                     || regions
                         .last()
-                        .is_some_and(|region| region.span.contains(&node_span));
+                        .is_some_and(|region| region.outer_span.contains(&node_span));
                 if excluded_depth > 0 || starts_exclusion {
                     excluded_depth += 1;
                     continue;
                 }
                 syntax.push(CodeToken::enter(node.kind()));
                 if node.child_count() == 0 {
-                    let text = tree::node_text(node, source);
+                    let text = tree::node_text(node, &outer_source);
                     if !text.trim().is_empty() {
                         syntax.push(CodeToken::atom(node.kind(), text));
                     }
@@ -178,11 +208,8 @@ pub(crate) fn script_region(node: Node<'_>, source: &str) -> Option<EmbeddedRegi
     }
     let start_tag = tree::direct_named_child(node, "start_tag")?;
     let raw = tree::first_descendant_with_kind(node, "raw_text")?;
-    html_script_language(start_tag, source).map(|language| EmbeddedRegion {
-        span: Span::from_node(raw),
-        language,
-        owner_name: "<script>",
-    })
+    html_script_language(start_tag, source)
+        .map(|language| EmbeddedRegion::new(Span::from_node(raw), language, "<script>"))
 }
 
 pub(crate) fn astro_script_region(node: Node<'_>, source: &str) -> Option<EmbeddedRegion> {
@@ -196,11 +223,11 @@ pub(crate) fn astro_script_region(node: Node<'_>, source: &str) -> Option<Embedd
     } else {
         browser_script_language(start_tag, source)
     }?;
-    Some(EmbeddedRegion {
-        span: Span::from_node(raw),
+    Some(EmbeddedRegion::new(
+        Span::from_node(raw),
         language,
-        owner_name: "<script>",
-    })
+        "<script>",
+    ))
 }
 
 pub(crate) fn style_region(node: Node<'_>, source: &str) -> Option<EmbeddedRegion> {
@@ -209,11 +236,8 @@ pub(crate) fn style_region(node: Node<'_>, source: &str) -> Option<EmbeddedRegio
     }
     let start_tag = tree::direct_named_child(node, "start_tag")?;
     let raw = tree::first_descendant_with_kind(node, "raw_text")?;
-    style_is_css(start_tag, source).then(|| EmbeddedRegion {
-        span: Span::from_node(raw),
-        language: EmbeddedLanguage::Css,
-        owner_name: "<style>",
-    })
+    style_is_css(start_tag, source)
+        .then(|| EmbeddedRegion::new(Span::from_node(raw), EmbeddedLanguage::Css, "<style>"))
 }
 
 pub(crate) fn astro_style_region(node: Node<'_>, source: &str) -> Option<EmbeddedRegion> {
@@ -222,11 +246,8 @@ pub(crate) fn astro_style_region(node: Node<'_>, source: &str) -> Option<Embedde
     }
     let start_tag = tree::direct_named_child(node, "start_tag")?;
     let raw = tree::first_descendant_with_kind(node, "raw_text")?;
-    astro_style_is_css(start_tag, source).then(|| EmbeddedRegion {
-        span: Span::from_node(raw),
-        language: EmbeddedLanguage::Css,
-        owner_name: "<style>",
-    })
+    astro_style_is_css(start_tag, source)
+        .then(|| EmbeddedRegion::new(Span::from_node(raw), EmbeddedLanguage::Css, "<style>"))
 }
 
 fn html_script_language(start_tag: Node<'_>, source: &str) -> Option<EmbeddedLanguage> {

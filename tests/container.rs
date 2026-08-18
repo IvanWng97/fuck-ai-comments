@@ -428,6 +428,344 @@ fn astro_frontmatter_comments_do_not_consume_markup_budget() {
 }
 
 #[test]
+fn astro_frontmatter_regex_can_match_backticks() {
+    let source = concat!(
+        "---\n",
+        "const cleaned = value.replace(/`/g, '');\n",
+        "---\n",
+        "<main>{cleaned}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("a valid TypeScript regex must not hide the Astro frontmatter fence");
+
+    assert!(
+        findings.is_empty(),
+        "a comment-free Astro component should remain clean: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_closing_fence_can_be_inline() {
+    let source = "---\nconst pattern = /`/g;---<main>{pattern}</main>\n";
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits markup on the closing fence line");
+
+    assert!(
+        findings.is_empty(),
+        "a comment-free Astro component should remain clean: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_opening_fence_can_be_inline() {
+    let source = "---const pattern = /`/g;---<main>{pattern}</main>\n";
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits TypeScript on the opening fence line");
+
+    assert!(
+        findings.is_empty(),
+        "a comment-free Astro component should remain clean: {findings:#?}"
+    );
+}
+
+#[test]
+fn inline_astro_frontmatter_keeps_typescript_policy_scope() {
+    let source = concat!(
+        "---const pattern = /`/g;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "const value = pattern;---<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("inline fences must retain the original TypeScript body");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "inline frontmatter comments must stay in TypeScript policy scope: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_regex_and_template_can_share_fake_fence() {
+    let source = concat!(
+        "---\n",
+        "const cleaned = value.replace(/`/g, '');\n",
+        "const art = `before\n",
+        "---\n",
+        "after`;\n",
+        "---\n",
+        "<main>{cleaned}{art}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("a fence inside a template remains TypeScript during recovery");
+
+    assert!(
+        findings.is_empty(),
+        "a comment-free Astro component should remain clean: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_comment_can_contain_many_fake_fences() {
+    let source = concat!(
+        "---\n",
+        "const cleaned = value.replace(/`/g, '');\n",
+        "/*\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "---\n",
+        "*/\n",
+        "---\n",
+        "<main>{cleaned}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("fake fences inside one comment do not impose a parse-work cutoff");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "the whole block comment must remain in TypeScript policy scope: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_closing_fence_can_be_indented() {
+    let source = concat!(
+        "---\n",
+        "const pattern = /`/g;\n",
+        "// first\n",
+        "// second\n",
+        "// third\n",
+        "// fourth\n",
+        "const value = 1;\n",
+        "  ---\n",
+        "<main>{value}</main>\n",
+    );
+
+    let findings = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    })
+    .expect("Astro permits horizontal whitespace before a closing fence");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "indented fences must preserve TypeScript policy scope: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_fence_indentation_does_not_change_template_owner() {
+    for indentation in 0..3 {
+        let before = format!(
+            "---\nconst pattern = /`/g;\n{}---\n<!-- Coupled only to the rendered label. -->\n<main>same</main>\n",
+            " ".repeat(indentation)
+        );
+        let after = format!(
+            "---\nconst pattern = /`/g;\n{}---\n<!-- Coupled only to the rendered label. -->\n<main>same</main>\n",
+            " ".repeat(indentation + 1)
+        );
+
+        let findings = analyze_change(
+            SourceFile {
+                path: Path::new("Page.astro"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("Page.astro"),
+                text: &after,
+            },
+        )
+        .expect("closing-fence whitespace must not alter template facts");
+
+        assert!(
+            findings.is_empty(),
+            "frontmatter indentation {indentation}→{} alone must not stale the template comment: {findings:#?}",
+            indentation + 1
+        );
+    }
+}
+
+#[test]
+fn malformed_astro_frontmatter_still_fails_closed() {
+    let source = concat!(
+        "---\n",
+        "const value = ;\n",
+        "---\n",
+        "<main>{value}</main>\n",
+    );
+
+    let result = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    });
+
+    assert!(
+        result.is_err(),
+        "malformed frontmatter must not be masked clean"
+    );
+}
+
+#[test]
+fn malformed_astro_frontmatter_cannot_resynchronize_at_a_later_fence() {
+    let source = concat!(
+        "---\n",
+        "const value =\n",
+        "---\n",
+        "1;\n",
+        "---\n",
+        "<main>{value}</main>\n",
+    );
+
+    let result = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    });
+
+    assert!(
+        result.is_err(),
+        "the first external fence is authoritative even when its prefix is invalid"
+    );
+}
+
+#[test]
+fn malformed_astro_frontmatter_cannot_fall_back_to_a_resynchronized_outer_tree() {
+    let source = concat!(
+        "---\n",
+        "const pattern = /`/g;\n",
+        "const value =\n",
+        "---\n",
+        "1;\n",
+        "// `\n",
+        "---\n",
+        "<main>{value}</main>\n",
+    );
+
+    let result = analyze_all(SourceFile {
+        path: Path::new("Page.astro"),
+        text: source,
+    });
+
+    assert!(
+        result.is_err(),
+        "invalid recovered TypeScript must not fall back to the desynchronized Astro tree"
+    );
+}
+
+#[test]
+fn astro_frontmatter_mask_preserves_crlf_unicode_coordinates() {
+    let before = concat!(
+        "\u{feff}<!-- leading -->\r\n",
+        "---\r\n",
+        "const pattern = /`/g;\r\n",
+        "function work(): number {\r\n",
+        "  // Coupled to 雪 and the returned value.\r\n",
+        "  return 1;\r\n",
+        "}\r\n",
+        "---   \r\n",
+        "<main>{work()}</main>\r\n",
+    );
+    let after = before.replacen("return 1", "return 2", 1);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: &after,
+        },
+    )
+    .expect("masking must preserve Astro source coordinates");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 5
+        }),
+        "the original CRLF line number must survive masking: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_mask_preserves_lf_embedded_script_coordinates() {
+    let before = concat!(
+        "---\n",
+        "const pattern = /`/g;\n",
+        "  ---\n",
+        "<script>\n",
+        "function work() {\n",
+        "  // Coupled to the returned protocol value.\n",
+        "  return 1;\n",
+        "}\n",
+        "</script>\n",
+    );
+    let after = before.replacen("return 1", "return 2", 1);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: &after,
+        },
+    )
+    .expect("masking must preserve post-frontmatter source coordinates");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(
+        stale_lines,
+        vec![6],
+        "the embedded comment must retain its original LF line"
+    );
+}
+
+#[test]
 fn html_markup_change_stales_its_template_comment() {
     let before = "<!-- Coupled to the rendered label. -->\n<main>before</main>\n";
     let after = "<!-- Coupled to the rendered label. -->\n<main>after</main>\n";
