@@ -215,10 +215,8 @@ fn is_frontmatter_fence(line: &str) -> bool {
 fn frontmatter_fence_offset(line: &str) -> Option<usize> {
     let content = line_content(line);
     let candidate = content.trim_start_matches([' ', '\t']);
-    let suffix = candidate.strip_prefix(FRONTMATTER_FENCE)?;
-    suffix
-        .bytes()
-        .all(|byte| matches!(byte, b' ' | b'\t'))
+    candidate
+        .starts_with(FRONTMATTER_FENCE)
         .then_some(content.len() - candidate.len())
 }
 

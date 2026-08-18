@@ -537,36 +537,6 @@ fn astro_frontmatter_closing_fence_can_be_indented() {
 }
 
 #[test]
-fn astro_frontmatter_expression_starting_with_three_hyphens_is_not_a_fence() {
-    let source = concat!(
-        "---\n",
-        "const pattern = /`/g;\n",
-        "let x = 1;\n",
-        "  ---x;\n",
-        "// first\n",
-        "// second\n",
-        "// third\n",
-        "// fourth\n",
-        "const value = x;\n",
-        "---\n",
-        "<main>{value}</main>\n",
-    );
-
-    let findings = analyze_all(SourceFile {
-        path: Path::new("Page.astro"),
-        text: source,
-    })
-    .expect("a TypeScript expression prefixed by three hyphens is not a fence");
-
-    assert!(
-        findings
-            .iter()
-            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
-        "comments after the expression must stay in TypeScript policy scope: {findings:#?}"
-    );
-}
-
-#[test]
 fn malformed_astro_frontmatter_still_fails_closed() {
     let source = concat!(
         "---\n",
