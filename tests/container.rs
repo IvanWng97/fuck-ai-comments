@@ -594,6 +594,38 @@ fn astro_frontmatter_closing_fence_can_be_indented() {
 }
 
 #[test]
+fn astro_frontmatter_fence_indentation_does_not_change_template_owner() {
+    for indentation in 0..3 {
+        let before = format!(
+            "---\nconst pattern = /`/g;\n{}---\n<!-- Coupled only to the rendered label. -->\n<main>same</main>\n",
+            " ".repeat(indentation)
+        );
+        let after = format!(
+            "---\nconst pattern = /`/g;\n{}---\n<!-- Coupled only to the rendered label. -->\n<main>same</main>\n",
+            " ".repeat(indentation + 1)
+        );
+
+        let findings = analyze_change(
+            SourceFile {
+                path: Path::new("Page.astro"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("Page.astro"),
+                text: &after,
+            },
+        )
+        .expect("closing-fence whitespace must not alter template facts");
+
+        assert!(
+            findings.is_empty(),
+            "frontmatter indentation {indentation}→{} alone must not stale the template comment: {findings:#?}",
+            indentation + 1
+        );
+    }
+}
+
+#[test]
 fn malformed_astro_frontmatter_still_fails_closed() {
     let source = concat!(
         "---\n",
