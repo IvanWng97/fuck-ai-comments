@@ -1,4 +1,4 @@
-name: CodeSpeed
+name: CodSpeed
 
 on:
   pull_request:

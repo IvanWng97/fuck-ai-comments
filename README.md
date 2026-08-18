@@ -244,7 +244,7 @@ Run `cargo bench --locked --bench analysis` for local wall-clock baselines. Ever
 `analyze_all`; the change case compares two 10,000-line snapshots through
 `analyze_change`. The suite covers every adapter family, including separate
 TypeScript and TSX grammars plus Astro fast and recovery paths. Its elapsed time
-is therefore milliseconds per 10K LOC. CodeSpeed runs the same deterministic
+is therefore milliseconds per 10K LOC. CodSpeed runs the same deterministic
 fixtures on pull requests with simulated CPU and heap-allocation measurements.
 Local wall-clock results are machine-specific and are not a shared-runner gate;
 the synthetic fixtures are stress workloads, not claims of representative

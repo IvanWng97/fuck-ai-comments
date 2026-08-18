@@ -134,7 +134,7 @@ test("Codecov uploads one explicit Rust coverage report", async () => {
   assert.ok(cargo.package.exclude.includes("codecov.yml"));
 });
 
-test("CodeSpeed runs the 10K-LOC analysis benchmarks", async () => {
+test("CodSpeed runs the 10K-LOC analysis benchmarks", async () => {
   const workflowContents = await readFile(
     ".github/workflows/codspeed.yml",
     "utf8",
