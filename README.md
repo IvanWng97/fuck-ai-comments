@@ -214,7 +214,7 @@ adapter tests and corpus scan explicitly.
 
 ```console
 cargo fmt --all -- --check
-cargo test --all-targets --all-features --locked
+cargo test --lib --bins --tests --all-features --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 npm ci --ignore-scripts
 npm test
@@ -236,6 +236,26 @@ remains a hard failure. The pinned cargo-dist template cannot use the approved
 checkout major, scope its built-in permissions, or disable secret inheritance
 for custom jobs, so its `allow-dirty = ["ci"]` escape hatch is intentional. The
 tested transform changes only those three constraints.
+
+### Performance and coverage
+
+Run `cargo bench --locked --bench analysis` for local wall-clock baselines. Every
+`static_*_10k_loc` case analyzes exactly 10,000 physical source lines through
+`analyze_all`; the change case compares two 10,000-line snapshots through
+`analyze_change`. The suite covers every adapter family, including separate
+TypeScript and TSX grammars plus Astro fast and recovery paths. Its elapsed time
+is therefore milliseconds per 10K LOC. CodSpeed runs the same deterministic
+fixtures on pull requests with simulated CPU and heap-allocation measurements.
+Local wall-clock results are machine-specific and are not a shared-runner gate;
+the synthetic fixtures are stress workloads, not claims of representative
+application throughput.
+
+Codecov reports informational Rust line coverage from the ordinary test suite.
+Generate the same LCOV report locally with:
+
+```console
+cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+```
 
 ## License
 
