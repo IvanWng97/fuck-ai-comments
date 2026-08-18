@@ -15,6 +15,7 @@ exclude = [
     "action.yml",
     "about.hbs",
     "about.toml",
+    "codecov.yml",
     "dist/**",
     "dist-workspace.toml",
     "eslint.config.js",
@@ -48,7 +49,12 @@ tree-sitter-typescript = "=0.23.2"
 
 [dev-dependencies]
 assert_cmd = "2.0"
+divan = { package = "codspeed-divan-compat", version = "=5.0.1" }
 tempfile = "3.21"
+
+[[bench]]
+name = "analysis"
+harness = false
 
 [lints.rust]
 unreachable_pub = "warn"

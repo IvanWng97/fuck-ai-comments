@@ -34,7 +34,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Test
-        run: cargo test --all-targets --all-features --locked
+        run: cargo test --lib --bins --tests --all-features --locked
       - name: Lint
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Dogfood required comment policy
@@ -59,7 +59,7 @@ jobs:
       - name: Check MSRV
         run: cargo +1.88.0 check --all-targets --all-features --locked
       - name: Test MSRV
-        run: cargo +1.88.0 test --all-targets --all-features --locked
+        run: cargo +1.88.0 test --lib --bins --tests --all-features --locked
 
   action:
     name: GitHub Action (${{ matrix.os }})
