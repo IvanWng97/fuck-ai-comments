@@ -13,7 +13,10 @@ use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{ParsedFile, Span};
 
 #[derive(Clone, Copy)]
-struct Astro;
+enum Astro {
+    Strict,
+    Recovering,
+}
 
 const FRONTMATTER_FENCE: &str = "---";
 
@@ -22,11 +25,20 @@ pub(crate) fn analyze_file(
     source: &str,
     selection: &Selection,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    analyze(path, source, selection, Astro)
+    retry_with_frontmatter_recovery(|spec| analyze(path, source, selection, spec))
 }
 
 pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
-    parse(path, source, Astro)
+    retry_with_frontmatter_recovery(|spec| parse(path, source, spec))
+}
+
+fn retry_with_frontmatter_recovery<T>(
+    mut operation: impl FnMut(Astro) -> Result<T, AnalysisError>,
+) -> Result<T, AnalysisError> {
+    match operation(Astro::Strict) {
+        Err(AnalysisError::Parse { .. }) => operation(Astro::Recovering),
+        result => result,
+    }
 }
 
 impl ContainerSpec for Astro {
@@ -39,6 +51,13 @@ impl ContainerSpec for Astro {
     }
 
     fn parse_outer(self, path: &Path, source: &str) -> Result<Tree, AnalysisError> {
+        if matches!(self, Self::Strict) {
+            let tree = tree::parse(path, source, self.label(), self.grammar())?;
+            if frontmatter_has_ambiguous_fence(source, &tree) {
+                return Err(astro_parse_error(path));
+            }
+            return Ok(tree);
+        }
         let tree = tree::parse_recovering(path, source, self.label(), self.grammar())?;
         // Astro misreads regex backticks, so TypeScript lexical nodes establish the fence.
         match mask_frontmatter(path, source, &tree)? {
@@ -57,6 +76,26 @@ impl ContainerSpec for Astro {
         }
         astro_script_region(node, source).or_else(|| astro_style_region(node, source))
     }
+}
+
+fn frontmatter_has_ambiguous_fence(source: &str, tree: &Tree) -> bool {
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let Some(frontmatter) = root
+        .named_children(&mut cursor)
+        .find(|node| node.kind() == "frontmatter")
+    else {
+        return false;
+    };
+    source
+        .get(frontmatter.byte_range())
+        .is_some_and(|frontmatter| {
+            frontmatter
+                .split_inclusive('\n')
+                .filter(|line| is_frontmatter_fence(line))
+                .nth(2)
+                .is_some()
+        })
 }
 
 fn mask_frontmatter(
@@ -237,7 +276,7 @@ mod tests {
     use std::path::Path;
 
     use super::{literal_tree_visits, reset_literal_tree_visits};
-    use crate::{SourceFile, analyze_all};
+    use crate::{SourceFile, analyze_all, analyze_change};
 
     fn nested_template_with_fake_fences(depth: usize, fence_count: usize) -> String {
         let mut source = String::new();
@@ -267,6 +306,41 @@ mod tests {
         })
         .expect("valid nested templates should recover");
         literal_tree_visits()
+    }
+
+    #[test]
+    fn valid_frontmatter_analysis_skips_the_recovery_cst_walk() {
+        let source = "---\nconst value = 1;\n---\n<main>{value}</main>\n";
+        reset_literal_tree_visits();
+
+        analyze_all(SourceFile {
+            path: Path::new("Page.astro"),
+            text: source,
+        })
+        .expect("valid frontmatter should use the normal Astro parse");
+
+        assert_eq!(literal_tree_visits(), 0);
+    }
+
+    #[test]
+    fn valid_frontmatter_change_skips_the_recovery_cst_walk() {
+        let before = "---\nconst value = 1;\n---\n<main>{value}</main>\n";
+        let after = "---\nconst value = 2;\n---\n<main>{value}</main>\n";
+        reset_literal_tree_visits();
+
+        analyze_change(
+            SourceFile {
+                path: Path::new("Page.astro"),
+                text: before,
+            },
+            SourceFile {
+                path: Path::new("Page.astro"),
+                text: after,
+            },
+        )
+        .expect("valid frontmatter snapshots should use the normal Astro parse");
+
+        assert_eq!(literal_tree_visits(), 0);
     }
 
     #[test]
