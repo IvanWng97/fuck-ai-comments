@@ -302,6 +302,19 @@ test("CodSpeed runs the 10K-LOC analysis benchmarks", async () => {
   );
 });
 
+test("required dogfood exercises the optimized release profile", async () => {
+  const ci = parseYaml(await readFile(".github/workflows/ci.yml", "utf8"));
+  const dogfood = ci.jobs.rust.steps.find(
+    (step) => step.name === "Dogfood required comment policy",
+  );
+
+  assert.deepEqual(dogfood, {
+    name: "Dogfood required comment policy",
+    if: "runner.os == 'Linux'",
+    run: "cargo run --release --locked -- check --all .",
+  });
+});
+
 test("README uses the Action major for the current package version", async () => {
   const cargo = parseToml(await readFile("Cargo.toml", "utf8"));
   const readme = await readFile("README.md", "utf8");

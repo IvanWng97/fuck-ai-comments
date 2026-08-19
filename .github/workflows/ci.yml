@@ -39,7 +39,7 @@ jobs:
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Dogfood required comment policy
         if: runner.os == 'Linux'
-        run: cargo run --locked -- check --all .
+        run: cargo run --release --locked -- check --all .
       - name: Verify distributable package
         if: runner.os == 'Linux'
         run: |

@@ -1042,12 +1042,14 @@ impl<'source> FactCollector<'source> {
                 self.suppressed_owner_nodes.remove(&suppressed);
             }
             let popped = self.active.pop();
-            debug_assert_eq!(popped, Some(owner));
+            self.record_closed_owner("owner", popped, owner);
             if is_budget_owner(owner) {
-                debug_assert_eq!(self.active_budgets.pop(), Some(owner));
+                let popped = self.active_budgets.pop();
+                self.record_closed_owner("budget owner", popped, owner);
             }
             if matches!(owner, TreeOwner::Type(_)) {
-                debug_assert_eq!(self.active_types.pop(), Some(owner));
+                let popped = self.active_types.pop();
+                self.record_closed_owner("type owner", popped, owner);
             }
             self.record_trailing(owner);
             self.active_function_depth -= usize::from(matches!(owner, TreeOwner::Function(_)));
@@ -1061,6 +1063,18 @@ impl<'source> FactCollector<'source> {
             }
         }
         self.close_callable_frontiers(node);
+    }
+
+    fn record_closed_owner(
+        &mut self,
+        stack: &'static str,
+        actual: Option<TreeOwner>,
+        expected: TreeOwner,
+    ) {
+        debug_assert_eq!(actual, Some(expected));
+        if actual != Some(expected) {
+            self.invariant_error = Some(format!("{stack} scopes closed out of order"));
+        }
     }
 
     fn register_callable_frontiers(&mut self, owner_node_id: usize, roots: Vec<usize>) {

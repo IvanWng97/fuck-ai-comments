@@ -61,7 +61,9 @@ unreachable_pub = "warn"
 unsafe_code = "forbid"
 
 [lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
+debug_assert_with_mut_call = "warn"
+disallowed_methods = "allow"
 
 [profile.release]
 lto = true

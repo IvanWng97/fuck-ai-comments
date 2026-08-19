@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_methods)]
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -87,7 +89,6 @@ thread_local! {
     static RUST_CONTEXT_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RUSTDOC_TARGET_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RUST_SAFETY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static RUST_REVERSE_SIBLING_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RUST_NAMESPACE_SEGMENT_STORAGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -105,7 +106,6 @@ fn reset_rust_context_counts() {
     RUST_CONTEXT_ENTRIES.with(|entries| entries.set(0));
     RUSTDOC_TARGET_PROBES.with(|probes| probes.set(0));
     RUST_SAFETY_PROBES.with(|probes| probes.set(0));
-    RUST_REVERSE_SIBLING_PROBES.with(|probes| probes.set(0));
     RUST_NAMESPACE_SEGMENT_STORAGE.with(|segments| segments.set(0));
 }
 
@@ -151,11 +151,6 @@ fn record_rust_safety_probe() {}
 #[cfg(test)]
 fn rust_safety_probes() -> usize {
     RUST_SAFETY_PROBES.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn rust_reverse_sibling_probes() -> usize {
-    RUST_REVERSE_SIBLING_PROBES.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -502,10 +497,10 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     private_module_depth -= usize::from(frame.module_is_private);
                 }
                 if frame.implementation_pushed {
-                    debug_assert_eq!(implementations.pop(), Some(node.id()));
+                    pop_scope(&mut implementations, node.id(), "Rust implementation")?;
                 }
                 if frame.container_pushed {
-                    debug_assert_eq!(containers.pop(), Some(node.id()));
+                    pop_scope(&mut containers, node.id(), "Rust container")?;
                 }
             }
         }
@@ -549,6 +544,21 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
     );
     record_rust_namespace_segment_storage(context.namespaces.len());
     Ok(context)
+}
+
+fn pop_scope(
+    scopes: &mut Vec<usize>,
+    expected: usize,
+    label: &'static str,
+) -> Result<(), AnalysisError> {
+    let actual = scopes.pop();
+    debug_assert_eq!(actual, Some(expected));
+    if actual != Some(expected) {
+        return Err(AnalysisError::Invariant(format!(
+            "{label} scopes closed out of order"
+        )));
+    }
+    Ok(())
 }
 
 fn record_bare_public_visibility(
@@ -737,8 +747,7 @@ mod tests {
 
     use super::{
         reset_rust_context_counts, rust_context_entries, rust_context_work,
-        rust_namespace_segment_storage, rust_reverse_sibling_probes, rust_safety_probes,
-        rustdoc_target_probes,
+        rust_namespace_segment_storage, rust_safety_probes, rustdoc_target_probes,
     };
 
     #[test]
@@ -922,31 +931,6 @@ mod tests {
                     .iter()
                     .any(|finding| finding.rule == "comment-policy/comment-block-budget"),
                 "detached or safe targets must not exempt narrative comments: {findings:#?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rust_function_spans_do_not_probe_reverse_siblings_in_wide_files() {
-        for function_count in [64, 128, 256] {
-            let mut source = String::new();
-            for function in 0..function_count {
-                writeln!(source, "fn operation_{function:03}() {{}}")
-                    .expect("writing to a String cannot fail");
-            }
-            reset_rust_context_counts();
-
-            let findings = analyze_all(SourceFile {
-                path: Path::new("src/lib.rs"),
-                text: &source,
-            })
-            .expect("generated wide Rust file must parse");
-
-            assert!(findings.is_empty(), "comment-free source stays clean");
-            assert_eq!(
-                rust_reverse_sibling_probes(),
-                0,
-                "function prefixes must come from the forward owner location"
             );
         }
     }

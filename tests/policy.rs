@@ -323,6 +323,45 @@ fn rust_public_method_docs_on_a_reachable_type_are_exempt() {
 }
 
 #[test]
+fn rust_public_function_docs_after_a_closed_private_impl_are_exempt() {
+    let source = concat!(
+        "struct Hidden;\n",
+        "impl Hidden {}\n",
+        "/// detail one\n",
+        "/// detail two\n",
+        "/// detail three\n",
+        "/// detail four\n",
+        "pub fn visible() {}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a closed private impl cannot affect a later public item: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_function_docs_after_a_closed_private_type_are_exempt() {
+    let source = concat!(
+        "struct Hidden { value: usize }\n",
+        "/// detail one\n",
+        "/// detail two\n",
+        "/// detail three\n",
+        "/// detail four\n",
+        "pub fn visible() {}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a closed private type cannot affect a later public item: {findings:#?}"
+    );
+}
+
+#[test]
 fn rust_public_field_docs_on_a_private_type_are_narrative() {
     let source = concat!(
         "struct Hidden {\n",

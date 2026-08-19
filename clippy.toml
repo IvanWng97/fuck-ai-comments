@@ -1,0 +1,5 @@
+disallowed-methods = [
+  { path = "tree_sitter::Node::next_named_sibling", reason = "Rust context is built in one forward traversal" },
+  { path = "tree_sitter::Node::parent", reason = "Rust context is built in one forward traversal" },
+  { path = "tree_sitter::Node::prev_named_sibling", reason = "Rust context is built in one forward traversal" },
+]
