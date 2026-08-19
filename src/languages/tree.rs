@@ -1138,6 +1138,14 @@ impl<'source> FactCollector<'source> {
         {
             self.invariant_error = Some("callable frontier scopes did not close".to_owned());
         }
+        if !self.owner_nodes.is_empty()
+            || !self.active.is_empty()
+            || !self.active_budgets.is_empty()
+            || !self.active_types.is_empty()
+        {
+            self.invariant_error
+                .get_or_insert_with(|| "tree owner scopes did not close".to_owned());
+        }
         if let Some(detail) = self.invariant_error {
             return Err(AnalysisError::Invariant(detail));
         }
@@ -1699,6 +1707,49 @@ pub(crate) fn node_text<'source>(node: Node<'_>, source: &'source str) -> &'sour
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_finish_rejects_unclosed_owner_scope(collector: FactCollector<'_>) {
+        assert!(matches!(
+            collector.finish(),
+            Err(AnalysisError::Invariant(_))
+        ));
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_owner_node() {
+        let mut collector = FactCollector::new("");
+        collector.owner_nodes.push(OwnerFrame {
+            node_id: 0,
+            owner: TreeOwner::Leaf(0),
+            suppressed_nodes: Vec::new(),
+        });
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_active_owner() {
+        let mut collector = FactCollector::new("");
+        collector.active.push(TreeOwner::Leaf(0));
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_budget_owner() {
+        let mut collector = FactCollector::new("");
+        collector.active_budgets.push(TreeOwner::Function(0));
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_type_owner() {
+        let mut collector = FactCollector::new("");
+        collector.active_types.push(TreeOwner::Type(0));
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
 
     #[test]
     fn deep_same_start_owners_share_one_long_leading_chain() {
