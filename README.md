@@ -93,6 +93,9 @@ are stable:
   ownership ambiguity, nonexistent scopes, non-regular supported paths, or
   resource-limit errors.
 
+Git is the authority for rename pairing; if supported additions and deletions
+remain unpaired, the CLI cannot prove ancestry and exits with code `2`.
+
 Supported source files are limited to 16 MiB. Git blob batches are limited to
 128 MiB. Exceeding either limit fails closed instead of risking an unbounded CI
 allocation.

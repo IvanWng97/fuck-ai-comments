@@ -1,6 +1,9 @@
 use std::fs;
 use std::fs::File;
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
 use std::path::MAIN_SEPARATOR;
+use std::process::{Command as ProcessCommand, Stdio};
 
 use assert_cmd::Command;
 use tempfile::TempDir;
@@ -9,6 +12,21 @@ fn command(root: &TempDir) -> Command {
     let mut command = assert_cmd::cargo::cargo_bin_cmd!("fuck-ai-comments");
     command.current_dir(root.path());
     command
+}
+
+#[cfg(unix)]
+fn assert_all_rejects_nonregular(root: &TempDir, path: &str) {
+    let output = command(root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains(&format!(
+        "error: supported path {path} is not a regular file"
+    )));
 }
 
 #[test]
@@ -38,6 +56,58 @@ fn all_reports_findings_in_stable_path_order() {
     assert!(a < z, "findings were not path-sorted:\n{stdout}");
     assert!(stdout.contains("comment-policy/leaf-comment-budget"));
     assert!(stdout.contains("2 violations in 2 files"));
+}
+
+#[test]
+fn closed_stdout_preserves_the_violation_exit_code_without_panicking() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    let source = "// first\n// second\n// third\n// fourth\nconst LIMIT: usize = 4;\n";
+    for index in 0..128 {
+        fs::write(root.path().join(format!("source-{index:03}.rs")), source)
+            .expect("source should be written");
+    }
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("fuck-ai-comments"))
+        .current_dir(root.path())
+        .args(["check", "--all", "."])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("command should start");
+    drop(child.stdout.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("command should finish after stdout closes");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert_eq!(output.status.code(), Some(1), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn closed_stdout_preserves_the_clean_exit_code_without_panicking() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    for index in 0..128 {
+        fs::write(
+            root.path().join(format!("source-{index:03}.rs")),
+            format!("const VALUE_{index}: usize = {index};\n"),
+        )
+        .expect("source should be written");
+    }
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("fuck-ai-comments"))
+        .current_dir(root.path())
+        .args(["check", "--all", "."])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("command should start");
+    drop(child.stdout.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("command should finish after stdout closes");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert_eq!(output.status.code(), Some(0), "unexpected stderr: {stderr}");
 }
 
 #[test]
@@ -127,6 +197,24 @@ fn all_fails_closed_on_supported_symlinks() {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
     assert!(stderr.contains("error: supported path linked.js is not a regular file"));
+}
+
+#[cfg(unix)]
+#[test]
+fn all_fails_closed_on_supported_fifo_and_socket_paths() {
+    let fifo_root = TempDir::new().expect("temporary directory should be created");
+    let fifo_path = fifo_root.path().join("events.rs");
+    let status = ProcessCommand::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .expect("mkfifo should run");
+    assert!(status.success(), "mkfifo should create the fixture");
+    assert_all_rejects_nonregular(&fifo_root, "events.rs");
+
+    let socket_root = TempDir::new().expect("temporary directory should be created");
+    let socket_path = socket_root.path().join("events.py");
+    let _listener = UnixListener::bind(&socket_path).expect("Unix socket should be bound");
+    assert_all_rejects_nonregular(&socket_root, "events.py");
 }
 
 #[test]

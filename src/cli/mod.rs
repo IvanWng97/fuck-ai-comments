@@ -3,10 +3,11 @@ mod git;
 pub(crate) mod safe_output;
 mod source;
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -57,13 +58,19 @@ struct CheckArgs {
     path: PathBuf,
 }
 
-pub(crate) fn run(cli: Cli) -> Result<ExitCode> {
+pub(crate) fn run(cli: Cli, output: &mut impl Write) -> Result<ExitCode> {
     match cli.command {
-        Command::Check(arguments) => run_check(arguments),
+        Command::Check(arguments) => run_check(arguments, output),
     }
 }
 
-fn run_check(arguments: CheckArgs) -> Result<ExitCode> {
+pub(crate) fn error_exit(error: &anyhow::Error, output: &mut impl Write) -> ExitCode {
+    let message = format!("{error:#}");
+    let _ = writeln!(output, "error: {}", safe_output::text(&message));
+    ExitCode::from(2)
+}
+
+fn run_check(arguments: CheckArgs, output: &mut impl Write) -> Result<ExitCode> {
     let report = if arguments.all {
         check::scan_all(&arguments.path)?
     } else if arguments.staged {
@@ -80,34 +87,89 @@ fn run_check(arguments: CheckArgs) -> Result<ExitCode> {
         git::scan(&arguments.path, git::Mode::Worktree)?
     };
 
+    render_report(&report, output)
+}
+
+fn render_report(report: &check::Report, output: &mut impl Write) -> Result<ExitCode> {
+    let exit_code = if report.findings.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    };
+    let write_result = write_report(report, output);
+    match write_result {
+        Ok(()) => Ok(exit_code),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(exit_code),
+        Err(error) => Err(error).context("could not write report"),
+    }
+}
+
+fn write_report(report: &check::Report, output: &mut impl Write) -> io::Result<()> {
     if report.findings.is_empty() {
-        println!(
+        writeln!(
+            output,
             "clean: {} {} scanned",
             report.files_scanned,
             noun(report.files_scanned, "file", "files")
-        );
-        return Ok(ExitCode::SUCCESS);
+        )?;
+        return Ok(());
     }
 
     for finding in &report.findings {
-        println!(
+        writeln!(
+            output,
             "{}:{}: {}: {}",
             safe_output::finding_path(&finding.path),
             finding.line,
             finding.rule,
             safe_output::text(&finding.message)
-        );
+        )?;
     }
-    println!(
+    writeln!(
+        output,
         "{} {} in {} {}",
         report.findings.len(),
         noun(report.findings.len(), "violation", "violations"),
         report.files_scanned,
         noun(report.files_scanned, "file", "files")
-    );
-    Ok(ExitCode::from(1))
+    )
 }
 
 fn noun<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::process::ExitCode;
+
+    use super::check::Report;
+    use super::{error_exit, render_report};
+
+    struct ErrorWriter(io::ErrorKind);
+
+    impl Write for ErrorWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(self.0))
+        }
+    }
+
+    #[test]
+    fn non_broken_output_error_returns_two_even_when_stderr_also_fails() {
+        let report = Report {
+            findings: Vec::new(),
+            files_scanned: 0,
+        };
+        let error = render_report(&report, &mut ErrorWriter(io::ErrorKind::PermissionDenied))
+            .expect_err("non-broken output error should fail rendering");
+
+        let exit_code = error_exit(&error, &mut ErrorWriter(io::ErrorKind::BrokenPipe));
+
+        assert_eq!(exit_code, ExitCode::from(2));
+    }
 }
