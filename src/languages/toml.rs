@@ -96,9 +96,13 @@ impl<'source> TomlSemanticSource<'source> {
         let mut current_line = 1;
         let mut line_has_semantic_content = false;
 
-        for token in Source::new(original).lex() {
+        let parser_source = Source::new(original);
+        for token in parser_source.lex() {
             let span = token.span();
-            let token_text = source_slice(path, original, span.start(), span.end())?;
+            let raw = parser_source.get(token).ok_or_else(|| {
+                toml_error(path, "TOML parser returned an invalid UTF-8 source span")
+            })?;
+            let token_text = raw.as_str();
             match token.kind() {
                 TokenKind::Comment => {
                     semantic.comments.push(LexedComment {
@@ -106,13 +110,17 @@ impl<'source> TomlSemanticSource<'source> {
                         start_line: current_line,
                         starts_line: !line_has_semantic_content,
                     });
-                    if !is_valid_comment_token(token_text) {
+                    let mut validation_error = None;
+                    raw.decode_comment(&mut validation_error);
+                    if validation_error.is_some() {
                         line_has_semantic_content = true;
                     }
                 }
                 TokenKind::Whitespace => {}
                 TokenKind::Newline => {
-                    if !matches!(token_text, "\n" | "\r\n") {
+                    let mut validation_error = None;
+                    raw.decode_newline(&mut validation_error);
+                    if validation_error.is_some() {
                         line_has_semantic_content = true;
                     }
                     if line_has_semantic_content {
@@ -238,12 +246,6 @@ impl<'source> TomlSemanticSource<'source> {
     fn retained_token_count(&self) -> usize {
         self.comments.len() + self.code.len()
     }
-}
-
-fn is_valid_comment_token(comment: &str) -> bool {
-    comment
-        .bytes()
-        .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte) || !byte.is_ascii())
 }
 
 pub(crate) fn analyze_file(
