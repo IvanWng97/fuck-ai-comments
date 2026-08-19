@@ -180,6 +180,24 @@ fn attestation_profile_rejects_a_cross_adapter_change() {
 }
 
 #[test]
+fn full_profile_rejects_a_cross_adapter_change() {
+    let error = analyze_change_with_profile(
+        SourceFile {
+            path: Path::new("config.toml"),
+            text: "value = 1\n",
+        },
+        SourceFile {
+            path: Path::new("config.py"),
+            text: "value = 1\n",
+        },
+        AnalysisProfile::Full,
+    )
+    .expect_err("cross-adapter ownership cannot be paired");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
 fn full_profile_preserves_the_existing_snapshot_entry_point() {
     let file = SourceFile {
         path: Path::new("src/lib.rs"),

@@ -38,9 +38,6 @@ pub(crate) fn analyze_with_profile(
     profile: AnalysisProfile,
 ) -> Result<Vec<Finding>, AnalysisError> {
     if !languages::same_adapter(before.path, after.path)? {
-        if profile.runs_static_policy() {
-            return languages::analyze_file(after.path, after.text, &Selection::all());
-        }
         return Err(AnalysisError::AmbiguousChange(format!(
             "cannot attest a change across language adapters: {} -> {}",
             before.path.display(),

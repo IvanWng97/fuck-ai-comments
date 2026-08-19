@@ -107,6 +107,9 @@ are stable:
 
 Git is the authority for rename pairing; if supported additions and deletions
 remain unpaired, the CLI cannot prove ancestry and exits with code `2`.
+Before and after snapshots that select different language adapters likewise
+exit with code `2`; the changed file is never reinterpreted as a new static
+baseline.
 The default `--profile full` preserves all policy checks. The `attestation`
 profile is valid only for Git change modes and emits only
 `comment-owner-changed` and `comment-reparented`; added files are still parsed
