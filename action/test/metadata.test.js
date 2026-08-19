@@ -63,12 +63,14 @@ test("action metadata uses Node 24 and a committed bundle", async () => {
   assert.equal(metadata.runs.steps, undefined);
   assert.equal(metadata.inputs.version.default, cargo.package.version);
   assert.equal(metadata.inputs.mode.default, "base");
+  assert.equal(metadata.inputs.profile.default, "full");
   assert.equal(metadata.inputs.path.default, ".");
   assert.deepEqual(Object.keys(metadata.inputs).toSorted(), [
     "base",
     "head",
     "mode",
     "path",
+    "profile",
     "version",
   ]);
 });

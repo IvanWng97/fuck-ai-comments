@@ -31,38 +31,65 @@ test("constructs each explicit mode as an argv array", () => {
   assert.deepEqual(
     buildCheckArguments({
       mode: "all",
+      profile: "full",
       path: "source tree",
       base: "",
       head: "",
     }),
-    ["check", "--all", "--", "source tree"],
+    ["check", "--all", "--profile", "full", "--", "source tree"],
   );
   assert.deepEqual(
     buildCheckArguments({
       mode: "staged",
+      profile: "attestation",
       path: ".",
       base: "",
       head: "",
     }),
-    ["check", "--staged", "--", "."],
+    ["check", "--staged", "--profile", "attestation", "--", "."],
   );
   assert.deepEqual(
     buildCheckArguments({
       mode: "worktree",
+      profile: "full",
       path: ".",
       base: "",
       head: "",
     }),
-    ["check", "--", "."],
+    ["check", "--profile", "full", "--", "."],
   );
   assert.deepEqual(
     buildCheckArguments({
       mode: "base",
+      profile: "attestation",
       path: ".",
       base: "base sha",
       head: "head sha",
     }),
-    ["check", "--base", "base sha", "--head", "head sha", "--", "."],
+    [
+      "check",
+      "--base",
+      "base sha",
+      "--head",
+      "head sha",
+      "--profile",
+      "attestation",
+      "--",
+      ".",
+    ],
+  );
+});
+
+test("passes profile validation to the Rust CLI", () => {
+  assert.deepEqual(
+    buildCheckArguments({
+      mode: "worktree",
+      profile: "future-profile",
+      path: ".",
+      base: "",
+      head: "",
+    }),
+    ["check", "--profile", "future-profile", "--", "."],
   );
 });
 
@@ -71,6 +98,7 @@ test("rejects ambiguous mode inputs", () => {
     () =>
       buildCheckArguments({
         mode: "base",
+        profile: "full",
         path: ".",
         base: "",
         head: "",
@@ -81,6 +109,7 @@ test("rejects ambiguous mode inputs", () => {
     () =>
       buildCheckArguments({
         mode: "all",
+        profile: "full",
         path: ".",
         base: "main",
         head: "",

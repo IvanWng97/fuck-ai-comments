@@ -17,6 +17,7 @@ async function run() {
 
   const arguments_ = buildCheckArguments({
     mode: core.getInput("mode", { required: true }),
+    profile: core.getInput("profile", { required: true }),
     path: core.getInput("path", { required: true }),
     base: core.getInput("base"),
     head: core.getInput("head"),

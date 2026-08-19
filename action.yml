@@ -11,6 +11,10 @@ inputs:
     description: Check mode; base is the fail-closed default
     required: false
     default: base
+  profile:
+    description: Analysis profile; full enforces budgets and attestations
+    required: false
+    default: full
   path:
     description: Repository path to check
     required: false
