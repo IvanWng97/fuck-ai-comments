@@ -8,7 +8,17 @@ export function executableCommand(executable) {
   return `"${executable}"`;
 }
 
-export function buildCheckArguments({ mode, path, base, head }) {
+export function buildCheckArgumentsFromInputs(getInput) {
+  return buildCheckArguments({
+    mode: getInput("mode", { required: true }),
+    profile: getInput("profile", { required: true }),
+    path: getInput("path", { required: true }),
+    base: getInput("base"),
+    head: getInput("head"),
+  });
+}
+
+export function buildCheckArguments({ mode, profile, path, base, head }) {
   if (!MODES.has(mode)) {
     throw new Error(`unsupported check mode: ${mode}`);
   }
@@ -31,6 +41,7 @@ export function buildCheckArguments({ mode, path, base, head }) {
     }
   }
 
+  result.push("--profile", profile);
   result.push("--", path);
   return result;
 }

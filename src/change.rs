@@ -9,7 +9,7 @@ use crate::identity::{
     CanonicalIdentity, CanonicalIdentityId, CanonicalIdentityInterner, CanonicalIdentityMap,
 };
 use crate::languages;
-use crate::model::{AnalysisError, Finding, OwnerKind, Selection, SourceFile};
+use crate::model::{AnalysisError, AnalysisProfile, Finding, OwnerKind, Selection, SourceFile};
 use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
 
 const STALE_RULE: &str = "comment-policy/comment-owner-changed";
@@ -28,14 +28,27 @@ pub(crate) fn analyze(
     before: SourceFile<'_>,
     after: SourceFile<'_>,
 ) -> Result<Vec<Finding>, AnalysisError> {
+    analyze_with_profile(before, after, AnalysisProfile::Full)
+}
+
+pub(crate) fn analyze_with_profile(
+    before: SourceFile<'_>,
+    after: SourceFile<'_>,
+    profile: AnalysisProfile,
+) -> Result<Vec<Finding>, AnalysisError> {
     if !languages::same_adapter(before.path, after.path)? {
-        return languages::analyze_file(after.path, after.text, &Selection::all());
+        if profile.runs_static_policy() {
+            return languages::analyze_file(after.path, after.text, &Selection::all());
+        }
+        return Err(AnalysisError::AmbiguousChange(format!(
+            "cannot attest a change across language adapters: {} -> {}",
+            before.path.display(),
+            after.path.display()
+        )));
     }
 
-    let before_document = languages::parse_file(before.path, before.text)?;
-    let after_document = languages::parse_file(after.path, after.text)?;
-    validate_document(&before_document, before.path.to_string_lossy().as_ref())?;
-    validate_document(&after_document, after.path.to_string_lossy().as_ref())?;
+    let before_document = languages::parse_validated_file(before.path, before.text)?;
+    let after_document = languages::parse_validated_file(after.path, after.text)?;
     let identities = CanonicalOwnerIdentities::new(&before_document, &after_document)?;
 
     let anchors = LineAnchors::new(before.text, after.text, &before_document, &after_document);
@@ -43,15 +56,18 @@ pub(crate) fn analyze(
     let owner_changes =
         OwnerChangeIndex::new(&before_document, &after_document, &owners, &identities);
     let comments = pair_comments(&before_document, &after_document, &owners, &anchors)?;
-    let selection = semantic_selection(
-        &before_document,
-        &after_document,
-        &owners,
-        &comments,
-        &owner_changes,
-    );
-
-    let mut findings = languages::analyze_file(after.path, after.text, &selection)?;
+    let mut findings = if profile.runs_static_policy() {
+        let selection = semantic_selection(
+            &before_document,
+            &after_document,
+            &owners,
+            &comments,
+            &owner_changes,
+        );
+        languages::analyze_file(after.path, after.text, &selection)?
+    } else {
+        Vec::new()
+    };
     findings.extend(change_findings(
         after,
         &before_document,
@@ -63,38 +79,6 @@ pub(crate) fn analyze(
     findings.sort();
     findings.dedup();
     Ok(findings)
-}
-
-fn validate_document(document: &ParsedFile, path: &str) -> Result<(), AnalysisError> {
-    let Some(file) = document.owners.first() else {
-        return Err(AnalysisError::Invariant(format!(
-            "{path} has no implicit file owner"
-        )));
-    };
-    if file.kind != OwnerKind::File || file.parent.is_some() {
-        return Err(AnalysisError::Invariant(format!(
-            "{path} has an invalid implicit file owner"
-        )));
-    }
-    if document.owners.iter().skip(1).any(|owner| {
-        owner
-            .parent
-            .is_none_or(|parent| parent >= document.owners.len())
-    }) {
-        return Err(AnalysisError::Invariant(format!(
-            "{path} contains an owner with no valid parent"
-        )));
-    }
-    if document
-        .comments
-        .iter()
-        .any(|comment| comment.owner >= document.owners.len())
-    {
-        return Err(AnalysisError::Invariant(format!(
-            "{path} contains a comment with no valid owner"
-        )));
-    }
-    Ok(())
 }
 
 #[derive(Debug)]

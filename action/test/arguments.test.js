@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { argStringToArray } from "../../node_modules/@actions/exec/lib/toolrunner.js";
 
-import { buildCheckArguments, executableCommand } from "../src/arguments.js";
+import {
+  buildCheckArguments,
+  buildCheckArgumentsFromInputs,
+  executableCommand,
+} from "../src/arguments.js";
 
 test("quotes a full executable path for the actions exec parser", () => {
   const executable = String.raw`C:\runner tools\fuck-ai-comments.exe`;
@@ -31,38 +35,90 @@ test("constructs each explicit mode as an argv array", () => {
   assert.deepEqual(
     buildCheckArguments({
       mode: "all",
+      profile: "full",
       path: "source tree",
       base: "",
       head: "",
     }),
-    ["check", "--all", "--", "source tree"],
+    ["check", "--all", "--profile", "full", "--", "source tree"],
   );
   assert.deepEqual(
     buildCheckArguments({
       mode: "staged",
+      profile: "attestation",
       path: ".",
       base: "",
       head: "",
     }),
-    ["check", "--staged", "--", "."],
+    ["check", "--staged", "--profile", "attestation", "--", "."],
   );
   assert.deepEqual(
     buildCheckArguments({
       mode: "worktree",
+      profile: "full",
       path: ".",
       base: "",
       head: "",
     }),
-    ["check", "--", "."],
+    ["check", "--profile", "full", "--", "."],
   );
   assert.deepEqual(
     buildCheckArguments({
       mode: "base",
+      profile: "attestation",
       path: ".",
       base: "base sha",
       head: "head sha",
     }),
-    ["check", "--base", "base sha", "--head", "head sha", "--", "."],
+    [
+      "check",
+      "--base",
+      "base sha",
+      "--head",
+      "head sha",
+      "--profile",
+      "attestation",
+      "--",
+      ".",
+    ],
+  );
+});
+
+test("passes profile validation to the Rust CLI", () => {
+  assert.deepEqual(
+    buildCheckArguments({
+      mode: "all",
+      profile: "attestation",
+      path: ".",
+      base: "",
+      head: "",
+    }),
+    ["check", "--all", "--profile", "attestation", "--", "."],
+  );
+  assert.deepEqual(
+    buildCheckArguments({
+      mode: "worktree",
+      profile: "future-profile",
+      path: ".",
+      base: "",
+      head: "",
+    }),
+    ["check", "--profile", "future-profile", "--", "."],
+  );
+});
+
+test("reads the Action profile input into the Rust CLI argv", () => {
+  const inputs = new Map([
+    ["mode", "worktree"],
+    ["profile", "attestation"],
+    ["path", "source tree"],
+    ["base", ""],
+    ["head", ""],
+  ]);
+
+  assert.deepEqual(
+    buildCheckArgumentsFromInputs((name) => inputs.get(name) ?? ""),
+    ["check", "--profile", "attestation", "--", "source tree"],
   );
 });
 
@@ -71,6 +127,7 @@ test("rejects ambiguous mode inputs", () => {
     () =>
       buildCheckArguments({
         mode: "base",
+        profile: "full",
         path: ".",
         base: "",
         head: "",
@@ -81,6 +138,7 @@ test("rejects ambiguous mode inputs", () => {
     () =>
       buildCheckArguments({
         mode: "all",
+        profile: "full",
         path: ".",
         base: "main",
         head: "",

@@ -1,6 +1,28 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// Selects which comment-policy guarantees an analysis entry point enforces.
+#[non_exhaustive]
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum AnalysisProfile {
+    /// Enforce static comment budgets and change attestations.
+    #[default]
+    #[value(name = "full")]
+    Full,
+    /// Validate source structure and enforce only change attestations.
+    #[value(name = "attestation")]
+    Attestation,
+}
+
+impl AnalysisProfile {
+    pub(crate) fn runs_static_policy(self) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Attestation => false,
+        }
+    }
+}
+
 /// One source snapshot supplied to an analysis entry point.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceFile<'source> {

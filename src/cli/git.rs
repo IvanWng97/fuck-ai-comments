@@ -7,7 +7,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use anyhow::{Context, Result, bail};
-use fuck_ai_comments::{SourceFile, analyze_all, analyze_change, supports_path};
+use fuck_ai_comments::{
+    AnalysisProfile, SourceFile, analyze_all_with_profile, analyze_change_with_profile,
+    supports_path,
+};
 
 use super::check::Report;
 use super::source::{self, MAX_SOURCE_BYTES};
@@ -25,13 +28,13 @@ pub(super) enum Mode {
     Commits { base: String, head: Option<String> },
 }
 
-pub(super) fn scan(scope: &Path, mode: Mode) -> Result<Report> {
+pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result<Report> {
     let repository = Repository::discover(scope)?;
     let changes = repository.changes(mode)?;
     if !changes.scope_exists {
         bail!("scope {} does not exist", scope.display());
     }
-    analyze_changes(&repository, changes.files)
+    analyze_changes(&repository, changes.files, profile)
 }
 
 struct ScopeChanges {
@@ -666,7 +669,11 @@ fn bytes_to_path(bytes: &[u8]) -> Result<PathBuf> {
     Ok(PathBuf::from(text))
 }
 
-fn analyze_changes(repository: &Repository, mut changes: Vec<FileChange>) -> Result<Report> {
+fn analyze_changes(
+    repository: &Repository,
+    mut changes: Vec<FileChange>,
+    profile: AnalysisProfile,
+) -> Result<Report> {
     reject_unpaired_supported_addition_and_deletion(repository, &changes)?;
     changes.retain(|change| {
         change
@@ -697,7 +704,7 @@ fn analyze_changes(repository: &Repository, mut changes: Vec<FileChange>) -> Res
     let blobs = repository.read_blobs(&object_ids)?;
     let mut findings = Vec::new();
     for plan in &plans {
-        let mut plan_findings = analyze_plan(repository, plan, &blobs)?;
+        let mut plan_findings = analyze_plan(repository, plan, &blobs, profile)?;
         findings.append(&mut plan_findings);
     }
     findings.sort();
@@ -774,15 +781,19 @@ fn analyze_plan(
     repository: &Repository,
     plan: &Plan,
     blobs: &BTreeMap<ObjectId, Vec<u8>>,
+    profile: AnalysisProfile,
 ) -> Result<Vec<fuck_ai_comments::Finding>> {
     match plan {
         Plan::All(after) => {
             let bytes = read_snapshot(repository, after, blobs)?;
             let text = source::utf8(&after.path, &bytes)?;
-            analyze_all(SourceFile {
-                path: &after.path,
-                text,
-            })
+            analyze_all_with_profile(
+                SourceFile {
+                    path: &after.path,
+                    text,
+                },
+                profile,
+            )
             .with_context(|| format!("could not analyze {}", after.path.display()))
         }
         Plan::Change { before, after } => {
@@ -790,7 +801,7 @@ fn analyze_plan(
             let after_bytes = read_snapshot(repository, after, blobs)?;
             let before_text = source::utf8(&before.path, &before_bytes)?;
             let after_text = source::utf8(&after.path, &after_bytes)?;
-            analyze_change(
+            analyze_change_with_profile(
                 SourceFile {
                     path: &before.path,
                     text: before_text,
@@ -799,6 +810,7 @@ fn analyze_plan(
                     path: &after.path,
                     text: after_text,
                 },
+                profile,
             )
             .with_context(|| {
                 format!(

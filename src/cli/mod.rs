@@ -7,8 +7,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use fuck_ai_comments::AnalysisProfile;
 
 #[derive(Debug, Parser)]
 #[command(name = "fuck-ai-comments", version, about)]
@@ -33,6 +34,13 @@ enum Command {
     )
 )]
 struct CheckArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value = "full",
+        help = "Analysis guarantees to enforce"
+    )]
+    profile: AnalysisProfile,
     #[arg(long, help = "Analyze every supported file instead of a Git change")]
     all: bool,
     #[arg(long, help = "Compare HEAD with the Git index")]
@@ -71,10 +79,13 @@ pub(crate) fn error_exit(error: &anyhow::Error, output: &mut impl Write) -> Exit
 }
 
 fn run_check(arguments: CheckArgs, output: &mut impl Write) -> Result<ExitCode> {
+    if arguments.all && arguments.profile == AnalysisProfile::Attestation {
+        bail!("--all cannot use the attestation profile");
+    }
     let report = if arguments.all {
         check::scan_all(&arguments.path)?
     } else if arguments.staged {
-        git::scan(&arguments.path, git::Mode::Staged)?
+        git::scan(&arguments.path, git::Mode::Staged, arguments.profile)?
     } else if let Some(base) = arguments.base {
         git::scan(
             &arguments.path,
@@ -82,9 +93,10 @@ fn run_check(arguments: CheckArgs, output: &mut impl Write) -> Result<ExitCode> 
                 base,
                 head: arguments.head,
             },
+            arguments.profile,
         )?
     } else {
-        git::scan(&arguments.path, git::Mode::Worktree)?
+        git::scan(&arguments.path, git::Mode::Worktree, arguments.profile)?
     };
 
     render_report(&report, output)

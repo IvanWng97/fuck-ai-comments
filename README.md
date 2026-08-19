@@ -91,6 +91,9 @@ fuck-ai-comments check --staged
 
 # CI or a committed branch range. The CLI compares merge-base(base, head) to head.
 fuck-ai-comments check --base origin/main --head HEAD
+
+# Change attestation only: validate and pair source, but skip static budgets.
+fuck-ai-comments check --base origin/main --head HEAD --profile attestation
 ```
 
 Pass a file or directory as the final argument to narrow the scope. Exit codes
@@ -104,6 +107,10 @@ are stable:
 
 Git is the authority for rename pairing; if supported additions and deletions
 remain unpaired, the CLI cannot prove ancestry and exits with code `2`.
+The default `--profile full` preserves all policy checks. The `attestation`
+profile is valid only for Git change modes and emits only
+`comment-owner-changed` and `comment-reparented`; added files are still parsed
+and validated, while `--all --profile attestation` is rejected.
 
 Supported source files are limited to 16 MiB. Git blob batches are limited to
 128 MiB. Exceeding either limit fails closed instead of risking an unbounded CI
@@ -147,18 +154,20 @@ jobs:
         uses: IvanWng97/fuck-ai-comments@v0
         with:
           mode: base
+          profile: attestation
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
 ```
 
-Action inputs are `mode` (`all`, `worktree`, `staged`, or `base`), `path`,
-`base`, `head`, and an exact CLI `version`. Inputs become an argv array; they
-are never concatenated into a shell command. `mode: all` establishes or checks
-a static baseline; it does not replace `mode: base`, because a single valid
-comment can only be checked for drift by comparing revisions. Push and manual
-workflows must likewise pass an explicit before/after range for drift checks,
-or deliberately use `mode: all` when the job exists only to establish a new
-baseline.
+Action inputs are `mode` (`all`, `worktree`, `staged`, or `base`), `profile`
+(`full` or `attestation`), `path`, `base`, `head`, and an exact CLI `version`.
+Inputs become an argv array; they are never concatenated into a shell command,
+and the Rust CLI is the profile-validation authority. `mode: all` establishes
+or checks a static baseline; it does not replace `mode: base`, because a single
+valid comment can only be checked for drift by comparing revisions. Push and
+manual workflows must likewise pass an explicit before/after range for drift
+checks, or deliberately use `mode: all` when the job exists only to establish
+a new baseline.
 
 The first stable `0.x` release creates `@v0` after packaged-Action E2E succeeds;
 subsequent stable `0.x` releases advance it under the same gate. Consumers do

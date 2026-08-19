@@ -286,6 +286,36 @@ fn all_skips_unsupported_files_before_reading_them() {
 }
 
 #[test]
+fn all_rejects_the_attestation_profile() {
+    let root = TempDir::new().expect("temporary directory should be created");
+
+    let output = command(&root)
+        .args(["check", "--all", "--profile", "attestation", "."])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("--all cannot use the attestation profile"));
+}
+
+#[test]
+fn cli_rejects_an_unknown_analysis_profile() {
+    let root = TempDir::new().expect("temporary directory should be created");
+
+    let output = command(&root)
+        .args(["check", "--profile", "unknown"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("invalid value 'unknown' for '--profile <PROFILE>'"));
+}
+
+#[test]
 fn all_fails_closed_before_reading_an_oversized_supported_file() {
     let root = TempDir::new().expect("temporary directory should be created");
     let file = File::create(root.path().join("huge.rs")).expect("source should be created");

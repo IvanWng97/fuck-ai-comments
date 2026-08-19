@@ -136,6 +136,38 @@ fn default_compares_head_to_the_worktree() {
 }
 
 #[test]
+fn attestation_profile_skips_static_worktree_findings() {
+    let root = repository();
+    write(&root, "lib.rs", CLEAN_RUST);
+    commit_all(&root, "add source");
+    write(&root, "lib.rs", SLOPPY_RUST);
+
+    command(&root)
+        .args(["check", "--profile", "attestation"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn attestation_profile_reports_stale_worktree_comments() {
+    let root = repository();
+    write(&root, "lib.rs", STALE_BEFORE);
+    commit_all(&root, "add source");
+    write(&root, "lib.rs", STALE_AFTER);
+
+    let output = command(&root)
+        .args(["check", "--profile", "attestation"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("lib.rs:2: comment-policy/comment-owner-changed"));
+}
+
+#[test]
 fn default_includes_untracked_files() {
     let root = repository();
     write(&root, "untracked.rs", SLOPPY_RUST);
@@ -149,6 +181,34 @@ fn default_includes_untracked_files() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(stdout.contains("untracked.rs:1: comment-policy/leaf-comment-budget"));
+}
+
+#[test]
+fn attestation_profile_validates_a_clean_added_file() {
+    let root = repository();
+    write(&root, "untracked.rs", SLOPPY_RUST);
+
+    command(&root)
+        .args(["check", "--profile", "attestation"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn attestation_profile_rejects_an_invalid_added_file() {
+    let root = repository();
+    write(&root, "broken.rs", "fn broken( {\n");
+
+    let output = command(&root)
+        .args(["check", "--profile", "attestation"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("could not parse broken.rs as Rust"));
 }
 
 #[test]
@@ -176,6 +236,22 @@ fn staged_reads_the_index_instead_of_the_worktree() {
         .assert()
         .code(0)
         .stdout("clean: 0 files scanned\n");
+}
+
+#[test]
+fn attestation_profile_skips_static_staged_findings() {
+    let root = repository();
+    write(&root, "lib.rs", CLEAN_RUST);
+    commit_all(&root, "add clean source");
+    write(&root, "lib.rs", SLOPPY_RUST);
+    git(&root, ["add", "lib.rs"]);
+    write(&root, "lib.rs", "fn broken( {\n");
+
+    command(&root)
+        .args(["check", "--staged", "--profile", "attestation"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
 }
 
 #[test]
@@ -586,6 +662,22 @@ fn staged_fails_closed_on_unrelated_supported_addition_and_deletion() {
 }
 
 #[test]
+fn attestation_profile_keeps_the_addition_deletion_ancestry_guard() {
+    let root = repository();
+    write(&root, "removed.py", "removed_value = 41\n");
+    commit_all(&root, "add source");
+    fs::remove_file(root.path().join("removed.py")).expect("old source should be removed");
+    write(&root, "added.rs", "const ADDED_VALUE: usize = 42;\n");
+    git(&root, ["add", "--all"]);
+
+    command(&root)
+        .args(["check", "--staged", "--profile", "attestation"])
+        .assert()
+        .code(2)
+        .stderr(UNPAIRED_ADD_DELETE_ERROR);
+}
+
+#[test]
 fn staged_pairs_candidates_at_the_explicit_exhaustive_rename_limit() {
     let root = repository();
     stage_inexact_renames(&root, GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT);
@@ -684,6 +776,20 @@ fn deleting_a_file_does_not_lint_the_old_snapshot() {
 }
 
 #[test]
+fn attestation_profile_does_not_scan_a_deleted_file() {
+    let root = repository();
+    write(&root, "deleted.rs", SLOPPY_RUST);
+    commit_all(&root, "add source");
+    fs::remove_file(root.path().join("deleted.rs")).expect("source should be removed");
+
+    command(&root)
+        .args(["check", "--profile", "attestation"])
+        .assert()
+        .code(0)
+        .stdout("clean: 0 files scanned\n");
+}
+
+#[test]
 fn base_and_head_read_committed_blobs() {
     let root = repository();
     write(&root, "lib.rs", STALE_BEFORE);
@@ -705,6 +811,29 @@ fn base_and_head_read_committed_blobs() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(stdout.contains("lib.rs:2: comment-policy/comment-owner-changed"));
+}
+
+#[test]
+fn attestation_profile_skips_static_commit_findings() {
+    let root = repository();
+    write(&root, "lib.rs", CLEAN_RUST);
+    let base = commit_all(&root, "add source");
+    write(&root, "lib.rs", SLOPPY_RUST);
+    let head = commit_all(&root, "add comments");
+
+    command(&root)
+        .args([
+            "check",
+            "--base",
+            &base,
+            "--head",
+            &head,
+            "--profile",
+            "attestation",
+        ])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
 }
 
 #[test]
@@ -768,6 +897,25 @@ fn cross_language_rename_analyzes_the_new_file_as_added() {
         stdout.contains("config.py:1: comment-policy/file-comment-budget"),
         "unexpected output: {stdout:?}"
     );
+}
+
+#[test]
+fn attestation_profile_rejects_a_cross_language_rename() {
+    let root = repository();
+    let shared_source = "value = 1\n";
+    write(&root, "config.toml", shared_source);
+    commit_all(&root, "add config");
+    git(&root, ["mv", "--", "config.toml", "config.py"]);
+
+    let output = command(&root)
+        .args(["check", "--profile", "attestation"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("cannot attest a change across language adapters"));
 }
 
 #[test]
