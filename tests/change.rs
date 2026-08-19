@@ -189,6 +189,133 @@ fn punctuation_only_comment_edit_does_not_change_the_owner_fingerprint() {
 }
 
 #[test]
+fn empty_comment_format_and_cardinality_change_is_not_ambiguous() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "///\nconst LIMIT: usize = 4;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "//\n//\nconst LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("empty separators carry no identity");
+
+    assert!(
+        findings.iter().all(|finding| {
+            finding.rule != "comment-policy/comment-owner-changed"
+                && finding.rule != "comment-policy/comment-reparented"
+        }),
+        "empty separators cannot require attestation: {findings:#?}"
+    );
+}
+
+#[test]
+fn empty_doc_separator_does_not_require_reparent_attestation() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "///\n",
+            "/// Coupled to the worker protocol.\n",
+            "fn alpha() { run(); }\n",
+            "fn beta() {}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "/// Reviewed against the worker protocol.\n",
+            "fn alpha() { changed_run(); }\n",
+            "///\n",
+            "fn beta() {}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("empty separators may move independently");
+
+    assert!(
+        findings.iter().all(|finding| {
+            finding.rule != "comment-policy/comment-owner-changed"
+                && finding.rule != "comment-policy/comment-reparented"
+        }),
+        "only meaningful normalized text requires attestation: {findings:#?}"
+    );
+}
+
+#[test]
+fn added_empty_comments_still_activate_static_budget() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "const LIMIT: usize = 4;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "//\n//\n//\n//\nconst LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust comment addition");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "normalized-empty comments still consume the static budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn unchanged_empty_comments_do_not_activate_an_unrelated_owner_budget() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "//\n",
+            "//\n",
+            "//\n",
+            "//\n",
+            "const FIRST: usize = 1;\n",
+            "const SECOND: usize = 2;\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "//\n",
+            "//\n",
+            "//\n",
+            "//\n",
+            "const FIRST: usize = 1;\n",
+            "const SECOND: usize = 3;\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("valid unrelated leaf change");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/leaf-comment-budget"),
+        "unchanged empty separators must not select a different owner: {findings:#?}"
+    );
+}
+
+#[test]
+fn meaningful_comment_format_and_cardinality_change_still_fails_closed() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Same rationale.\nconst LIMIT: usize = 4;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "/// Same rationale.\n/// Same rationale.\nconst LIMIT: usize = 4;\n",
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("meaningful same-key comments cannot be paired by guessing");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
 fn editing_one_comment_does_not_attest_its_sibling() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
