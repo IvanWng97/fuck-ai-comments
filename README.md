@@ -171,14 +171,17 @@ tag only after authorization, artifact builds, and hosting succeed:
 gh workflow run release.yml --ref main -f tag=v0.1.0
 ```
 
-Before the first dispatch, protect `main` and activate a repository tag ruleset
-for all tag refs (`~ALL`) that restricts creation, update, and deletion. The
-only bypass actor is the GitHub Actions App ID `15368`. This broad scope is
-required because historical cargo-dist workflows accepted several noncanonical
-version-tag shapes; the current workflow authorizes only
-`v<package-version>`. It also requires that the dispatched commit is the current
-`main` HEAD and has a successful `ci.yml` push run for that exact SHA. A
-`tag=dry-run` dispatch may build and test without repository write permission.
+Before the first dispatch, protect `main` and create a `release-authorization`
+environment. The `release-authorization` environment only permits protected
+branches and carries no secrets. Activate a repository tag ruleset for all tag
+refs (`~ALL`). The ruleset requires a successful `release-authorization`
+deployment. It restricts deletion and blocks force pushes and non-fast-forward
+updates. Configure no owner or administrator bypass. This broad scope is required
+because historical cargo-dist workflows accepted several noncanonical version-tag
+shapes; the current workflow authorizes only `v<package-version>`. It also requires
+that the dispatched commit is the current `main` HEAD and has a successful `ci.yml`
+push run for that exact SHA. A `tag=dry-run` dispatch may build and test without
+repository write permission.
 
 Published releases provide native archives for x86-64 Linux, x86-64 Windows,
 x86-64 macOS, and Apple Silicon macOS. Each release includes `sha256.sum`, a
