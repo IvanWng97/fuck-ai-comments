@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use anyhow::{Context, Result, bail};
 use fuck_ai_comments::{SourceFile, analyze_all, analyze_change, supports_path};
@@ -16,6 +16,8 @@ use super::source::{self, MAX_SOURCE_BYTES};
 const MAX_BATCH_BYTES: u64 = 128 * 1024 * 1024;
 const GIT_OBJECT_ID_HEX_LENGTHS: [usize; 2] = [40, 64];
 const MAX_GIT_SIMILARITY_SCORE: u16 = 100;
+// Git's default keeps its exhaustive O(N^2) rename fallback finite.
+const GIT_EXHAUSTIVE_RENAME_LIMIT: usize = 1_000;
 
 pub(super) enum Mode {
     Worktree,
@@ -183,8 +185,6 @@ impl Repository {
             OsStr::new("--exclude-standard"),
             OsStr::new("--full-name"),
             OsStr::new("-z"),
-            OsStr::new("--"),
-            self.scope.as_os_str(),
         ])?;
         for path in parse_nul_paths(&output)? {
             if let Some(deletion) = changes.iter_mut().find(|change| {
@@ -214,7 +214,9 @@ impl Repository {
             OsString::from("-z"),
             OsString::from("--no-ext-diff"),
             OsString::from("--no-textconv"),
-            OsString::from("--find-renames"),
+            OsString::from("--find-renames=1%"),
+            OsString::from("-B"),
+            OsString::from(format!("-l{GIT_EXHAUSTIVE_RENAME_LIMIT}")),
             OsString::from("--no-abbrev"),
         ];
         if target == DiffTarget::Index {
@@ -224,8 +226,6 @@ impl Repository {
         if let Some(after) = after {
             arguments.push(OsString::from(after.as_str()));
         }
-        arguments.push(OsString::from("--"));
-        arguments.push(self.scope.as_os_str().to_owned());
 
         let output = self.git(arguments.iter().map(OsString::as_os_str))?;
         parse_raw_changes(&output, target)
@@ -259,6 +259,22 @@ impl Repository {
         run_git_at(&self.root, arguments)
     }
 
+    fn is_supported_regular(&self, snapshot: &Snapshot) -> Result<bool> {
+        if !supports_path(&snapshot.path) {
+            return Ok(false);
+        }
+        match snapshot.mode {
+            Some(mode) => Ok(mode == FileMode::Regular),
+            None => fs::symlink_metadata(self.root.join(&snapshot.path))
+                .with_context(|| format!("could not inspect {}", snapshot.path.display()))
+                .map(|metadata| metadata.file_type().is_file()),
+        }
+    }
+
+    fn in_scope(&self, path: &Path) -> bool {
+        self.scope == Path::new(".") || path.starts_with(&self.scope)
+    }
+
     fn read_blobs(&self, object_ids: &BTreeSet<ObjectId>) -> Result<BTreeMap<ObjectId, Vec<u8>>> {
         if object_ids.is_empty() {
             return Ok(BTreeMap::new());
@@ -271,6 +287,15 @@ impl Repository {
     }
 
     fn cat_file(&self, mode: &str, object_ids: &BTreeSet<ObjectId>) -> Result<Vec<u8>> {
+        self.cat_file_with_writer_builder(mode, object_ids, std::thread::Builder::new())
+    }
+
+    fn cat_file_with_writer_builder(
+        &self,
+        mode: &str,
+        object_ids: &BTreeSet<ObjectId>,
+        writer_builder: std::thread::Builder,
+    ) -> Result<Vec<u8>> {
         let mut child = Command::new("git")
             .current_dir(&self.root)
             .arg("--literal-pathspecs")
@@ -284,18 +309,47 @@ impl Repository {
             .stdin
             .take()
             .context("git cat-file did not provide stdin")?;
-        for object_id in object_ids {
-            writeln!(input, "{}", object_id.as_str()).context("could not request Git blob")?;
-        }
-        drop(input);
-        let output = child
-            .wait_with_output()
-            .with_context(|| format!("could not wait for git cat-file {mode}"))?;
+        let (output, input_result) = std::thread::scope(|scope| -> Result<_> {
+            let writer = match writer_builder.spawn_scoped(scope, move || {
+                for object_id in object_ids {
+                    writeln!(input, "{}", object_id.as_str())
+                        .context("could not request Git blob")?;
+                }
+                Ok::<(), anyhow::Error>(())
+            }) {
+                Ok(writer) => writer,
+                Err(error) => {
+                    let cleanup_error = terminate_and_reap(&mut child, mode).err();
+                    let error = anyhow::Error::new(error)
+                        .context("could not spawn Git blob request writer");
+                    return Err(match cleanup_error {
+                        Some(cleanup_error) => error.context(format!(
+                            "could not clean up git cat-file {mode}: {cleanup_error:#}"
+                        )),
+                        None => error,
+                    });
+                }
+            };
+            let output = child.wait_with_output();
+            let input_result = writer
+                .join()
+                .map_err(|_| anyhow::anyhow!("Git blob request writer panicked"));
+            Ok((output, input_result))
+        })?;
+        let output = output.with_context(|| format!("could not wait for git cat-file {mode}"))?;
         if !output.status.success() {
             bail!("git cat-file {mode} failed: {}", stderr_message(&output));
         }
+        input_result??;
         Ok(output.stdout)
     }
+}
+
+fn terminate_and_reap(child: &mut Child, mode: &str) -> Result<()> {
+    let kill_result = child.kill();
+    let wait_result = child.wait();
+    wait_result.with_context(|| format!("could not reap git cat-file {mode}"))?;
+    kill_result.with_context(|| format!("could not terminate git cat-file {mode}"))
 }
 
 fn existing_directory(path: &Path) -> Option<&Path> {
@@ -484,7 +538,7 @@ fn parse_status(text: &str) -> Result<Status> {
         b'A' if text.len() == 1 => Ok(Status::Added),
         b'C' if valid_similarity_score(score) => Ok(Status::Copied),
         b'D' if text.len() == 1 => Ok(Status::Deleted),
-        b'M' if text.len() == 1 => Ok(Status::Modified),
+        b'M' if text.len() == 1 || valid_similarity_score(score) => Ok(Status::Modified),
         b'R' if valid_similarity_score(score) => Ok(Status::Renamed),
         b'T' if text.len() == 1 => Ok(Status::TypeChanged),
         b'U' => bail!("cannot analyze an unmerged Git entry"),
@@ -612,10 +666,20 @@ fn bytes_to_path(bytes: &[u8]) -> Result<PathBuf> {
     Ok(PathBuf::from(text))
 }
 
-fn analyze_changes(repository: &Repository, changes: Vec<FileChange>) -> Result<Report> {
+fn analyze_changes(repository: &Repository, mut changes: Vec<FileChange>) -> Result<Report> {
+    reject_unpaired_supported_addition_and_deletion(repository, &changes)?;
+    changes.retain(|change| {
+        change
+            .after
+            .as_ref()
+            .is_some_and(|after| repository.in_scope(&after.path))
+    });
+    for change in &changes {
+        validate_modes(change)?;
+    }
+
     let mut plans = Vec::new();
     for change in changes {
-        validate_modes(&change)?;
         let Some(after) = change.after else {
             continue;
         };
@@ -642,6 +706,33 @@ fn analyze_changes(repository: &Repository, changes: Vec<FileChange>) -> Result<
         findings,
         files_scanned: plans.len(),
     })
+}
+
+fn reject_unpaired_supported_addition_and_deletion(
+    repository: &Repository,
+    changes: &[FileChange],
+) -> Result<()> {
+    let mut has_addition = false;
+    let mut has_deletion = false;
+    for change in changes {
+        if change.before.is_none()
+            && let Some(after) = &change.after
+            && repository.in_scope(&after.path)
+            && repository.is_supported_regular(after)?
+        {
+            has_addition = true;
+        }
+        if change.after.is_none()
+            && let Some(before) = &change.before
+            && repository.is_supported_regular(before)?
+        {
+            has_deletion = true;
+        }
+        if has_addition && has_deletion {
+            bail!("cannot prove ancestry between supported additions and deletions");
+        }
+    }
+    Ok(())
 }
 
 enum Plan {
@@ -890,8 +981,16 @@ fn stderr_message(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::io;
+    use std::path::PathBuf;
+    use std::thread;
 
-    use super::{DiffTarget, ObjectId, parse_blob_batch, parse_raw_changes};
+    use tempfile::TempDir;
+
+    use super::{
+        DiffTarget, ObjectId, Repository, Status, parse_blob_batch, parse_raw_changes,
+        parse_status, run_git_at,
+    };
 
     const OLD_ID: &str = "1111111111111111111111111111111111111111";
     const NEW_ID: &str = "2222222222222222222222222222222222222222";
@@ -908,6 +1007,26 @@ mod tests {
         let raw = format!(":100644 100644 {OLD_ID} {NEW_ID} R101\0old.rs\0new.rs\0");
 
         assert!(parse_raw_changes(raw.as_bytes(), DiffTarget::Commit).is_err());
+    }
+
+    #[test]
+    fn status_parser_accepts_modified_with_an_optional_valid_rewrite_score() {
+        for status in ["M", "M0", "M100"] {
+            assert!(
+                matches!(parse_status(status), Ok(Status::Modified)),
+                "valid modified status {status:?} should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn status_parser_rejects_invalid_modified_rewrite_scores() {
+        for status in ["", "Mnot-a-score", "M101"] {
+            assert!(
+                parse_status(status).is_err(),
+                "invalid modified status {status:?} should fail"
+            );
+        }
     }
 
     #[test]
@@ -928,5 +1047,32 @@ mod tests {
         let blobs = parse_blob_batch(&output, &requested, &metadata).expect("batch should parse");
 
         assert_eq!(blobs.get(&object_id), Some(&vec![0, b'\n', 0xff, b'x']));
+    }
+
+    #[test]
+    fn cat_file_returns_the_writer_spawn_error() {
+        let root = TempDir::new().expect("temporary repository should be created");
+        run_git_at(root.path(), [std::ffi::OsStr::new("init")])
+            .expect("temporary Git repository should be initialized");
+        let repository = Repository {
+            root: root.path().to_owned(),
+            scope: PathBuf::from("."),
+        };
+        let object_id = ObjectId::parse(OLD_ID).expect("object ID should be valid");
+        let requested = BTreeSet::from([object_id]);
+
+        let error = repository
+            .cat_file_with_writer_builder(
+                "--batch-check",
+                &requested,
+                thread::Builder::new().stack_size(usize::MAX),
+            )
+            .expect_err("an impossible stack size should fail to spawn the writer");
+
+        assert!(
+            format!("{error:#}").contains("could not spawn Git blob request writer")
+                && error.root_cause().downcast_ref::<io::Error>().is_some(),
+            "unexpected error: {error:#}"
+        );
     }
 }

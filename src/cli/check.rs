@@ -55,20 +55,7 @@ fn supported_files(root: &Path) -> Result<Vec<PathBuf>> {
         if !supports_path(entry.path()) {
             continue;
         }
-        if entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_file())
-        {
-            files.push(entry.into_path());
-        } else if entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_symlink())
-        {
-            bail!(
-                "supported path {} is not a regular file",
-                without_dot_prefix(entry.path()).display()
-            );
-        }
+        files.push(entry.into_path());
     }
     files.sort();
     Ok(files)
