@@ -1,16 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 #[cfg(test)]
 use std::cell::Cell;
 
-use similar::{Algorithm, DiffTag, TextDiff, capture_diff_slices};
+use similar::{Algorithm, ChangeTag, DiffTag, TextDiff, capture_diff_slices};
 
 use crate::identity::{
     CanonicalIdentity, CanonicalIdentityId, CanonicalIdentityInterner, CanonicalIdentityMap,
 };
 use crate::languages;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection, SourceFile};
-use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile};
+use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
 
 const STALE_RULE: &str = "comment-policy/comment-owner-changed";
 const REPARENTED_RULE: &str = "comment-policy/comment-reparented";
@@ -19,6 +19,9 @@ const REPARENTED_RULE: &str = "comment-policy/comment-reparented";
 thread_local! {
     static OWNER_FRONTIER_VISITS: Cell<usize> = const { Cell::new(0) };
     static OWNER_ANCHOR_CANDIDATE_EVALUATIONS: Cell<usize> = const { Cell::new(0) };
+    static OWNER_EXACT_SPAN_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+    static OWNER_EXACT_COMPARISON_WORK: Cell<usize> = const { Cell::new(0) };
+    static OWNER_PHYSICAL_LINE_WORK: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn analyze(
@@ -229,7 +232,7 @@ fn pair_owners(
         );
         enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
 
-        let scores = connected_owner_scores(
+        let evidence = connected_owner_scores(
             before,
             after,
             before_siblings,
@@ -237,7 +240,20 @@ fn pair_owners(
             anchors,
             &pairs,
         )?;
-        let anchored = anchored_owner_pairs(&scores, &pairs)?;
+        if !evidence.exact_pairs.is_empty() {
+            enqueue_owner_pairs(evidence.exact_pairs, &mut pairs, &mut frontier)?;
+            let stable = unique_stable_owner_pairs(
+                before,
+                after,
+                before_siblings,
+                after_siblings,
+                &pairs,
+                identities,
+            );
+            enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+        }
+
+        let anchored = anchored_owner_pairs(&evidence.scores, &pairs)?;
         if anchored.is_empty() {
             continue;
         }
@@ -254,7 +270,7 @@ fn pair_owners(
         enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
 
         // A second anchor wave would make correspondence depend on the first wave's guesses.
-        if !anchored_owner_pairs(&scores, &pairs)?.is_empty() {
+        if !anchored_owner_pairs(&evidence.scores, &pairs)?.is_empty() {
             return Err(AnalysisError::AmbiguousChange(
                 "owner correspondence requires iterative anchor preference peeling".to_owned(),
             ));
@@ -378,7 +394,7 @@ fn connected_owner_scores(
     after_children: &[usize],
     anchors: &LineAnchors,
     pairs: &Pairing,
-) -> Result<Vec<(usize, usize, usize)>, AnalysisError> {
+) -> Result<OwnerAnchorEvidence, AnalysisError> {
     let mut before_sweep = OwnerRankSweep::new(
         before,
         before_children
@@ -396,7 +412,7 @@ fn connected_owner_scores(
         |owner| anchors.after_owner_ranks(owner),
     );
     if before_sweep.is_empty() || after_sweep.is_empty() {
-        return Ok(Vec::new());
+        return Ok(OwnerAnchorEvidence::default());
     }
 
     let mut boundaries: Vec<_> = before_sweep
@@ -407,43 +423,120 @@ fn connected_owner_scores(
     boundaries.dedup();
 
     let mut scores = BTreeMap::new();
+    let mut exact_pairs = ProvenOwnerPairs::default();
     for segment in boundaries.windows(2) {
         let rank = segment[0];
         let anchor_count = segment[1] - rank;
-        let before_by_kind = unique_owner_evidence_by_kind(before, before_sweep.owners_at(rank));
-        let after_by_kind = unique_owner_evidence_by_kind(after, after_sweep.owners_at(rank));
+        let before_by_kind = owner_evidence_by_kind(before, before_sweep.owners_at(rank));
+        let after_by_kind = owner_evidence_by_kind(after, after_sweep.owners_at(rank));
         for (kind, before_evidence) in before_by_kind {
-            let Some(after_evidence) = after_by_kind.get(&kind).copied() else {
+            let Some(after_evidence) = after_by_kind.get(&kind) else {
                 continue;
             };
-            let (OwnerEvidence::Unique(before_index), OwnerEvidence::Unique(after_index)) =
-                (before_evidence, after_evidence)
-            else {
+            if let (OwnerEvidence::Unique(before_index), OwnerEvidence::Unique(after_index)) =
+                (&before_evidence, after_evidence)
+            {
+                *scores.entry((*before_index, *after_index)).or_insert(0) += anchor_count;
+                continue;
+            }
+            if anchor_count == 1
+                && let Some(proven) = exact_same_line_owner_pairs(
+                    before,
+                    after,
+                    anchors.owner[rank],
+                    &before_evidence,
+                    after_evidence,
+                )
+            {
+                exact_pairs.extend(proven)?;
+            } else {
                 return Err(AnalysisError::AmbiguousChange(format!(
                     "exact line anchor {} connects multiple {kind:?} sibling owners",
-                    anchors.owner[rank].0 + 1
+                    anchors.owner[rank].before.index + 1
                 )));
-            };
-            *scores.entry((before_index, after_index)).or_insert(0) += anchor_count;
+            }
         }
     }
-    Ok(scores
-        .into_iter()
-        .map(|((before, after), score)| (before, after, score))
-        .collect())
+    Ok(OwnerAnchorEvidence {
+        scores: scores
+            .into_iter()
+            .map(|((before, after), score)| (before, after, score))
+            .collect(),
+        exact_pairs: exact_pairs.into_pairs(),
+    })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Default)]
+struct ProvenOwnerPairs {
+    pairs: Vec<(usize, usize)>,
+    before_to_after: HashMap<usize, usize>,
+    after_to_before: HashMap<usize, usize>,
+}
+
+impl ProvenOwnerPairs {
+    fn extend(
+        &mut self,
+        pairs: impl IntoIterator<Item = (usize, usize)>,
+    ) -> Result<(), AnalysisError> {
+        for (before, after) in pairs {
+            match (
+                self.before_to_after.get(&before),
+                self.after_to_before.get(&after),
+            ) {
+                (None, None) => {
+                    self.before_to_after.insert(before, after);
+                    self.after_to_before.insert(after, before);
+                    self.pairs.push((before, after));
+                }
+                (Some(&paired_after), Some(&paired_before))
+                    if paired_after == after && paired_before == before => {}
+                _ => {
+                    return Err(AnalysisError::AmbiguousChange(
+                        "exact line proofs disagree on owner correspondence".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn into_pairs(self) -> Vec<(usize, usize)> {
+        self.pairs
+    }
+}
+
+#[derive(Default)]
+struct OwnerAnchorEvidence {
+    scores: Vec<(usize, usize, usize)>,
+    exact_pairs: Vec<(usize, usize)>,
+}
+
 enum OwnerEvidence {
     Unique(usize),
-    Ambiguous,
+    Multiple(Vec<usize>),
 }
 
-fn unique_owner_evidence_by_kind(
+impl OwnerEvidence {
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            Self::Unique(index) => std::slice::from_ref(index),
+            Self::Multiple(indexes) => indexes,
+        }
+    }
+
+    fn insert(&mut self, index: usize) {
+        match self {
+            Self::Unique(first) => *self = Self::Multiple(vec![*first, index]),
+            Self::Multiple(indexes) => indexes.push(index),
+        }
+    }
+}
+
+fn owner_evidence_by_kind(
     document: &ParsedFile,
     candidates: impl IntoIterator<Item = usize>,
 ) -> BTreeMap<OwnerKind, OwnerEvidence> {
-    let mut by_kind = BTreeMap::new();
+    let mut by_kind: BTreeMap<OwnerKind, OwnerEvidence> = BTreeMap::new();
     for index in candidates {
         #[cfg(test)]
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| {
@@ -451,10 +544,96 @@ fn unique_owner_evidence_by_kind(
         });
         by_kind
             .entry(document.owners[index].kind)
-            .and_modify(|evidence| *evidence = OwnerEvidence::Ambiguous)
+            .and_modify(|evidence| evidence.insert(index))
             .or_insert(OwnerEvidence::Unique(index));
     }
     by_kind
+}
+
+fn exact_same_line_owner_pairs(
+    before: &ParsedFile,
+    after: &ParsedFile,
+    anchor: OwnerLineAnchor,
+    before_evidence: &OwnerEvidence,
+    after_evidence: &OwnerEvidence,
+) -> Option<Vec<(usize, usize)>> {
+    let before_indexes = before_evidence.as_slice();
+    let after_indexes = after_evidence.as_slice();
+    if before_indexes.len() != after_indexes.len() {
+        return None;
+    }
+    let before_line = physical_line(anchor.before, anchor.content_len)?;
+    let after_line = physical_line(anchor.after, anchor.content_len)?;
+    if !owner_spans_are_disjoint(before, before_indexes)
+        || !owner_spans_are_disjoint(after, after_indexes)
+    {
+        return None;
+    }
+
+    let mut proven = Vec::with_capacity(before_indexes.len());
+    let mut exact_pair_count = 0;
+    for (before_index, after_index) in before_indexes
+        .iter()
+        .copied()
+        .zip(after_indexes.iter().copied())
+    {
+        #[cfg(test)]
+        OWNER_EXACT_SPAN_COMPARISONS.with(|comparisons| {
+            comparisons.set(comparisons.get() + 1);
+        });
+        let before_span = &before.owners[before_index].span;
+        let after_span = &after.owners[after_index].span;
+        let before_extent = owner_line_extent(before_span, before_line)?;
+        let after_extent = owner_line_extent(after_span, after_line)?;
+        if before_extent != after_extent {
+            return None;
+        }
+        exact_pair_count += usize::from(direct_owner_code_is_exact(
+            &before.owners[before_index],
+            &after.owners[after_index],
+        ));
+        proven.push((before_index, after_index));
+    }
+    let non_exact_pair_count = proven.len() - exact_pair_count;
+    // One changed pair is determined by eliminating its already-proven exact siblings.
+    (exact_pair_count > 0 && non_exact_pair_count <= 1).then_some(proven)
+}
+
+fn direct_owner_code_is_exact(before: &OwnerSnapshot, after: &OwnerSnapshot) -> bool {
+    // Nested owners and comments have separate correspondence passes, so only direct code belongs here.
+    if before.code.len() != after.code.len() {
+        return false;
+    }
+    before.code.iter().zip(&after.code).all(|(old, new)| {
+        #[cfg(test)]
+        OWNER_EXACT_COMPARISON_WORK.with(|work| work.set(work.get() + 1));
+        old == new
+    })
+}
+
+fn owner_spans_are_disjoint(document: &ParsedFile, indexes: &[usize]) -> bool {
+    indexes.windows(2).all(|pair| {
+        document.owners[pair[0]].span.end_byte <= document.owners[pair[1]].span.start_byte
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OwnerLineExtent {
+    line_start: usize,
+    line_end: usize,
+    owner_start: usize,
+    owner_end: usize,
+}
+
+fn owner_line_extent(span: &Span, line: PhysicalLine) -> Option<OwnerLineExtent> {
+    let intersection_start = span.start_byte.max(line.coordinate.start_byte);
+    let intersection_end = span.end_byte.min(line.end_byte);
+    (intersection_start < intersection_end).then_some(OwnerLineExtent {
+        line_start: intersection_start.checked_sub(line.coordinate.start_byte)?,
+        line_end: intersection_end.checked_sub(line.coordinate.start_byte)?,
+        owner_start: intersection_start.checked_sub(span.start_byte)?,
+        owner_end: intersection_end.checked_sub(span.start_byte)?,
+    })
 }
 
 struct RankedOwner {
@@ -965,7 +1144,26 @@ fn owner_label(owner: &OwnerSnapshot) -> String {
 
 struct LineAnchors {
     exact: BTreeMap<usize, usize>,
-    owner: Vec<(usize, usize)>,
+    owner: Vec<OwnerLineAnchor>,
+}
+
+#[derive(Clone, Copy)]
+struct OwnerLineAnchor {
+    before: LineCoordinate,
+    after: LineCoordinate,
+    content_len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct LineCoordinate {
+    index: usize,
+    start_byte: usize,
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalLine {
+    coordinate: LineCoordinate,
+    end_byte: usize,
 }
 
 impl LineAnchors {
@@ -982,31 +1180,47 @@ impl LineAnchors {
                 .collect::<BTreeSet<_>>()
         };
         let (old_comment_lines, new_comment_lines) = (comment_lines(old), comment_lines(new));
-        let source_lines: Vec<_> = before.lines().collect();
         let mut exact = BTreeMap::new();
         let mut owner = Vec::new();
-        for operation in diff
-            .ops()
-            .iter()
-            .filter(|operation| operation.tag() == DiffTag::Equal)
-        {
-            for (old_line, new_line) in operation.old_range().zip(operation.new_range()) {
-                exact.insert(old_line, new_line);
-                if !old_comment_lines.contains(&old_line)
-                    && !new_comment_lines.contains(&new_line)
-                    && source_lines
-                        .get(old_line)
-                        .is_some_and(|line| line.chars().any(char::is_alphanumeric))
-                {
-                    owner.push((old_line, new_line));
+        let mut before_start_byte = 0;
+        let mut after_start_byte = 0;
+        for change in diff.iter_all_changes() {
+            let line = change.value();
+            match change.tag() {
+                ChangeTag::Equal => {
+                    let before_line = change.old_index().map(|index| LineCoordinate {
+                        index,
+                        start_byte: before_start_byte,
+                    });
+                    let after_line = change.new_index().map(|index| LineCoordinate {
+                        index,
+                        start_byte: after_start_byte,
+                    });
+                    debug_assert!(before_line.is_some() && after_line.is_some());
+                    if let (Some(before_line), Some(after_line)) = (before_line, after_line) {
+                        exact.insert(before_line.index, after_line.index);
+                        let content = line_content(line);
+                        if !old_comment_lines.contains(&before_line.index)
+                            && !new_comment_lines.contains(&after_line.index)
+                            && content.chars().any(char::is_alphanumeric)
+                        {
+                            owner.push(OwnerLineAnchor {
+                                before: before_line,
+                                after: after_line,
+                                content_len: content.len(),
+                            });
+                        }
+                    }
+                    before_start_byte += line.len();
+                    after_start_byte += line.len();
                 }
+                ChangeTag::Delete => before_start_byte += line.len(),
+                ChangeTag::Insert => after_start_byte += line.len(),
             }
         }
-        debug_assert!(
-            owner
-                .windows(2)
-                .all(|pair| { pair[0].0 < pair[1].0 && pair[0].1 < pair[1].1 })
-        );
+        debug_assert!(owner.windows(2).all(|pair| {
+            pair[0].before.index < pair[1].before.index && pair[0].after.index < pair[1].after.index
+        }));
         Self { exact, owner }
     }
 
@@ -1014,20 +1228,20 @@ impl LineAnchors {
         let start_line = owner.span.start_line.saturating_sub(1);
         let end_line = owner.span.end_line;
         self.owner
-            .partition_point(|&(before_line, _)| before_line < start_line)
+            .partition_point(|anchor| anchor.before.index < start_line)
             ..self
                 .owner
-                .partition_point(|&(before_line, _)| before_line < end_line)
+                .partition_point(|anchor| anchor.before.index < end_line)
     }
 
     fn after_owner_ranks(&self, owner: &OwnerSnapshot) -> std::ops::Range<usize> {
         let start_line = owner.span.start_line.saturating_sub(1);
         let end_line = owner.span.end_line;
         self.owner
-            .partition_point(|&(_, after_line)| after_line < start_line)
+            .partition_point(|anchor| anchor.after.index < start_line)
             ..self
                 .owner
-                .partition_point(|&(_, after_line)| after_line < end_line)
+                .partition_point(|anchor| anchor.after.index < end_line)
     }
 
     fn after_line(&self, one_based_old_line: usize) -> Option<usize> {
@@ -1035,6 +1249,22 @@ impl LineAnchors {
             .get(&one_based_old_line.saturating_sub(1))
             .map(|line| line + 1)
     }
+}
+
+fn line_content(line: &str) -> &str {
+    line.strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\r'))
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line)
+}
+
+fn physical_line(coordinate: LineCoordinate, content_len: usize) -> Option<PhysicalLine> {
+    #[cfg(test)]
+    OWNER_PHYSICAL_LINE_WORK.with(|work| work.set(work.get() + 1));
+    Some(PhysicalLine {
+        coordinate,
+        end_byte: coordinate.start_byte.checked_add(content_len)?,
+    })
 }
 
 #[cfg(test)]
@@ -1090,12 +1320,13 @@ mod tests {
         source
     }
 
-    fn owner_anchor_candidate_evaluations(count: usize) -> usize {
+    fn same_line_owner_pairing_work(count: usize) -> (usize, usize) {
         let before = same_line_anonymous_callbacks(count, 1);
         let after = same_line_anonymous_callbacks(count, 2);
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(|evaluations| evaluations.set(0));
+        OWNER_EXACT_SPAN_COMPARISONS.with(|comparisons| comparisons.set(0));
 
-        let error = analyze(
+        analyze(
             SourceFile {
                 path: Path::new("callbacks.js"),
                 text: &before,
@@ -1105,10 +1336,12 @@ mod tests {
                 text: &after,
             },
         )
-        .expect_err("same-line anonymous siblings are ambiguous");
-        assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+        .expect("identical ordered sub-line spans prove anonymous sibling correspondence");
 
-        OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
+        (
+            OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get),
+            OWNER_EXACT_SPAN_COMPARISONS.with(Cell::get),
+        )
     }
 
     fn deeply_nested_anonymous_callbacks(depth: usize, version: usize) -> String {
@@ -1122,6 +1355,38 @@ mod tests {
             source.push_str("})();\n");
         }
         source
+    }
+
+    fn nested_same_line_owners(depth: usize, version: usize) -> String {
+        let mut nested = "value()".to_owned();
+        for index in 0..depth {
+            nested = format!("use_two(|| {{ {nested}; }}, || {{ stable_{index}(); }})");
+        }
+        format!("const VERSION: usize = {version};\nfn work() {{ {nested}; }}\n")
+    }
+
+    fn nested_same_line_owner_proof_work(depth: usize) -> (usize, usize) {
+        let before = nested_same_line_owners(depth, 1);
+        let after = nested_same_line_owners(depth, 2);
+        OWNER_EXACT_COMPARISON_WORK.with(|work| work.set(0));
+        OWNER_PHYSICAL_LINE_WORK.with(|work| work.set(0));
+
+        analyze(
+            SourceFile {
+                path: Path::new("src/lib.rs"),
+                text: &before,
+            },
+            SourceFile {
+                path: Path::new("src/lib.rs"),
+                text: &after,
+            },
+        )
+        .expect("the exact nested owner line proves every sibling correspondence");
+
+        (
+            OWNER_EXACT_COMPARISON_WORK.with(Cell::get),
+            OWNER_PHYSICAL_LINE_WORK.with(Cell::get),
+        )
     }
 
     fn nested_anonymous_owner_anchor_evaluations(depth: usize) -> usize {
@@ -1210,6 +1475,89 @@ mod tests {
     }
 
     #[test]
+    fn owner_line_anchors_store_two_coordinates_and_one_content_length() {
+        assert_eq!(
+            std::mem::size_of::<OwnerLineAnchor>(),
+            5 * std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn exact_same_line_owner_proof_rejects_incomplete_evidence() {
+        const SOURCE: &str = "(() => { stable0(); })();(() => { stable1(); })();\n";
+        let before = languages::parse_file(Path::new("callbacks.js"), SOURCE)
+            .expect("the proof fixture is valid JavaScript");
+        let after = before.clone();
+        let evidence = OwnerEvidence::Multiple(vec![1, 2]);
+        let one_owner = OwnerEvidence::Unique(1);
+        let line = LineCoordinate {
+            index: 0,
+            start_byte: 0,
+        };
+        let anchor = OwnerLineAnchor {
+            before: line,
+            after: line,
+            content_len: line_content(SOURCE).len(),
+        };
+
+        let mut shifted_after = after.clone();
+        shifted_after.owners[2].span.start_byte += 1;
+        let mut overlapping_before = before.clone();
+        let mut overlapping_after = after.clone();
+        let overlap_end = overlapping_before.owners[2].span.start_byte + 1;
+        overlapping_before.owners[1].span.end_byte = overlap_end;
+        overlapping_after.owners[1].span.end_byte = overlap_end;
+        let mut two_changed_after = after.clone();
+        two_changed_after.owners[1].code.clear();
+        two_changed_after.owners[2].code.clear();
+
+        let rejected = [
+            exact_same_line_owner_pairs(&before, &after, anchor, &evidence, &one_owner),
+            exact_same_line_owner_pairs(&before, &shifted_after, anchor, &evidence, &evidence),
+            exact_same_line_owner_pairs(&before, &two_changed_after, anchor, &evidence, &evidence),
+            exact_same_line_owner_pairs(
+                &overlapping_before,
+                &overlapping_after,
+                anchor,
+                &evidence,
+                &evidence,
+            ),
+        ];
+
+        assert!(
+            rejected.iter().all(Option::is_none),
+            "cardinality, range, direct-code, and overlap mismatches are not correspondence proof"
+        );
+    }
+
+    #[test]
+    fn exact_owner_pair_deduplication_rejects_conflicting_proofs() {
+        let mut repeated = ProvenOwnerPairs::default();
+        repeated
+            .extend([(1, 2), (1, 2)])
+            .expect("the same proof may arise at both boundaries of one owner");
+        assert_eq!(repeated.into_pairs(), [(1, 2)]);
+
+        let mut conflicting_after = ProvenOwnerPairs::default();
+        conflicting_after
+            .extend([(1, 2)])
+            .expect("the initial proof is valid");
+        let after_error = conflicting_after
+            .extend([(1, 3)])
+            .expect_err("one old owner cannot map to two new owners");
+        assert!(matches!(after_error, AnalysisError::AmbiguousChange(_)));
+
+        let mut conflicting_before = ProvenOwnerPairs::default();
+        conflicting_before
+            .extend([(1, 2)])
+            .expect("the initial proof is valid");
+        let before_error = conflicting_before
+            .extend([(3, 2)])
+            .expect_err("two old owners cannot map to one new owner");
+        assert!(matches!(before_error, AnalysisError::AmbiguousChange(_)));
+    }
+
+    #[test]
     fn deep_stable_owner_pairing_visits_each_owner_once_per_snapshot() {
         for depth in [25, 50, 100, 200] {
             let visits = owner_frontier_visits(depth);
@@ -1223,9 +1571,27 @@ mod tests {
     }
 
     #[test]
-    fn same_line_anonymous_owner_anchor_candidates_are_evaluated_linearly() {
+    fn same_line_anonymous_owner_pairing_is_linear() {
         for count in [64, 128, 256] {
-            assert_eq!(owner_anchor_candidate_evaluations(count), 2 * count);
+            assert_eq!(same_line_owner_pairing_work(count), (2 * count, count));
+        }
+    }
+
+    #[test]
+    fn nested_same_line_owner_proof_work_is_linear() {
+        let work = [32, 64, 128, 256].map(nested_same_line_owner_proof_work);
+
+        assert!(work[0].0 > 0, "the test must observe exact-content work");
+        assert!(work[0].1 > 0, "the test must observe physical-line work");
+        for pair in work.windows(2) {
+            assert!(
+                pair[1].0 <= 2 * pair[0].0 + 64,
+                "exact-content work grew superlinearly: {work:?}"
+            );
+            assert!(
+                pair[1].1 <= 2 * pair[0].1 + 64,
+                "physical-line work grew superlinearly: {work:?}"
+            );
         }
     }
 
