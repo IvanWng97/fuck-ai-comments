@@ -395,6 +395,68 @@ fn attestation_profile_ignores_all_default_ignorable_comment_edits() {
 }
 
 #[test]
+fn default_ignorables_cannot_hide_before_block_comment_decoration() {
+    let cases = [
+        (
+            "src/lib.rs",
+            concat!(
+                "/*\n",
+                " * Coupled to the upstream window. */\n",
+                "const RETRY_LIMIT: usize = 3;\n",
+            ),
+            concat!(
+                "/*\n",
+                " \u{200b}* Coupled to the upstream window. */\n",
+                "const RETRY_LIMIT: usize = 4;\n",
+            ),
+        ),
+        (
+            "worker.js",
+            concat!(
+                "function retry() {\n",
+                "    /*\n",
+                "     * Coupled to the upstream window.\n",
+                "     */\n",
+                "    return 3;\n",
+                "}\n",
+            ),
+            concat!(
+                "function retry() {\n",
+                "    /*\n",
+                "     \u{e0100}* Coupled to the upstream window.\n",
+                "     */\n",
+                "    return 4;\n",
+                "}\n",
+            ),
+        ),
+    ];
+
+    for profile in [AnalysisProfile::Full, AnalysisProfile::Attestation] {
+        for (path, before, after) in cases {
+            let findings = analyze_change_with_profile(
+                SourceFile {
+                    path: Path::new(path),
+                    text: before,
+                },
+                SourceFile {
+                    path: Path::new(path),
+                    text: after,
+                },
+                profile,
+            )
+            .expect("valid block-comment change");
+
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == "comment-policy/comment-owner-changed"),
+                "default-ignorables cannot hide before block decoration under {profile:?}: {findings:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn punctuation_only_comment_edit_does_not_change_the_owner_fingerprint() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),

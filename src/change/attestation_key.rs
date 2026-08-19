@@ -12,22 +12,34 @@ impl AttestationKey {
         let default_ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
         let mut key = String::with_capacity(body.len());
 
-        for token in body
-            .lines()
-            .map(|line| line.trim().strip_prefix('*').unwrap_or(line.trim()).trim())
-            .flat_map(str::split_whitespace)
-        {
-            let mut starts_token = true;
-            for character in token
+        let mut pending_space = false;
+        for line in body.lines() {
+            let mut characters = line
                 .chars()
                 .filter(|character| !default_ignorable.contains(*character))
-            {
-                if starts_token && !key.is_empty() {
-                    key.push(' ');
+                .peekable();
+            while characters
+                .next_if(|character| character.is_whitespace())
+                .is_some()
+            {}
+            characters.next_if_eq(&'*');
+            while characters
+                .next_if(|character| character.is_whitespace())
+                .is_some()
+            {}
+
+            for character in characters {
+                if character.is_whitespace() {
+                    pending_space = !key.is_empty();
+                } else {
+                    if pending_space {
+                        key.push(' ');
+                        pending_space = false;
+                    }
+                    key.push(character);
                 }
-                starts_token = false;
-                key.push(character);
             }
+            pending_space = !key.is_empty();
         }
 
         let meaningful_end = key
