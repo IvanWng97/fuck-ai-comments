@@ -151,9 +151,9 @@ workflows must likewise pass an explicit before/after range for drift checks,
 or deliberately use `mode: all` when the job exists only to establish a new
 baseline.
 
-The first stable `0.x` release creates `@v0`; subsequent stable `0.x` releases
-advance it to the released commit. Consumers do not need an exact Action commit
-SHA.
+The first stable `0.x` release creates `@v0` after packaged-Action E2E succeeds;
+subsequent stable `0.x` releases advance it under the same gate. Consumers do
+not need an exact Action commit SHA.
 
 ## Install
 
@@ -164,10 +164,29 @@ repository:
 cargo install --git https://github.com/IvanWng97/fuck-ai-comments --locked
 ```
 
-Tagged releases provide native archives for x86-64 Linux, x86-64 Windows,
+Releases are manual workflow dispatches from `main`; the workflow creates the
+tag only after authorization, artifact builds, and hosting succeed:
+
+```console
+gh workflow run release.yml --ref main -f tag=v0.1.0
+```
+
+Before the first dispatch, protect `main` and activate a repository tag ruleset
+for all tag refs (`~ALL`) that restricts creation, update, and deletion. The
+only bypass actor is the GitHub Actions App ID `15368`. This broad scope is
+required because historical cargo-dist workflows accepted several noncanonical
+version-tag shapes; the current workflow authorizes only
+`v<package-version>`. It also requires that the dispatched commit is the current
+`main` HEAD and has a successful `ci.yml` push run for that exact SHA. A
+`tag=dry-run` dispatch may build and test without repository write permission.
+
+Published releases provide native archives for x86-64 Linux, x86-64 Windows,
 x86-64 macOS, and Apple Silicon macOS. Each release includes `sha256.sum`, a
 dist manifest, and GitHub build attestations. Every native archive carries the
 project `LICENSE`, `README.md`, and generated `THIRD_PARTY_LICENSES` notices.
+The packaged Action must then pass on Linux, macOS, and Windows before a stable
+`0.x` release advances `v0`; prereleases run the same checks without changing
+the compatibility tag.
 
 On macOS or Linux, download and verify the native archives:
 
@@ -232,13 +251,15 @@ The release-workflow commands require cargo-dist 0.32.0's `dist` executable on
 install it with `npm run rust-licenses:install`, and regenerate the committed
 notice with `npm run rust-licenses:generate` after dependency changes.
 
-The Rust MSRV is 1.88.0. The Action is bundled. `release.yml` is generated from
-the dist configuration, then hardened by `npm run release:generate`;
-`release:check` regenerates it in a temporary copy so cargo-dist template drift
-remains a hard failure. The pinned cargo-dist template cannot use the approved
-checkout major, scope its built-in permissions, or disable secret inheritance
-for custom jobs, so its `allow-dirty = ["ci"]` escape hatch is intentional. The
-tested transform changes only those three constraints.
+The Rust MSRV is 1.88.0. The Action is bundled.
+
+The release pipeline is cargo-dist 0.32.0 output plus one tested hardening layer
+covering safe tag arguments, pre-build authorization and DAG gates,
+released-Action E2E ordering, full Action commit pins, least permissions, and no
+inherited secrets. Run `npm run release:generate` to apply that layer;
+`release:check` regenerates the workflow in a temporary copy so cargo-dist
+template drift remains a hard failure. The pinned template cannot express all
+of these constraints, so its `allow-dirty = ["ci"]` escape hatch is intentional.
 
 ### Performance and coverage
 

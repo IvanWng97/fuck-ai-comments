@@ -5,6 +5,7 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
+dispatch-releases = true
 # release.yml applies tested hardening transforms that cargo-dist cannot express.
 allow-dirty = ["ci"]
 # CI backends to support
@@ -19,5 +20,7 @@ checksum = "sha256"
 github-attestations = true
 pr-run-mode = "plan"
 github-build-setup = "../build-setup.yml"
-post-announce-jobs = ["./update-major-tag"]
-github-custom-job-permissions = { "update-major-tag" = { contents = "write" } }
+github-action-commits = { "actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6 # v4", "actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1 # v7", "actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8", "actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7" }
+global-artifacts-jobs = ["./authorize-release"]
+post-announce-jobs = ["./action-e2e", "./update-major-tag"]
+github-custom-job-permissions = { "action-e2e" = { contents = "read" }, "authorize-release" = { actions = "read", contents = "read" }, "update-major-tag" = { contents = "write" } }

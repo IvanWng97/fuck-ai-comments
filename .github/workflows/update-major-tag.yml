@@ -41,12 +41,19 @@ jobs:
 
           major_tag="v${major}"
           ref="refs/tags/v${major}"
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${major_tag}" >/dev/null 2>&1; then
+          if current_commit=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${major_tag}" \
+            --jq .object.sha 2>/dev/null)
+          then
+            if [[ $current_commit == "$RELEASE_COMMIT" ]]; then
+              echo "${major_tag} already points to ${RELEASE_COMMIT}"
+              exit 0
+            fi
             gh api \
               --method PATCH \
               "repos/${GITHUB_REPOSITORY}/git/refs/tags/${major_tag}" \
               -f sha="$RELEASE_COMMIT" \
-              -F force=true \
+              -F force=false \
               >/dev/null
           else
             gh api \

@@ -135,6 +135,7 @@ test("rejects release archive traversal on either path syntax", () => {
 
 test("requires an exact version and never constructs a latest URL", () => {
   assert.equal(exactVersion("v0.1.0"), "0.1.0");
+  assert.equal(exactVersion("v0.1.0-rc.1"), "0.1.0-rc.1");
   assert.throws(() => exactVersion("latest"), /exact SemVer/u);
   assert.throws(() => exactVersion("^0.1.0"), /exact SemVer/u);
   assert.equal(
