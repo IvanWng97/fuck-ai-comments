@@ -636,6 +636,50 @@ fn rust_crate_root_inner_docs_are_exempt() {
 }
 
 #[test]
+fn rust_workspace_crate_root_inner_docs_are_exempt() {
+    let source = concat!(
+        "//! detail one\n",
+        "//! detail two\n",
+        "//! detail three\n",
+        "//! detail four\n",
+        "//! detail five\n",
+        "//! detail six\n",
+        "pub fn work() {}\n",
+    );
+
+    let findings =
+        analyze(Path::new("crates/pkg/src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a conventional workspace crate root exposes its inner docs: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_nested_lib_inner_docs_are_narrative() {
+    let source = concat!(
+        "//! detail one\n",
+        "//! detail two\n",
+        "//! detail three\n",
+        "//! detail four\n",
+        "//! detail five\n",
+        "//! detail six\n",
+        "pub fn work() {}\n",
+    );
+
+    let findings =
+        analyze(Path::new("src/private/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "a nested lib.rs cannot prove crate-root reachability: {findings:#?}"
+    );
+}
+
+#[test]
 fn rust_arbitrary_file_inner_docs_are_narrative() {
     let source = concat!(
         "//! detail one\n",
@@ -650,7 +694,7 @@ fn rust_arbitrary_file_inner_docs_are_narrative() {
         "pub fn work() {}\n",
     );
 
-    let findings = analyze(Path::new("src/internal.rs"), source).expect("valid Rust should parse");
+    let findings = analyze(Path::new("src/custom.rs"), source).expect("valid Rust should parse");
 
     assert!(
         findings
