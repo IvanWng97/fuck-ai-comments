@@ -163,12 +163,10 @@ impl OwnerChangeIndex {
                 let parent_path_changed = old_owner.parent.is_some_and(|parent| {
                     before.owners[parent].kind == OwnerKind::Type && identity_path_changed[parent]
                 });
-                let type_parent_changed = old_owner.parent.is_some_and(|parent| {
-                    before.owners[parent].kind == OwnerKind::Type
-                        && new_owner.parent != expected_after_parent
-                });
+                let structural_parent_changed =
+                    old_owner.parent.is_some() && new_owner.parent != expected_after_parent;
                 identity_path_changed[before_index] = parent_path_changed
-                    || type_parent_changed
+                    || structural_parent_changed
                     || old_owner.kind != new_owner.kind
                     || identities.before[before_index].id != identities.after[after_index].id;
             }
@@ -203,30 +201,12 @@ fn pair_owners(
     let before_children = owners_by_parent(before);
     let after_children = owners_by_parent(after);
     let mut frontier = VecDeque::from([(0, 0)]);
+    let mut cross_parent_phase_complete = false;
 
-    while let Some((before_parent, after_parent)) = frontier.pop_front() {
-        let before_siblings = &before_children[before_parent];
-        let after_siblings = &after_children[after_parent];
-        let stable = unique_stable_owner_pairs(
-            before,
-            after,
-            before_siblings,
-            after_siblings,
-            &pairs,
-            identities,
-        );
-        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
-
-        let evidence = connected_owner_scores(
-            before,
-            after,
-            before_siblings,
-            after_siblings,
-            anchors,
-            &pairs,
-        )?;
-        if !evidence.exact_pairs.is_empty() {
-            enqueue_owner_pairs(evidence.exact_pairs, &mut pairs, &mut frontier)?;
+    loop {
+        while let Some((before_parent, after_parent)) = frontier.pop_front() {
+            let before_siblings = &before_children[before_parent];
+            let after_siblings = &after_children[after_parent];
             let stable = unique_stable_owner_pairs(
                 before,
                 after,
@@ -236,30 +216,57 @@ fn pair_owners(
                 identities,
             );
             enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
-        }
 
-        let anchored = anchored_owner_pairs(&evidence.scores, &pairs)?;
-        if anchored.is_empty() {
-            continue;
-        }
-        enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
+            let evidence = connected_owner_scores(
+                before,
+                after,
+                before_siblings,
+                after_siblings,
+                anchors,
+                &pairs,
+            )?;
+            if !evidence.exact_pairs.is_empty() {
+                enqueue_owner_pairs(evidence.exact_pairs, &mut pairs, &mut frontier)?;
+                let stable = unique_stable_owner_pairs(
+                    before,
+                    after,
+                    before_siblings,
+                    after_siblings,
+                    &pairs,
+                    identities,
+                );
+                enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+            }
 
-        let stable = unique_stable_owner_pairs(
-            before,
-            after,
-            before_siblings,
-            after_siblings,
-            &pairs,
-            identities,
-        );
-        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+            let anchored = anchored_owner_pairs(&evidence.scores, &pairs)?;
+            if anchored.is_empty() {
+                continue;
+            }
+            enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
 
-        // A second anchor wave would make correspondence depend on the first wave's guesses.
-        if !anchored_owner_pairs(&evidence.scores, &pairs)?.is_empty() {
-            return Err(AnalysisError::AmbiguousChange(
-                "owner correspondence requires iterative anchor preference peeling".to_owned(),
-            ));
+            let stable = unique_stable_owner_pairs(
+                before,
+                after,
+                before_siblings,
+                after_siblings,
+                &pairs,
+                identities,
+            );
+            enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+
+            // A second anchor wave would make correspondence depend on the first wave's guesses.
+            if !anchored_owner_pairs(&evidence.scores, &pairs)?.is_empty() {
+                return Err(AnalysisError::AmbiguousChange(
+                    "owner correspondence requires iterative anchor preference peeling".to_owned(),
+                ));
+            }
         }
+        if cross_parent_phase_complete {
+            break;
+        }
+        cross_parent_phase_complete = true;
+        let moved = unique_exact_cross_parent_owner_pairs(before, after, &pairs, identities);
+        enqueue_owner_pairs(moved, &mut pairs, &mut frontier)?;
     }
     Ok(pairs)
 }
@@ -305,13 +312,13 @@ fn unique_stable_owner_pairs(
 ) -> Vec<(usize, usize)> {
     let before_by_key = stable_owners_by_key(
         before,
-        before_children,
+        before_children.iter().copied(),
         &pairs.before_to_after,
         &identities.before,
     );
     let after_by_key = stable_owners_by_key(
         after,
-        after_children,
+        after_children.iter().copied(),
         &pairs.after_to_before,
         &identities.after,
     );
@@ -324,16 +331,50 @@ fn unique_stable_owner_pairs(
         .collect()
 }
 
+fn unique_exact_cross_parent_owner_pairs(
+    before: &ParsedFile,
+    after: &ParsedFile,
+    pairs: &Pairing,
+    identities: &CanonicalOwnerIdentities,
+) -> Vec<(usize, usize)> {
+    let before_by_key = stable_owners_by_key(
+        before,
+        (1..before.owners.len()).filter(|index| pairs.before_to_after[*index].is_none()),
+        &pairs.before_to_after,
+        &identities.before,
+    );
+    let after_by_key = stable_owners_by_key(
+        after,
+        (1..after.owners.len()).filter(|index| pairs.after_to_before[*index].is_none()),
+        &pairs.after_to_before,
+        &identities.after,
+    );
+
+    before_by_key
+        .into_iter()
+        .filter_map(|(key, before_index)| {
+            before_index
+                .zip(after_by_key.get(&key).copied().flatten())
+                .filter(|(before_index, after_index)| {
+                    direct_owner_code_is_exact(
+                        &before.owners[*before_index],
+                        &after.owners[*after_index],
+                    )
+                })
+        })
+        .collect()
+}
+
 type StableOwnerKey = (OwnerKind, CanonicalIdentityId);
 
 fn stable_owners_by_key(
     document: &ParsedFile,
-    children: &[usize],
+    indexes: impl IntoIterator<Item = usize>,
     paired: &[Option<usize>],
     identities: &[CanonicalIdentity],
 ) -> BTreeMap<StableOwnerKey, Option<usize>> {
     let mut groups = BTreeMap::new();
-    for &index in children {
+    for index in indexes {
         #[cfg(test)]
         OWNER_FRONTIER_VISITS.with(|visits| visits.set(visits.get() + 1));
         let owner = &document.owners[index];

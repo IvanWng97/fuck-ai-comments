@@ -719,6 +719,134 @@ fn owner_rename_with_an_exact_code_anchor_stales_its_comment() {
 }
 
 #[test]
+fn exact_leaf_code_moved_across_parent_stales_its_comment() {
+    let before = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "fn daylight_floor_overlay() {\n",
+            "    // Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "    const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "// Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "\n",
+            "fn daylight_floor_overlay() {\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("unique stable identity and exact leaf code prove the cross-parent move");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 1
+        }),
+        "moving exact owner code across parents requires attestation: {findings:#?}"
+    );
+}
+
+#[test]
+fn sun_tint_doc_promotion_stales_after_exact_cross_parent_move() {
+    let before = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "fn daylight_floor_overlay() {\n",
+            "    // Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "    const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "/// Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "\n",
+            "fn daylight_floor_overlay() {\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("the SUN_TINT move is exact");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 1
+        }),
+        "promoting the moved comment to public docs still requires attestation: {findings:#?}"
+    );
+}
+
+#[test]
+fn stable_leaf_identity_without_exact_code_does_not_prove_cross_parent_move() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn old_parent() {\n",
+            "    // Coupled to the exact constant value.\n",
+            "    const LIMIT: usize = 1;\n",
+            "    consume(LIMIT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "// Coupled to the exact constant value.\n",
+            "const LIMIT: usize = 2;\n",
+            "fn old_parent() { consume(LIMIT); }\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("stable identity alone cannot prove a rewritten cross-parent owner");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
+fn duplicate_leaf_identity_does_not_prove_cross_parent_move() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn dawn() {\n",
+            "    // Coupled to the sunlight constant.\n",
+            "    const SUN_TINT: usize = 1;\n",
+            "    consume(SUN_TINT);\n",
+            "}\n",
+            "fn noon() {\n",
+            "    const SUN_TINT: usize = 1;\n",
+            "    consume(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "// Coupled to the sunlight constant.\n",
+            "const SUN_TINT: usize = 1;\n",
+            "fn dawn() { consume(SUN_TINT); }\n",
+            "fn noon() { consume(SUN_TINT); }\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("duplicate stable identity cannot identify which old leaf moved");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
 fn javascript_arrow_binding_rename_stales_its_comment() {
     let before = SourceFile {
         path: Path::new("worker.js"),
