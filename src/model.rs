@@ -16,7 +16,10 @@ pub enum AnalysisProfile {
 
 impl AnalysisProfile {
     pub(crate) fn runs_static_policy(self) -> bool {
-        matches!(self, Self::Full)
+        match self {
+            Self::Full => true,
+            Self::Attestation => false,
+        }
     }
 }
 

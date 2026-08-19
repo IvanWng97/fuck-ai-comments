@@ -70,9 +70,9 @@ pub fn analyze_change(
 ///
 /// # Errors
 ///
-/// Returns an error when either snapshot cannot be parsed, the snapshots use
-/// different language adapters, or ownership cannot be paired without
-/// guessing.
+/// Returns an error when either snapshot cannot be parsed or ownership cannot
+/// be paired without guessing. [`AnalysisProfile::Attestation`] also returns
+/// an error when the snapshots use different language adapters.
 pub fn analyze_change_with_profile(
     before: SourceFile<'_>,
     after: SourceFile<'_>,
