@@ -2,9 +2,28 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use fuck_ai_comments::{
-    AnalysisError, AnalysisProfile, SourceFile, analyze_all, analyze_all_with_profile,
+    AnalysisError, AnalysisProfile, Finding, SourceFile, analyze_all, analyze_all_with_profile,
     analyze_change, analyze_change_with_profile, supports_path,
 };
+
+const MAX_SOURCE_BYTES: usize = 16 * 1_024 * 1_024;
+
+fn newline_dense_rust(value: usize) -> (String, usize) {
+    let tail = format!(
+        "fn operation() {{\n    // Coupled to the operation result.\n    run({value});\n}}\n"
+    );
+    let prefix_lines = MAX_SOURCE_BYTES
+        .checked_sub(tail.len())
+        .expect("the fixed Rust tail must fit within the source limit");
+    let mut source = "\n".repeat(prefix_lines);
+    source.push_str(&tail);
+    assert_eq!(
+        source.len(),
+        MAX_SOURCE_BYTES,
+        "fixture must stay exactly 16 MiB"
+    );
+    (source, prefix_lines + 2)
+}
 
 fn assert_parent_type_rename_stales_nested_comment(
     path: &str,
@@ -227,6 +246,76 @@ fn full_profile_preserves_the_existing_change_entry_point() {
         .expect("valid Rust change");
 
     assert_eq!(profiled, existing);
+}
+
+#[test]
+fn attestation_handles_exactly_sixteen_mib_of_newline_dense_rust() {
+    let (before, comment_line) = newline_dense_rust(1);
+    let (after, after_comment_line) = newline_dense_rust(2);
+    assert_eq!(after_comment_line, comment_line);
+
+    let findings = analyze_change_with_profile(
+        SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &after,
+        },
+        AnalysisProfile::Attestation,
+    )
+    .expect("the maximum supported newline-dense Rust change must remain attestable");
+
+    assert_eq!(
+        findings,
+        [Finding {
+            path: "src/lib.rs".to_owned(),
+            line: comment_line,
+            rule: "comment-policy/comment-owner-changed",
+            message: "function `operation` or this comment's semantic role changed while its meaningful text did not; edit or delete it to attest that it remains true".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn blank_insertion_keeps_the_surviving_duplicate_comment_with_its_code() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn work() {\n",
+            "    // Same rationale.\n",
+            "    first();\n",
+            "    // Same rationale.\n",
+            "    second();\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn work() {\n",
+            "    // Reviewed rationale.\n",
+            "    first();\n",
+            "\n",
+            "    // Same rationale.\n",
+            "    changed_second();\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change_with_profile(before, after, AnalysisProfile::Attestation)
+        .expect("duplicate comments remain pairable across a blank insertion");
+
+    assert_eq!(
+        findings,
+        [Finding {
+            path: "src/lib.rs".to_owned(),
+            line: 5,
+            rule: "comment-policy/comment-owner-changed",
+            message: "function `work` or this comment's semantic role changed while its meaningful text did not; edit or delete it to attest that it remains true".to_owned(),
+        }]
+    );
 }
 
 #[test]
