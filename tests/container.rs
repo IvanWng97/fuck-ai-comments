@@ -934,6 +934,48 @@ fn multiple_embedded_scripts_keep_owner_ids_isolated() {
 }
 
 #[test]
+fn embedded_owner_identities_survive_import_when_functions_reorder() {
+    let before = concat!(
+        "<script>\n",
+        "function alpha() {\n",
+        "  // Coupled to alpha.\n",
+        "  return 1;\n",
+        "}\n",
+        "function beta() {\n",
+        "  // Coupled to beta.\n",
+        "  return 2;\n",
+        "}\n",
+        "</script>\n",
+    );
+    let after = concat!(
+        "<script>\n",
+        "function beta() {\n",
+        "  // Coupled to beta.\n",
+        "  return 2;\n",
+        "}\n",
+        "function alpha() {\n",
+        "  // Coupled to alpha.\n",
+        "  return 1;\n",
+        "}\n",
+        "</script>\n",
+    );
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("index.html"),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new("index.html"),
+            text: after,
+        },
+    )
+    .expect("embedded owner identities should remain stable after import");
+
+    assert!(findings.is_empty(), "pure function reordering is clean");
+}
+
+#[test]
 fn astro_frontmatter_change_uses_relocated_typescript_owner() {
     let before = concat!(
         "---\n",
