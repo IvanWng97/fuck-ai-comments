@@ -204,6 +204,10 @@ impl CodeToken {
         }
     }
 
+    pub(crate) fn is_atom(&self) -> bool {
+        self.event == CodeEvent::Atom
+    }
+
     pub(crate) fn leave(kind: &str) -> Self {
         Self {
             event: CodeEvent::Leave,

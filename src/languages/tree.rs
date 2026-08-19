@@ -773,8 +773,6 @@ struct SyntaxEvent {
     span: Span,
     token: CodeToken,
     owner: Option<TreeOwner>,
-    budget_owner: Option<TreeOwner>,
-    physical_atom: bool,
 }
 
 impl Facts {
@@ -979,6 +977,7 @@ struct FactCollector<'source> {
     comment_choices: Vec<CommentChoice>,
     leaves: Vec<Leaf>,
     leaf_parents: Vec<Option<TreeOwner>>,
+    leaf_budget_owners: Vec<Option<TreeOwner>>,
     syntax: Vec<SyntaxEvent>,
     trailing_direct: HashMap<usize, OwnerSpan>,
     trailing_budget: HashMap<usize, OwnerSpan>,
@@ -1066,6 +1065,8 @@ impl<'source> FactCollector<'source> {
                 OwnerData::Leaf(leaf) => {
                     let owner = TreeOwner::Leaf(self.leaves.len());
                     self.leaves.push(leaf);
+                    self.leaf_budget_owners
+                        .push(self.active_budgets.last().copied());
                     owner
                 }
             };
@@ -1080,15 +1081,11 @@ impl<'source> FactCollector<'source> {
             });
         }
 
-        self.push_syntax(Span::from_node(node), CodeToken::enter(node.kind()), false);
+        self.push_syntax(Span::from_node(node), CodeToken::enter(node.kind()));
         if node.child_count() == 0 {
             let text = node_text(node, self.source);
             if !text.trim().is_empty() {
-                self.push_syntax(
-                    Span::from_node(node),
-                    CodeToken::atom(node.kind(), text),
-                    true,
-                );
+                self.push_syntax(Span::from_node(node), CodeToken::atom(node.kind(), text));
             }
         }
         self.callable_depth += usize::from(is_callable);
@@ -1103,7 +1100,7 @@ impl<'source> FactCollector<'source> {
             return;
         }
 
-        self.push_syntax(Span::from_node(node), CodeToken::leave(node.kind()), false);
+        self.push_syntax(Span::from_node(node), CodeToken::leave(node.kind()));
         if self
             .owner_nodes
             .last()
@@ -1236,6 +1233,7 @@ impl<'source> FactCollector<'source> {
         assign_budget_code_lines(
             self.source,
             &self.syntax,
+            &self.leaf_budget_owners,
             &mut self.functions,
             &mut self.types,
         );
@@ -1365,9 +1363,6 @@ impl<'source> FactCollector<'source> {
             }
             if span.contains(&event.span) {
                 event.owner = Some(owner);
-                if is_budget_owner(owner) {
-                    event.budget_owner = Some(owner);
-                }
             }
         }
     }
@@ -1393,13 +1388,11 @@ impl<'source> FactCollector<'source> {
         }
     }
 
-    fn push_syntax(&mut self, span: Span, token: CodeToken, physical_atom: bool) {
+    fn push_syntax(&mut self, span: Span, token: CodeToken) {
         self.syntax.push(SyntaxEvent {
             span,
             token,
             owner: self.active.last().copied(),
-            budget_owner: self.active_budgets.last().copied(),
-            physical_atom,
         });
     }
 }
@@ -1604,6 +1597,7 @@ fn materialize_comments(
 fn assign_budget_code_lines(
     source: &str,
     syntax: &[SyntaxEvent],
+    leaf_budget_owners: &[Option<TreeOwner>],
     functions: &mut [Function],
     types: &mut [TypeOwner],
 ) {
@@ -1613,8 +1607,13 @@ fn assign_budget_code_lines(
     let mut type_rows: Vec<MonotonicCodeLineCount> = std::iter::repeat_with(Default::default)
         .take(types.len())
         .collect();
-    for event in syntax.iter().filter(|event| event.physical_atom) {
-        match event.budget_owner {
+    for event in syntax.iter().filter(|event| event.token.is_atom()) {
+        let budget_owner = match event.owner {
+            Some(owner @ (TreeOwner::Function(_) | TreeOwner::Type(_))) => Some(owner),
+            Some(TreeOwner::Leaf(index)) => leaf_budget_owners[index],
+            None => None,
+        };
+        match budget_owner {
             Some(TreeOwner::Function(index)) => {
                 function_rows[index].record_span(&event.span, source.as_bytes());
             }
@@ -1837,6 +1836,16 @@ mod tests {
     use crate::{SourceFile, analyze_all};
 
     use super::*;
+
+    #[test]
+    fn syntax_events_store_only_direct_owner_metadata() {
+        assert_eq!(
+            std::mem::size_of::<SyntaxEvent>(),
+            std::mem::size_of::<Span>()
+                + std::mem::size_of::<CodeToken>()
+                + std::mem::size_of::<Option<TreeOwner>>()
+        );
+    }
 
     fn assert_finish_rejects_unclosed_owner_scope(collector: FactCollector<'_>) {
         assert!(matches!(
