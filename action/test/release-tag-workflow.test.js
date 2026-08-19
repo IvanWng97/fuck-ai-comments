@@ -307,6 +307,7 @@ test("cargo-dist owns the post-release compatibility tag job", async () => {
 
 test("cargo-dist gates the compatibility tag on released Action E2E", async () => {
   const config = parseToml(await readFile("dist-workspace.toml", "utf8"));
+  const readme = await readFile("README.md", "utf8");
   const release = parseYaml(
     await readFile(".github/workflows/release.yml", "utf8"),
   );
@@ -333,10 +334,15 @@ test("cargo-dist gates the compatibility tag on released Action E2E", async () =
   const job = workflow.jobs["action-e2e"];
   assert.deepEqual(job.strategy, {
     "fail-fast": false,
-    matrix: { os: ["macos-15", "ubuntu-24.04", "windows-2025"] },
+    matrix: {
+      os: ["macos-15", "macos-15-intel", "ubuntu-24.04", "windows-2025"],
+    },
   });
   assert.equal(job["runs-on"], "${{ matrix.os }}");
   assert.deepEqual(job.permissions, { contents: "read" });
+  assert.deepEqual(job.env, {
+    E2E_ROOT: "${{ github.workspace }}/fuck-ai-comments-action-e2e",
+  });
 
   const checkout = job.steps[0];
   assert.equal(
@@ -347,15 +353,83 @@ test("cargo-dist gates the compatibility tag on released Action E2E", async () =
     "persist-credentials": false,
     ref: "refs/tags/${{ fromJSON(inputs.plan).announcement_tag }}",
   });
-  assert.deepEqual(job.steps[1], {
-    name: "Run packaged Action",
-    uses: "./",
-    with: {
-      mode: "all",
-      path: ".",
-      version: "${{ fromJSON(inputs.plan).releases[0].app_version }}",
+
+  const fixtures = job.steps[1];
+  assert.equal(fixtures.name, "Prepare policy fixtures");
+  assert.equal(fixtures.id, "fixtures");
+  assert.equal(fixtures.shell, "bash");
+  assert.match(fixtures.run, /git init --quiet "\$E2E_ROOT\/attestation"/u);
+  assert.match(fixtures.run, /base=%s\\n.+GITHUB_OUTPUT/su);
+  assert.doesNotMatch(fixtures.run, /cargo|npm|node|curl|wget|gh release/iu);
+
+  const version = "${{ fromJSON(inputs.plan).releases[0].app_version }}";
+  assert.deepEqual(job.steps.slice(2, 6), [
+    {
+      name: "Accept clean source",
+      id: "clean",
+      uses: "./",
+      with: {
+        version,
+        mode: "all",
+        profile: "full",
+        path: "${{ env.E2E_ROOT }}/clean",
+      },
     },
+    {
+      name: "Reject static violation",
+      id: "static-violation",
+      "continue-on-error": true,
+      uses: "./",
+      with: {
+        version,
+        mode: "all",
+        profile: "full",
+        path: "${{ env.E2E_ROOT }}/static-violation",
+      },
+    },
+    {
+      name: "Reject stale owner change",
+      id: "stale-attestation",
+      "continue-on-error": true,
+      uses: "./",
+      with: {
+        version,
+        mode: "base",
+        profile: "attestation",
+        base: "${{ steps.fixtures.outputs.base }}",
+        path: "${{ env.E2E_ROOT }}/attestation",
+      },
+    },
+    {
+      name: "Reject parse error",
+      id: "parse-error",
+      "continue-on-error": true,
+      uses: "./",
+      with: {
+        version,
+        mode: "all",
+        profile: "full",
+        path: "${{ env.E2E_ROOT }}/parse-error",
+      },
+    },
+  ]);
+  assert.deepEqual(job.steps[6], {
+    name: "Assert packaged Action outcomes",
+    if: "${{ always() }}",
+    shell: "bash",
+    env: {
+      CLEAN_OUTCOME: "${{ steps.clean.outcome }}",
+      STATIC_VIOLATION_OUTCOME: "${{ steps.static-violation.outcome }}",
+      STALE_ATTESTATION_OUTCOME: "${{ steps.stale-attestation.outcome }}",
+      PARSE_ERROR_OUTCOME: "${{ steps.parse-error.outcome }}",
+    },
+    run: 'test "$CLEAN_OUTCOME" = success\ntest "$STATIC_VIOLATION_OUTCOME" = failure\ntest "$STALE_ATTESTATION_OUTCOME" = failure\ntest "$PARSE_ERROR_OUTCOME" = failure\n',
   });
+  assert.equal(job.steps.length, 7);
+  assert.match(
+    readme,
+    /packaged Action must then pass on x86-64 Linux and Windows, plus x86-64\s+and Apple Silicon macOS/u,
+  );
   assert.doesNotMatch(
     source,
     /pull_request|secrets\.|contents:\s*write|gh release|dist host/u,

@@ -205,9 +205,9 @@ Published releases provide native archives for x86-64 Linux, x86-64 Windows,
 x86-64 macOS, and Apple Silicon macOS. Each release includes `sha256.sum`, a
 dist manifest, and GitHub build attestations. Every native archive carries the
 project `LICENSE`, `README.md`, and generated `THIRD_PARTY_LICENSES` notices.
-The packaged Action must then pass on Linux, macOS, and Windows before a stable
-`0.x` release advances `v0`; prereleases run the same checks without changing
-the compatibility tag.
+The packaged Action must then pass on x86-64 Linux and Windows, plus x86-64
+and Apple Silicon macOS, before a stable `0.x` release advances `v0`;
+prereleases run the same checks without changing the compatibility tag.
 
 On macOS or Linux, download and verify the native archives:
 
