@@ -283,6 +283,36 @@ fn unchanged_mixed_code_comment_line_proves_its_owner() {
 }
 
 #[test]
+fn astro_frontmatter_mixed_line_anchor_uses_source_coordinates() {
+    let before_text = concat!(
+        "---\n",
+        "const selected = [\"claude-code\"]\n",
+        "  .filter((id) => id === \"claude-code\"); // only claude-code has installed hooks\n",
+        "---\n",
+        "<!-- Outer template boundary. -->\n",
+        "<main>{selected.length}</main>\n",
+    );
+    let after_text = before_text.replacen("---\n", "---\nconst UNRELATED: number = 1;\n", 1);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: before_text,
+        },
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: &after_text,
+        },
+    )
+    .expect("physical comment spans should preserve the embedded closure anchor");
+
+    assert!(
+        findings.is_empty(),
+        "an unrelated frontmatter insertion cannot make the mixed-line comment stale: {findings:#?}"
+    );
+}
+
+#[test]
 fn punctuation_only_comment_edit_is_not_attestation() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),

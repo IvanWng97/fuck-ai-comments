@@ -1274,21 +1274,33 @@ impl LineAnchors {
     }
 }
 
-struct CommentSpanSweep<'comments> {
-    comments: &'comments [CommentSnapshot],
+struct CommentSpanSweep {
+    coverage: Vec<std::ops::Range<usize>>,
     first_relevant: usize,
     previous_line_start: Option<usize>,
 }
 
-impl<'comments> CommentSpanSweep<'comments> {
-    fn new(comments: &'comments [CommentSnapshot]) -> Self {
-        debug_assert!(
-            comments
-                .windows(2)
-                .all(|pair| pair[0].span.end_byte <= pair[1].span.start_byte)
-        );
+impl CommentSpanSweep {
+    fn new(comments: &[CommentSnapshot]) -> Self {
+        let mut spans: Vec<_> = comments
+            .iter()
+            .map(|comment| comment.span.start_byte..comment.span.end_byte)
+            .collect();
+        spans.sort_unstable_by_key(|span| (span.start, span.end));
+
+        let mut coverage: Vec<std::ops::Range<usize>> = Vec::with_capacity(spans.len());
+        for span in spans {
+            debug_assert!(span.start <= span.end);
+            if let Some(previous) = coverage.last_mut()
+                && span.start <= previous.end
+            {
+                previous.end = previous.end.max(span.end);
+            } else {
+                coverage.push(span);
+            }
+        }
         Self {
-            comments,
+            coverage,
             first_relevant: 0,
             previous_line_start: None,
         }
@@ -1302,21 +1314,21 @@ impl<'comments> CommentSpanSweep<'comments> {
         self.previous_line_start = Some(line_start);
         let line_end = line_start + content.len();
         while self
-            .comments
+            .coverage
             .get(self.first_relevant)
-            .is_some_and(|comment| comment.span.end_byte <= line_start)
+            .is_some_and(|span| span.end <= line_start)
         {
             self.first_relevant += 1;
         }
 
         let mut uncovered_start = 0;
-        for comment in &self.comments[self.first_relevant..] {
-            if comment.span.start_byte >= line_end {
+        for span in &self.coverage[self.first_relevant..] {
+            if span.start >= line_end {
                 break;
             }
             #[cfg(test)]
             OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(visits.get() + 1));
-            let covered_start = comment.span.start_byte.max(line_start) - line_start;
+            let covered_start = span.start.max(line_start) - line_start;
             if uncovered_start < covered_start
                 && content[uncovered_start..covered_start]
                     .chars()
@@ -1324,7 +1336,7 @@ impl<'comments> CommentSpanSweep<'comments> {
             {
                 return true;
             }
-            uncovered_start = uncovered_start.max(comment.span.end_byte.min(line_end) - line_start);
+            uncovered_start = span.end.min(line_end) - line_start;
         }
         content[uncovered_start..]
             .chars()
@@ -1354,6 +1366,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::policy::CommentKind;
 
     fn nested_kotlin(depth: usize, value: usize) -> String {
         let mut source = String::new();
@@ -1705,6 +1718,27 @@ mod tests {
         for count in [64, 128, 256, 512] {
             assert_eq!(mixed_comment_line_anchor_work(count), 2 * count);
         }
+    }
+
+    #[test]
+    fn comment_span_sweep_unions_out_of_order_container_coverage() {
+        let comments =
+            [(4, 8), (0, 6), (13, 17), (9, 15)].map(|(start_byte, end_byte)| CommentSnapshot {
+                kind: CommentKind::Narrative,
+                text: "container comment".to_owned(),
+                span: Span {
+                    start_byte,
+                    end_byte,
+                    start_line: 1,
+                    end_line: 1,
+                },
+                owner: 0,
+            });
+        let mut sweep = CommentSpanSweep::new(&comments);
+        OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(0));
+
+        assert!(!sweep.has_non_comment_alphanumeric(0, "abcdefgh-ijklmnop"));
+        assert_eq!(OWNER_COMMENT_SPAN_VISITS.with(Cell::get), 2);
     }
 
     #[test]
