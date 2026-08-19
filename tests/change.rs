@@ -686,6 +686,77 @@ fn full_owner_replacement_without_an_exact_anchor_fails_closed() {
 }
 
 #[test]
+fn split_owner_without_a_surviving_comment_does_not_block_change() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn router_caches_until_overlay_changes() {\n",
+            "    first_shared();\n",
+            "    // Push an occupancy rect — cache should drop.\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn router_serves_the_cached_path() {\n",
+            "    first_shared();\n",
+            "}\n",
+            "fn an_overlay_evicts_the_crossed_path() {\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("a tied owner split is irrelevant when its comment was deleted");
+
+    assert!(
+        findings.is_empty(),
+        "new comment-free owners have no policy finding: {findings:#?}"
+    );
+}
+
+#[test]
+fn split_owner_with_a_surviving_comment_still_fails_closed() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn original_owner() {\n",
+            "    first_shared();\n",
+            "    // Coupled to the split owner.\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn first_owner() {\n",
+            "    first_shared();\n",
+            "}\n",
+            "fn second_owner() {\n",
+            "    // Coupled to the split owner.\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("surviving comment identity keeps the unresolved split fail-closed");
+
+    assert!(
+        matches!(
+            error,
+            AnalysisError::AmbiguousChange(ref message)
+                if message.contains("comment text \"Coupled to the split owner\"")
+        ),
+        "comment pairing, not owner scoring, must reject the unresolved attestation: {error:#?}"
+    );
+}
+
+#[test]
 fn owner_rename_with_an_exact_code_anchor_stales_its_comment() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),

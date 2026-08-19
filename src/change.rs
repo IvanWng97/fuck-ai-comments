@@ -238,7 +238,7 @@ fn pair_owners(
                 enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
             }
 
-            let anchored = anchored_owner_pairs(&evidence.scores, &pairs)?;
+            let anchored = anchored_owner_pairs(&evidence.scores, &pairs);
             if anchored.is_empty() {
                 continue;
             }
@@ -255,7 +255,7 @@ fn pair_owners(
             enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
 
             // A second anchor wave would make correspondence depend on the first wave's guesses.
-            if !anchored_owner_pairs(&evidence.scores, &pairs)?.is_empty() {
+            if !anchored_owner_pairs(&evidence.scores, &pairs).is_empty() {
                 return Err(AnalysisError::AmbiguousChange(
                     "owner correspondence requires iterative anchor preference peeling".to_owned(),
                 ));
@@ -393,24 +393,19 @@ fn has_stable_identity(identity: CanonicalIdentity) -> bool {
     !identity.contains_placeholder
 }
 
-fn anchored_owner_pairs(
-    scores: &[(usize, usize, usize)],
-    pairs: &Pairing,
-) -> Result<Vec<(usize, usize)>, AnalysisError> {
+fn anchored_owner_pairs(scores: &[(usize, usize, usize)], pairs: &Pairing) -> Vec<(usize, usize)> {
     let remaining = || {
         scores.iter().copied().filter(|&(before, after, _)| {
             pairs.before_to_after[before].is_none() && pairs.after_to_before[after].is_none()
         })
     };
-    let before_choices = owner_choices(remaining(), "old owner")?;
-    let after_choices = owner_choices(
-        remaining().map(|(before, after, score)| (after, before, score)),
-        "new owner",
-    )?;
-    Ok(before_choices
+    let before_choices = owner_choices(remaining());
+    let after_choices =
+        owner_choices(remaining().map(|(before, after, score)| (after, before, score)));
+    before_choices
         .into_iter()
         .filter(|(before_index, after_index)| after_choices.get(after_index) == Some(before_index))
-        .collect())
+        .collect()
 }
 
 fn connected_owner_scores(
@@ -732,8 +727,7 @@ impl OwnerRankSweep {
 
 fn owner_choices(
     candidates: impl Iterator<Item = (usize, usize, usize)>,
-    side: &str,
-) -> Result<BTreeMap<usize, usize>, AnalysisError> {
+) -> BTreeMap<usize, usize> {
     let mut by_owner: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
     for (owner, candidate, score) in candidates {
         by_owner.entry(owner).or_default().push((candidate, score));
@@ -741,18 +735,12 @@ fn owner_choices(
     by_owner
         .into_iter()
         .filter_map(|(owner, candidates)| {
-            unique_best_choice(candidates.into_iter(), owner, side)
-                .transpose()
-                .map(|choice| choice.map(|candidate| (owner, candidate)))
+            unique_best_choice(candidates.into_iter()).map(|candidate| (owner, candidate))
         })
         .collect()
 }
 
-fn unique_best_choice(
-    candidates: impl Iterator<Item = (usize, usize)>,
-    owner_index: usize,
-    side: &str,
-) -> Result<Option<usize>, AnalysisError> {
+fn unique_best_choice(candidates: impl Iterator<Item = (usize, usize)>) -> Option<usize> {
     let mut best: Option<(usize, usize)> = None;
     let mut tied = false;
     for candidate in candidates {
@@ -767,11 +755,9 @@ fn unique_best_choice(
         }
     }
     if tied {
-        return Err(AnalysisError::AmbiguousChange(format!(
-            "{side} {owner_index} has exact anchors in multiple equally plausible owners"
-        )));
+        return None;
     }
-    Ok(best.map(|(index, _)| index))
+    best.map(|(index, _)| index)
 }
 
 fn pair_comments(
