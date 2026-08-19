@@ -498,6 +498,29 @@ fn owner_rename_without_an_exact_anchor_fails_closed() {
 }
 
 #[test]
+fn empty_comment_does_not_pair_across_unproven_owners() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "///\nfn old_name() { run(); }\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "///\nfn new_name() { changed_run(); }\n",
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("empty separators cannot create cross-owner correspondence");
+
+    assert!(
+        findings.iter().all(|finding| {
+            finding.rule != "comment-policy/comment-owner-changed"
+                && finding.rule != "comment-policy/comment-reparented"
+        }),
+        "empty separators carry no identity across unproven owners: {findings:#?}"
+    );
+}
+
+#[test]
 fn full_owner_replacement_without_an_exact_anchor_fails_closed() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
