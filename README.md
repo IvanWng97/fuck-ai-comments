@@ -243,7 +243,8 @@ The implementation deliberately delegates mechanical work:
   exact comment spans;
 - ICU4X supplies the Unicode `Default_Ignorable_Code_Point` property used by
   attestation normalization;
-- `similar` supplies Myers diff anchors;
+- `imara-diff` supplies fixed-Myers line and comment anchors through one
+  interned-input and hunk pipeline;
 - `ignore` supplies repository walking and ignore semantics;
 - Git plumbing supplies revisions, rename records, and blobs;
 - `dist` supplies release planning and native archives; and
@@ -293,8 +294,11 @@ of these constraints, so its `allow-dirty = ["ci"]` escape hatch is intentional.
 
 Run `cargo bench --locked --bench analysis` for local wall-clock baselines. Every
 `static_*_10k_loc` case analyzes exactly 10,000 physical source lines through
-`analyze_all`; the change case compares two 10,000-line snapshots through
-`analyze_change`. The suite covers every adapter family, including separate
+`analyze_all`; every `change_*_10k_loc_per_snapshot` case compares two
+10,000-line snapshots through `analyze_change`. The newline-dense Rust change
+case exercises sparse anchor retention, while the adversarial Rust case
+exercises Myers on reordered unique lines. The suite covers every adapter
+family, including separate
 TypeScript and TSX grammars plus Astro fast and recovery paths. Its elapsed time
 is therefore milliseconds per 10K LOC. CodSpeed runs the same deterministic
 fixtures on pull requests with simulated CPU and heap-allocation measurements.

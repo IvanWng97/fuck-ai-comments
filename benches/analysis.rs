@@ -33,6 +33,7 @@ static ASTRO_FAST_SOURCE: OnceLock<String> = OnceLock::new();
 static ASTRO_RECOVERY_SOURCE: OnceLock<String> = OnceLock::new();
 static TSX_CHANGE: OnceLock<(String, String)> = OnceLock::new();
 static RUST_ADVERSARIAL_CHANGE: OnceLock<(String, String)> = OnceLock::new();
+static RUST_NEWLINE_DENSE_CHANGE: OnceLock<(String, String)> = OnceLock::new();
 
 fn main() {
     divan::main();
@@ -226,6 +227,33 @@ fn change_rust_adversarial_10k_loc_per_snapshot(bencher: Bencher<'_, '_>) {
         });
 }
 
+#[divan::bench]
+fn change_rust_newline_dense_10k_loc_per_snapshot(bencher: Bencher<'_, '_>) {
+    let (before, after) = RUST_NEWLINE_DENSE_CHANGE.get_or_init(|| {
+        (
+            newline_dense_rust_change_source(1),
+            newline_dense_rust_change_source(2),
+        )
+    });
+    assert_source_shape(before);
+    assert_source_shape(after);
+    let path = Path::new("workers.rs");
+    let before_file = SourceFile { path, text: before };
+    let after_file = SourceFile { path, text: after };
+    let findings = analyze_change(before_file, after_file)
+        .expect("newline-dense Rust snapshots must parse before benchmarking");
+    assert_eq!(findings.len(), 1, "the change workload must stay focused");
+    assert_eq!(findings[0].rule, STALE_COMMENT_RULE);
+    assert_eq!(findings[0].line, BENCHMARK_LINES - 2);
+
+    bencher
+        .with_inputs(|| (before_file, after_file))
+        .bench_local_values(|(before_file, after_file)| {
+            analyze_change(before_file, after_file)
+                .expect("newline-dense Rust snapshots must parse")
+        });
+}
+
 fn bench_static(bencher: Bencher<'_, '_>, path: &Path, source: &str) {
     bench_static_with_expected(bencher, path, source, &[]);
 }
@@ -336,6 +364,17 @@ fn adversarial_rust_change_source(reverse: bool) -> String {
         }
     }
     source.push_str("}\n");
+    source
+}
+
+fn newline_dense_rust_change_source(value: usize) -> String {
+    const TAIL_LINES: usize = 4;
+    let mut source = "\n".repeat(BENCHMARK_LINES - TAIL_LINES);
+    writeln!(
+        source,
+        "fn operation() {{\n    // Coupled to the operation result.\n    run({value});\n}}"
+    )
+    .expect("writing to a String cannot fail");
     source
 }
 

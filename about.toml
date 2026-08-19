@@ -1,4 +1,4 @@
-accepted = ["MIT", "Apache-2.0", "Unicode-3.0"]
+accepted = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",

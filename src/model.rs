@@ -149,6 +149,16 @@ pub enum AnalysisError {
     /// Old/new owners or comments could not be paired uniquely.
     #[error("ambiguous change: {0}")]
     AmbiguousChange(String),
+    /// A change snapshot exceeded the diff engine's token capacity.
+    #[error("{snapshot} snapshot has {tokens} diff tokens; supported limit is {maximum} tokens")]
+    DiffCapacity {
+        /// Revision side whose token sequence exceeded the limit.
+        snapshot: &'static str,
+        /// Number of tokens in the rejected snapshot.
+        tokens: usize,
+        /// Largest token sequence accepted by the diff engine.
+        maximum: usize,
+    },
     /// A language adapter violated the normalized ownership contract.
     #[error("invalid analysis model: {0}")]
     Invariant(String),
