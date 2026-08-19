@@ -14,7 +14,13 @@ use crate::policy::{CommentKind, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Rust {
-    crate_root: bool,
+    file_role: RustFileRole,
+}
+
+#[derive(Clone, Copy)]
+enum RustFileRole {
+    ConventionalCrateRoot,
+    ModuleOrUnknown,
 }
 
 #[derive(Default)]
@@ -179,7 +185,11 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
 impl Rust {
     fn for_path(path: &Path) -> Self {
         Self {
-            crate_root: path.file_name().is_some_and(|name| name == "lib.rs"),
+            file_role: if path.ends_with(Path::new("src/lib.rs")) {
+                RustFileRole::ConventionalCrateRoot
+            } else {
+                RustFileRole::ModuleOrUnknown
+            },
         }
     }
 }
@@ -246,7 +256,7 @@ impl LanguageSpec for Rust {
         if !is_comment(node) {
             return None;
         }
-        if is_public_rustdoc(node, source, self.crate_root, context) {
+        if is_public_rustdoc(node, source, self.file_role, context) {
             return Some(CommentKind::PublicDocs);
         }
         if context.safety_proof_comments.contains(&node.id()) {
@@ -298,12 +308,12 @@ fn is_comment(node: Node<'_>) -> bool {
 fn is_public_rustdoc(
     node: Node<'_>,
     source: &str,
-    crate_root: bool,
+    file_role: RustFileRole,
     context: &RustContext,
 ) -> bool {
     let text = node_text(node, source).trim_start();
     if text.starts_with("//!") || text.starts_with("/*!") {
-        return is_public_inner_doc(node, crate_root, context);
+        return is_public_inner_doc(node, file_role, context);
     }
     let outer_doc = (text.starts_with("///") && !text.starts_with("////"))
         || (text.starts_with("/**") && !text.starts_with("/***"));
@@ -313,7 +323,7 @@ fn is_public_rustdoc(
     context.public_outer_docs.contains(&node.id())
 }
 
-fn is_public_inner_doc(node: Node<'_>, crate_root: bool, context: &RustContext) -> bool {
+fn is_public_inner_doc(node: Node<'_>, file_role: RustFileRole, context: &RustContext) -> bool {
     if context.invalid_scope {
         return false;
     }
@@ -321,7 +331,7 @@ fn is_public_inner_doc(node: Node<'_>, crate_root: bool, context: &RustContext) 
         return false;
     };
     if node_context.direct_parent_is_source_file {
-        return crate_root;
+        return matches!(file_role, RustFileRole::ConventionalCrateRoot);
     }
     !node_context.within_callable
         && node_context.has_module_ancestor
