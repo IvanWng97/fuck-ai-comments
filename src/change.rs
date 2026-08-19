@@ -5,6 +5,9 @@ use std::cell::Cell;
 
 use similar::{Algorithm, DiffTag, TextDiff, capture_diff_slices};
 
+use crate::identity::{
+    CanonicalIdentity, CanonicalIdentityId, CanonicalIdentityInterner, CanonicalIdentityMap,
+};
 use crate::languages;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection, SourceFile};
 use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile};
@@ -30,10 +33,12 @@ pub(crate) fn analyze(
     let after_document = languages::parse_file(after.path, after.text)?;
     validate_document(&before_document, before.path.to_string_lossy().as_ref())?;
     validate_document(&after_document, after.path.to_string_lossy().as_ref())?;
+    let identities = CanonicalOwnerIdentities::new(&before_document, &after_document)?;
 
     let anchors = LineAnchors::new(before.text, after.text, &before_document, &after_document);
-    let owners = pair_owners(&before_document, &after_document, &anchors)?;
-    let owner_changes = OwnerChangeIndex::new(&before_document, &after_document, &owners);
+    let owners = pair_owners(&before_document, &after_document, &anchors, &identities)?;
+    let owner_changes =
+        OwnerChangeIndex::new(&before_document, &after_document, &owners, &identities);
     let comments = pair_comments(&before_document, &after_document, &owners, &anchors)?;
     let selection = semantic_selection(
         &before_document,
@@ -115,12 +120,47 @@ impl Pairing {
     }
 }
 
+struct CanonicalOwnerIdentities {
+    before: Vec<CanonicalIdentity>,
+    after: Vec<CanonicalIdentity>,
+}
+
+impl CanonicalOwnerIdentities {
+    fn new(before: &ParsedFile, after: &ParsedFile) -> Result<Self, AnalysisError> {
+        let mut interner = CanonicalIdentityInterner::with_capacity(
+            before.identities.len() + after.identities.len(),
+        );
+        let before_map = interner.canonicalize(&before.identities)?;
+        let after_map = interner.canonicalize(&after.identities)?;
+        Ok(Self {
+            before: resolve_owner_identities(before, &before_map)?,
+            after: resolve_owner_identities(after, &after_map)?,
+        })
+    }
+}
+
+fn resolve_owner_identities(
+    document: &ParsedFile,
+    canonical: &CanonicalIdentityMap,
+) -> Result<Vec<CanonicalIdentity>, AnalysisError> {
+    document
+        .owners
+        .iter()
+        .map(|owner| canonical.resolve(owner.identity))
+        .collect()
+}
+
 struct OwnerChangeIndex {
     identity_path_changed: Vec<bool>,
 }
 
 impl OwnerChangeIndex {
-    fn new(before: &ParsedFile, after: &ParsedFile, pairs: &Pairing) -> Self {
+    fn new(
+        before: &ParsedFile,
+        after: &ParsedFile,
+        pairs: &Pairing,
+        identities: &CanonicalOwnerIdentities,
+    ) -> Self {
         let children = owners_by_parent(before);
         let mut identity_path_changed = vec![true; before.owners.len()];
         let mut frontier = VecDeque::from([0]);
@@ -142,7 +182,7 @@ impl OwnerChangeIndex {
                 identity_path_changed[before_index] = parent_path_changed
                     || type_parent_changed
                     || old_owner.kind != new_owner.kind
-                    || old_owner.identity != new_owner.identity;
+                    || identities.before[before_index].id != identities.after[after_index].id;
             }
             frontier.extend(children[before_index].iter().copied());
         }
@@ -168,6 +208,7 @@ fn pair_owners(
     before: &ParsedFile,
     after: &ParsedFile,
     anchors: &LineAnchors,
+    identities: &CanonicalOwnerIdentities,
 ) -> Result<Pairing, AnalysisError> {
     let mut pairs = Pairing::new(before.owners.len(), after.owners.len());
     pairs.insert(0, 0)?;
@@ -178,8 +219,14 @@ fn pair_owners(
     while let Some((before_parent, after_parent)) = frontier.pop_front() {
         let before_siblings = &before_children[before_parent];
         let after_siblings = &after_children[after_parent];
-        let stable =
-            unique_stable_owner_pairs(before, after, before_siblings, after_siblings, &pairs);
+        let stable = unique_stable_owner_pairs(
+            before,
+            after,
+            before_siblings,
+            after_siblings,
+            &pairs,
+            identities,
+        );
         enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
 
         let scores = connected_owner_scores(
@@ -196,8 +243,14 @@ fn pair_owners(
         }
         enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
 
-        let stable =
-            unique_stable_owner_pairs(before, after, before_siblings, after_siblings, &pairs);
+        let stable = unique_stable_owner_pairs(
+            before,
+            after,
+            before_siblings,
+            after_siblings,
+            &pairs,
+            identities,
+        );
         enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
 
         // A second anchor wave would make correspondence depend on the first wave's guesses.
@@ -247,9 +300,20 @@ fn unique_stable_owner_pairs(
     before_children: &[usize],
     after_children: &[usize],
     pairs: &Pairing,
+    identities: &CanonicalOwnerIdentities,
 ) -> Vec<(usize, usize)> {
-    let before_by_key = stable_owners_by_key(before, before_children, &pairs.before_to_after);
-    let after_by_key = stable_owners_by_key(after, after_children, &pairs.after_to_before);
+    let before_by_key = stable_owners_by_key(
+        before,
+        before_children,
+        &pairs.before_to_after,
+        &identities.before,
+    );
+    let after_by_key = stable_owners_by_key(
+        after,
+        after_children,
+        &pairs.after_to_before,
+        &identities.after,
+    );
 
     before_by_key
         .into_iter()
@@ -259,21 +323,23 @@ fn unique_stable_owner_pairs(
         .collect()
 }
 
-type StableOwnerKey<'identity> = (OwnerKind, &'identity [String]);
+type StableOwnerKey = (OwnerKind, CanonicalIdentityId);
 
-fn stable_owners_by_key<'document>(
-    document: &'document ParsedFile,
+fn stable_owners_by_key(
+    document: &ParsedFile,
     children: &[usize],
     paired: &[Option<usize>],
-) -> BTreeMap<StableOwnerKey<'document>, Option<usize>> {
+    identities: &[CanonicalIdentity],
+) -> BTreeMap<StableOwnerKey, Option<usize>> {
     let mut groups = BTreeMap::new();
     for &index in children {
         #[cfg(test)]
         OWNER_FRONTIER_VISITS.with(|visits| visits.set(visits.get() + 1));
         let owner = &document.owners[index];
-        if paired[index].is_none() && has_stable_identity(owner) {
+        let identity = identities[index];
+        if paired[index].is_none() && has_stable_identity(identity) {
             groups
-                .entry((owner.kind, owner.identity.as_slice()))
+                .entry((owner.kind, identity.id))
                 .and_modify(|unique| *unique = None)
                 .or_insert(Some(index));
         }
@@ -281,12 +347,8 @@ fn stable_owners_by_key<'document>(
     groups
 }
 
-fn has_stable_identity(owner: &OwnerSnapshot) -> bool {
-    owner.identity.iter().all(|segment| {
-        ["<anonymous>", "<destructured>", "<unknown>"]
-            .iter()
-            .all(|placeholder| !segment.contains(placeholder))
-    })
+fn has_stable_identity(identity: CanonicalIdentity) -> bool {
+    !identity.contains_placeholder
 }
 
 fn anchored_owner_pairs(

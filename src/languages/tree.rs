@@ -3,10 +3,11 @@ use std::path::Path;
 
 use tree_sitter::{Language, Node, Parser, Tree};
 
+use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{
-    CodeToken, Comment, CommentKind, Function, Leaf, ParsedFile, Span, TreeInput, TreeOwner,
-    TreeOwnership, TypeOwner, tree_document, tree_findings,
+    CodeToken, Comment, CommentKind, Function, IdentitySource, Leaf, ParsedFile, Span, TreeInput,
+    TreeOwner, TreeOwnership, TypeOwner, tree_document, tree_findings,
 };
 
 use super::walk::{WalkEvent, events};
@@ -632,7 +633,23 @@ impl OwnerCandidate {
             data: OwnerData::Function(Function {
                 span,
                 name,
-                identity,
+                identity: IdentitySource::segments(identity),
+            }),
+            suppressed_nodes: Vec::new(),
+            callable_frontier_roots: Vec::new(),
+        }
+    }
+
+    pub(crate) fn function_with_identity_parent(
+        span: Span,
+        name: String,
+        parent: Option<IdentityId>,
+    ) -> Self {
+        Self {
+            data: OwnerData::Function(Function {
+                span,
+                identity: IdentitySource::child(parent, name.clone()),
+                name,
             }),
             suppressed_nodes: Vec::new(),
             callable_frontier_roots: Vec::new(),
@@ -644,7 +661,7 @@ impl OwnerCandidate {
             data: OwnerData::Type(TypeOwner {
                 span,
                 name,
-                identity,
+                identity: IdentitySource::segments(identity),
             }),
             suppressed_nodes: Vec::new(),
             callable_frontier_roots: Vec::new(),
@@ -673,6 +690,7 @@ impl OwnerCandidate {
 }
 
 struct Facts {
+    identities: IdentityArena,
     functions: Vec<Function>,
     types: Vec<TypeOwner>,
     comments: Vec<Comment>,
@@ -704,8 +722,11 @@ pub(crate) trait LanguageSpec: Copy {
 
     fn label(self) -> &'static str;
     fn grammar(self) -> Language;
-    fn build_context(self, _root: Node<'_>, _source: &str) -> Self::Context {
-        Self::Context::default()
+    fn build_context(self, _root: Node<'_>, _source: &str) -> Result<Self::Context, AnalysisError> {
+        Ok(Self::Context::default())
+    }
+    fn into_identity_arena(self, _context: Self::Context) -> IdentityArena {
+        IdentityArena::default()
     }
     fn is_owner_prefix(self, _kind: &str) -> bool {
         false
@@ -718,9 +739,10 @@ pub(crate) trait LanguageSpec: Copy {
         node: Node<'_>,
         location: OwnerLocation<'_>,
         source: &str,
+        context: &Self::Context,
         function_depth: usize,
         callable_subtrees: &CallableSubtrees,
-    ) -> Option<OwnerCandidate>;
+    ) -> Result<Option<OwnerCandidate>, AnalysisError>;
     fn classify_comment(
         self,
         node: Node<'_>,
@@ -751,6 +773,7 @@ pub(crate) fn document<S: LanguageSpec>(
     spec: S,
 ) -> Result<ParsedFile, AnalysisError> {
     let Facts {
+        identities,
         functions,
         types,
         comments,
@@ -759,7 +782,7 @@ pub(crate) fn document<S: LanguageSpec>(
         ownership,
     } = parse_facts(path, source, spec)?;
     let code = assign_code(syntax, functions.len(), types.len(), leaves.len());
-    Ok(tree_document(
+    tree_document(
         source,
         TreeInput {
             functions: &functions,
@@ -769,7 +792,8 @@ pub(crate) fn document<S: LanguageSpec>(
             ownership: &ownership,
         },
         code,
-    ))
+        identities,
+    )
 }
 
 fn parse_facts<S: LanguageSpec>(
@@ -779,7 +803,7 @@ fn parse_facts<S: LanguageSpec>(
 ) -> Result<Facts, AnalysisError> {
     let tree = parse(path, source, spec.label(), spec.grammar())?;
     let callable_subtrees = CallableSubtrees::from_root(tree.root_node(), spec.callable_kind());
-    let context = spec.build_context(tree.root_node(), source);
+    let context = spec.build_context(tree.root_node(), source)?;
     let mut collector = FactCollector::new(source);
     let mut traversal = Vec::new();
     for event in events(tree.root_node()) {
@@ -793,7 +817,7 @@ fn parse_facts<S: LanguageSpec>(
                 if let Some(frame) = traversal.last_mut() {
                     frame.record_child(node, source, spec);
                 }
-                collector.enter(node, location, spec, &context, &callable_subtrees);
+                collector.enter(node, location, spec, &context, &callable_subtrees)?;
                 traversal.push(TraversalFrame::new(node));
             }
             WalkEvent::Leave(node) => {
@@ -803,7 +827,9 @@ fn parse_facts<S: LanguageSpec>(
             }
         }
     }
-    collector.finish()
+    let mut facts = collector.finish()?;
+    facts.identities = spec.into_identity_arena(context);
+    Ok(facts)
 }
 
 struct TraversalFrame<'tree> {
@@ -917,9 +943,9 @@ impl<'source> FactCollector<'source> {
         spec: S,
         context: &S::Context,
         callable_subtrees: &CallableSubtrees,
-    ) {
+    ) -> Result<(), AnalysisError> {
         if self.comment_node.is_some() {
-            return;
+            return Ok(());
         }
         self.open_callable_frontiers(node);
         if let Some(kind) = spec.classify_comment(node, self.source, context) {
@@ -929,7 +955,7 @@ impl<'source> FactCollector<'source> {
                 text: node_text(node, self.source).to_owned(),
             });
             self.comment_node = Some(node.id());
-            return;
+            return Ok(());
         }
 
         let is_callable = callable_subtrees.is_callable(node);
@@ -937,18 +963,19 @@ impl<'source> FactCollector<'source> {
             record_callable_candidate_check();
         }
         let callable_is_suppressed = is_callable && self.callable_frontier_is_active();
-        let candidate = (!self.suppressed_owner_nodes.contains(&node.id())
-            && !callable_is_suppressed)
-            .then(|| {
+        let candidate =
+            if !self.suppressed_owner_nodes.contains(&node.id()) && !callable_is_suppressed {
                 spec.owner(
                     node,
                     location,
                     self.source,
+                    context,
                     self.active_function_depth,
                     callable_subtrees,
-                )
-            })
-            .flatten();
+                )?
+            } else {
+                None
+            };
         if let Some(candidate) = candidate {
             let OwnerCandidate {
                 data,
@@ -992,6 +1019,7 @@ impl<'source> FactCollector<'source> {
             }
         }
         self.callable_depth += usize::from(is_callable);
+        Ok(())
     }
 
     fn leave(&mut self, node: Node<'_>, callable_subtrees: &CallableSubtrees) {
@@ -1014,12 +1042,14 @@ impl<'source> FactCollector<'source> {
                 self.suppressed_owner_nodes.remove(&suppressed);
             }
             let popped = self.active.pop();
-            debug_assert_eq!(popped, Some(owner));
+            self.record_closed_owner("owner", popped, owner);
             if is_budget_owner(owner) {
-                debug_assert_eq!(self.active_budgets.pop(), Some(owner));
+                let popped = self.active_budgets.pop();
+                self.record_closed_owner("budget owner", popped, owner);
             }
             if matches!(owner, TreeOwner::Type(_)) {
-                debug_assert_eq!(self.active_types.pop(), Some(owner));
+                let popped = self.active_types.pop();
+                self.record_closed_owner("type owner", popped, owner);
             }
             self.record_trailing(owner);
             self.active_function_depth -= usize::from(matches!(owner, TreeOwner::Function(_)));
@@ -1033,6 +1063,18 @@ impl<'source> FactCollector<'source> {
             }
         }
         self.close_callable_frontiers(node);
+    }
+
+    fn record_closed_owner(
+        &mut self,
+        stack: &'static str,
+        actual: Option<TreeOwner>,
+        expected: TreeOwner,
+    ) {
+        debug_assert_eq!(actual, Some(expected));
+        if actual != Some(expected) {
+            self.invariant_error = Some(format!("{stack} scopes closed out of order"));
+        }
     }
 
     fn register_callable_frontiers(&mut self, owner_node_id: usize, roots: Vec<usize>) {
@@ -1096,6 +1138,14 @@ impl<'source> FactCollector<'source> {
         {
             self.invariant_error = Some("callable frontier scopes did not close".to_owned());
         }
+        if !self.owner_nodes.is_empty()
+            || !self.active.is_empty()
+            || !self.active_budgets.is_empty()
+            || !self.active_types.is_empty()
+        {
+            self.invariant_error
+                .get_or_insert_with(|| "tree owner scopes did not close".to_owned());
+        }
         if let Some(detail) = self.invariant_error {
             return Err(AnalysisError::Invariant(detail));
         }
@@ -1118,6 +1168,7 @@ impl<'source> FactCollector<'source> {
         };
         materialize_comments(&self.comments, &choices, &mut ownership);
         Ok(Facts {
+            identities: IdentityArena::default(),
             functions: self.functions,
             types: self.types,
             comments: self.comments,
@@ -1594,10 +1645,6 @@ pub(crate) fn owner_parent_probes() -> usize {
     OWNER_PARENT_PROBES.with(std::cell::Cell::get)
 }
 
-pub(crate) fn ancestors(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
-    std::iter::successors(node.parent(), |ancestor| ancestor.parent())
-}
-
 pub(crate) fn direct_named_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
@@ -1661,6 +1708,49 @@ pub(crate) fn node_text<'source>(node: Node<'_>, source: &'source str) -> &'sour
 mod tests {
     use super::*;
 
+    fn assert_finish_rejects_unclosed_owner_scope(collector: FactCollector<'_>) {
+        assert!(matches!(
+            collector.finish(),
+            Err(AnalysisError::Invariant(_))
+        ));
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_owner_node() {
+        let mut collector = FactCollector::new("");
+        collector.owner_nodes.push(OwnerFrame {
+            node_id: 0,
+            owner: TreeOwner::Leaf(0),
+            suppressed_nodes: Vec::new(),
+        });
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_active_owner() {
+        let mut collector = FactCollector::new("");
+        collector.active.push(TreeOwner::Leaf(0));
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_budget_owner() {
+        let mut collector = FactCollector::new("");
+        collector.active_budgets.push(TreeOwner::Function(0));
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
+
+    #[test]
+    fn finish_rejects_an_unclosed_type_owner() {
+        let mut collector = FactCollector::new("");
+        collector.active_types.push(TreeOwner::Type(0));
+
+        assert_finish_rejects_unclosed_owner_scope(collector);
+    }
+
     #[test]
     fn deep_same_start_owners_share_one_long_leading_chain() {
         const COUNT: usize = 4_096;
@@ -1689,7 +1779,7 @@ mod tests {
                     end_line: COUNT + 1,
                 },
                 name: format!("f{index}"),
-                identity: vec![format!("f{index}")],
+                identity: IdentitySource::segments(vec![format!("f{index}")]),
             })
             .collect();
 

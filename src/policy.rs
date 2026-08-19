@@ -3,7 +3,8 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use crate::model::{Finding, OwnerKind, Selection};
+use crate::identity::{IdentityArena, IdentityId};
+use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 
 const FUNCTION_COMMENT_ABSOLUTE_MAX: usize = 8;
 const FUNCTION_CODE_LINES_PER_COMMENT: usize = 4;
@@ -59,14 +60,40 @@ impl Span {
 pub(crate) struct Function {
     pub(crate) span: Span,
     pub(crate) name: String,
-    pub(crate) identity: Vec<String>,
+    pub(crate) identity: IdentitySource,
 }
 
 #[derive(Debug)]
 pub(crate) struct TypeOwner {
     pub(crate) span: Span,
     pub(crate) name: String,
-    pub(crate) identity: Vec<String>,
+    pub(crate) identity: IdentitySource,
+}
+
+#[derive(Debug)]
+pub(crate) enum IdentitySource {
+    Segments(Vec<String>),
+    Child {
+        parent: Option<IdentityId>,
+        segment: String,
+    },
+}
+
+impl IdentitySource {
+    pub(crate) fn segments(segments: Vec<String>) -> Self {
+        Self::Segments(segments)
+    }
+
+    pub(crate) fn child(parent: Option<IdentityId>, segment: String) -> Self {
+        Self::Child { parent, segment }
+    }
+
+    fn insert(&self, arena: &mut IdentityArena) -> Result<IdentityId, AnalysisError> {
+        match self {
+            Self::Segments(segments) => arena.push_path(segments.iter().map(String::as_str)),
+            Self::Child { parent, segment } => arena.push(*parent, segment.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -165,7 +192,7 @@ impl CodeToken {
 pub(crate) struct OwnerSnapshot {
     pub(crate) kind: OwnerKind,
     pub(crate) name: String,
-    pub(crate) identity: Vec<String>,
+    pub(crate) identity: IdentityId,
     pub(crate) span: Span,
     pub(crate) parent: Option<usize>,
     pub(crate) code: Vec<CodeToken>,
@@ -181,6 +208,7 @@ pub(crate) struct CommentSnapshot {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedFile {
+    pub(crate) identities: IdentityArena,
     pub(crate) owners: Vec<OwnerSnapshot>,
     pub(crate) comments: Vec<CommentSnapshot>,
 }
@@ -189,7 +217,8 @@ pub(crate) fn tree_document(
     source: &str,
     input: TreeInput<'_>,
     code: Vec<Vec<CodeToken>>,
-) -> ParsedFile {
+    mut identities: IdentityArena,
+) -> Result<ParsedFile, AnalysisError> {
     let file_span = Span {
         start_byte: 0,
         end_byte: source.len(),
@@ -198,19 +227,20 @@ pub(crate) fn tree_document(
     };
     let mut owners =
         Vec::with_capacity(1 + input.functions.len() + input.types.len() + input.leaves.len());
+    let file_identity = identities.push_path(["file"])?;
     owners.push(OwnerSnapshot {
         kind: OwnerKind::File,
         name: "<file>".to_owned(),
-        identity: vec!["file".to_owned()],
+        identity: file_identity,
         span: file_span,
         parent: None,
         code: code.first().cloned().unwrap_or_default(),
     });
-    owners.extend(input.functions.iter().enumerate().map(|(index, function)| {
-        OwnerSnapshot {
+    for (index, function) in input.functions.iter().enumerate() {
+        owners.push(OwnerSnapshot {
             kind: OwnerKind::Function,
             name: function.name.clone(),
-            identity: function.identity.clone(),
+            identity: function.identity.insert(&mut identities)?,
             span: function.span.clone(),
             parent: input.ownership.function_parents[index]
                 .map(|parent| {
@@ -218,14 +248,14 @@ pub(crate) fn tree_document(
                 })
                 .or(Some(0)),
             code: code.get(index + 1).cloned().unwrap_or_default(),
-        }
-    }));
+        });
+    }
     let type_offset = 1 + input.functions.len();
-    owners.extend(input.types.iter().enumerate().map(|(index, type_owner)| {
-        OwnerSnapshot {
+    for (index, type_owner) in input.types.iter().enumerate() {
+        owners.push(OwnerSnapshot {
             kind: OwnerKind::Type,
             name: type_owner.name.clone(),
-            identity: type_owner.identity.clone(),
+            identity: type_owner.identity.insert(&mut identities)?,
             span: type_owner.span.clone(),
             parent: input.ownership.type_parents[index]
                 .map(|parent| {
@@ -233,14 +263,14 @@ pub(crate) fn tree_document(
                 })
                 .or(Some(0)),
             code: code.get(type_offset + index).cloned().unwrap_or_default(),
-        }
-    }));
+        });
+    }
     let leaf_offset = type_offset + input.types.len();
-    owners.extend(input.leaves.iter().enumerate().map(|(index, leaf)| {
-        OwnerSnapshot {
+    for (index, leaf) in input.leaves.iter().enumerate() {
+        owners.push(OwnerSnapshot {
             kind: OwnerKind::Leaf,
             name: leaf.name.clone(),
-            identity: vec![leaf.name.clone()],
+            identity: identities.push_path([leaf.name.as_str()])?,
             span: leaf.span.clone(),
             parent: input.ownership.leaf_parents[index]
                 .map(|parent| {
@@ -248,8 +278,8 @@ pub(crate) fn tree_document(
                 })
                 .or(Some(0)),
             code: code.get(leaf_offset + index).cloned().unwrap_or_default(),
-        }
-    }));
+        });
+    }
     let comments = input
         .comments
         .iter()
@@ -263,7 +293,11 @@ pub(crate) fn tree_document(
             }),
         })
         .collect();
-    ParsedFile { owners, comments }
+    Ok(ParsedFile {
+        identities,
+        owners,
+        comments,
+    })
 }
 
 fn owner_snapshot_index(owner: TreeOwner, function_count: usize, type_count: usize) -> usize {

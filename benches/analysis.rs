@@ -32,6 +32,7 @@ static TOML_SOURCE: OnceLock<String> = OnceLock::new();
 static ASTRO_FAST_SOURCE: OnceLock<String> = OnceLock::new();
 static ASTRO_RECOVERY_SOURCE: OnceLock<String> = OnceLock::new();
 static TSX_CHANGE: OnceLock<(String, String)> = OnceLock::new();
+static RUST_ADVERSARIAL_CHANGE: OnceLock<(String, String)> = OnceLock::new();
 
 fn main() {
     divan::main();
@@ -199,6 +200,32 @@ fn change_tsx_10k_loc_per_snapshot(bencher: Bencher<'_, '_>) {
         });
 }
 
+#[divan::bench]
+fn change_rust_adversarial_10k_loc_per_snapshot(bencher: Bencher<'_, '_>) {
+    let (before, after) = RUST_ADVERSARIAL_CHANGE.get_or_init(|| {
+        (
+            adversarial_rust_change_source(false),
+            adversarial_rust_change_source(true),
+        )
+    });
+    assert_source_shape(before);
+    assert_source_shape(after);
+    let path = Path::new("workers.rs");
+    let before_file = SourceFile { path, text: before };
+    let after_file = SourceFile { path, text: after };
+    let findings = analyze_change(before_file, after_file)
+        .expect("adversarial Rust snapshots must parse before benchmarking");
+    assert_eq!(findings.len(), 1, "the change workload must stay focused");
+    assert_eq!(findings[0].rule, STALE_COMMENT_RULE);
+    assert_eq!(findings[0].line, 2);
+
+    bencher
+        .with_inputs(|| (before_file, after_file))
+        .bench_local_values(|(before_file, after_file)| {
+            analyze_change(before_file, after_file).expect("adversarial Rust snapshots must parse")
+        });
+}
+
 fn bench_static(bencher: Bencher<'_, '_>, path: &Path, source: &str) {
     bench_static_with_expected(bencher, path, source, &[]);
 }
@@ -291,6 +318,25 @@ fn typescript_source(changed: Option<usize>) -> String {
             "export function Card{owner:05}() {{\n  // Coupled to this component's rendered value.\n  const value = {value};\n  return <span>{{value}}</span>;\n}}"
         )
     })
+}
+
+fn adversarial_rust_change_source(reverse: bool) -> String {
+    let statement_count = BENCHMARK_LINES - 3;
+    let mut source = String::with_capacity(statement_count * 32);
+    source.push_str("fn work() {\n    // Coupled to the execution order.\n");
+    if reverse {
+        for statement in (0..statement_count).rev() {
+            writeln!(source, "    step_{statement:05}();")
+                .expect("writing to a String cannot fail");
+        }
+    } else {
+        for statement in 0..statement_count {
+            writeln!(source, "    step_{statement:05}();")
+                .expect("writing to a String cannot fail");
+        }
+    }
+    source.push_str("}\n");
+    source
 }
 
 fn kotlin_source() -> String {

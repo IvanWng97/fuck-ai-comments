@@ -323,6 +323,45 @@ fn rust_public_method_docs_on_a_reachable_type_are_exempt() {
 }
 
 #[test]
+fn rust_public_function_docs_after_a_closed_private_impl_are_exempt() {
+    let source = concat!(
+        "struct Hidden;\n",
+        "impl Hidden {}\n",
+        "/// detail one\n",
+        "/// detail two\n",
+        "/// detail three\n",
+        "/// detail four\n",
+        "pub fn visible() {}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a closed private impl cannot affect a later public item: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_public_function_docs_after_a_closed_private_type_are_exempt() {
+    let source = concat!(
+        "struct Hidden { value: usize }\n",
+        "/// detail one\n",
+        "/// detail two\n",
+        "/// detail three\n",
+        "/// detail four\n",
+        "pub fn visible() {}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "a closed private type cannot affect a later public item: {findings:#?}"
+    );
+}
+
+#[test]
 fn rust_public_field_docs_on_a_private_type_are_narrative() {
     let source = concat!(
         "struct Hidden {\n",
@@ -1290,6 +1329,92 @@ fn python_module_docstring_consumes_file_budget() {
             .iter()
             .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
         "module docstrings cannot bypass the file comment budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_module_docstring_after_a_leading_comment_consumes_file_budget() {
+    let source = concat!(
+        "# Module metadata.\n",
+        "\"\"\"First module implementation detail.\n",
+        "Second module implementation detail.\n",
+        "Third module implementation detail.\n",
+        "Fourth module implementation detail.\"\"\"\n",
+        "VALUE = 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "a leading comment is not a statement and cannot hide a module docstring: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_module_docstring_after_a_line_continuation_extra_consumes_file_budget() {
+    let source = concat!(
+        "\\\n",
+        "\"\"\"First module implementation detail.\n",
+        "Second module implementation detail.\n",
+        "Third module implementation detail.\n",
+        "Fourth module implementation detail.\"\"\"\n",
+        "VALUE = 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+        "a syntax extra is not a statement and cannot hide a module docstring: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_function_docstring_after_a_leading_comment_consumes_function_budget() {
+    let source = concat!(
+        "def work():\n",
+        "    # Function metadata.\n",
+        "    \"\"\"First function implementation detail.\n",
+        "    Second function implementation detail.\n",
+        "    Third function implementation detail.\n",
+        "    Fourth function implementation detail.\"\"\"\n",
+        "    return 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "a leading comment is not a statement and cannot hide a function docstring: {findings:#?}"
+    );
+}
+
+#[test]
+fn python_class_docstring_after_a_leading_comment_consumes_type_budget() {
+    let source = concat!(
+        "class Worker:\n",
+        "    # Class metadata.\n",
+        "    \"\"\"First class implementation detail.\n",
+        "    Second class implementation detail.\n",
+        "    Third class implementation detail.\n",
+        "    Fourth class implementation detail.\"\"\"\n",
+        "    value = 1\n",
+    );
+
+    let findings = analyze(Path::new("worker.py"), source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "a leading comment is not a statement and cannot hide a class docstring: {findings:#?}"
     );
 }
 
