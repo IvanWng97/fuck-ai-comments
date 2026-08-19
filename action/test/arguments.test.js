@@ -83,6 +83,16 @@ test("constructs each explicit mode as an argv array", () => {
 test("passes profile validation to the Rust CLI", () => {
   assert.deepEqual(
     buildCheckArguments({
+      mode: "all",
+      profile: "attestation",
+      path: ".",
+      base: "",
+      head: "",
+    }),
+    ["check", "--all", "--profile", "attestation", "--", "."],
+  );
+  assert.deepEqual(
+    buildCheckArguments({
       mode: "worktree",
       profile: "future-profile",
       path: ".",
