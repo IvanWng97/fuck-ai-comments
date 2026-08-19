@@ -294,6 +294,10 @@ test("CodSpeed runs the 10K-LOC analysis benchmarks", async () => {
     {
       name: "Run benchmarks",
       uses: pinnedAction("CodSpeedHQ/action"),
+      env: {
+        DEBIAN_FRONTEND: "noninteractive",
+        NEEDRESTART_SUSPEND: "1",
+      },
       with: {
         mode: "simulation,memory",
         run: "cargo codspeed run --bench analysis",
