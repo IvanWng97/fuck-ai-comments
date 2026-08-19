@@ -246,6 +246,10 @@ fn strip_ascii_case_prefix<'text>(text: &'text str, prefix: &str) -> Option<&'te
     text.get(prefix.len()..)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "directive placement walks only its physical-line syntax chain"
+)]
 fn is_statement_trailing(node: Node<'_>, source: &str) -> bool {
     let line_start = source[..node.start_byte()]
         .rfind('\n')
@@ -295,6 +299,10 @@ fn controls_line_directive(kind: &str) -> bool {
         )
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "standalone placement inspects exactly one syntax parent"
+)]
 fn is_standalone_format_marker(node: Node<'_>, source: &str) -> bool {
     if !starts_physical_line(node, source) {
         return false;
@@ -318,6 +326,10 @@ enum DocstringScope {
     File,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "docstring ownership inspects at most statement, block, and declaration"
+)]
 fn docstring_scope(node: Node<'_>, source: &str) -> Option<DocstringScope> {
     if !is_static_string_expression(node, source) {
         return None;

@@ -1,5 +1,3 @@
-#![deny(clippy::disallowed_methods)]
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
