@@ -8,8 +8,9 @@ comment. It enforces objective properties that make low-value comments harder
 to add and stale comments harder to keep:
 
 - comments have small budgets relative to the code they own;
-- every surviving comment must be re-attested when its owner changes; and
-- moving an unchanged comment to a different owner is a failure.
+- every surviving comment with meaningful normalized text must be re-attested
+  when its owner changes; and
+- moving that unchanged text to a different owner is a failure.
 
 Every finding is an error. There are no advisory rules and no inline disable
 comments.
@@ -25,8 +26,8 @@ comments.
 | File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                              |
 | Template budget                  | HTML, CSS, and Astro template owners get at most 3 narrative lines                                                                                |
 | Absolute owner cap               | Non-public comments, including directives and safety proofs, cannot exceed 8 lines on function/type/file owners or 3 on leaf/template/TOML owners |
-| Stale comment                    | An unchanged comment fails when its owning code or semantic role changes                                                                          |
-| Reparented comment               | An unchanged comment fails when it moves to another owner                                                                                         |
+| Stale comment                    | Unchanged meaningful normalized text fails when its owning code or semantic role changes                                                          |
+| Reparented comment               | Unchanged meaningful normalized text fails when it moves to another owner                                                                         |
 
 Function and type `code_lines` count physical rows assigned to that budget.
 Nested functions and types use their own budgets, while leaf code stays in its
@@ -35,8 +36,12 @@ nearest function or type budget. File `code_lines` remain whole-file.
 Rust public API docs do not consume a length budget. Structurally valid safety
 proofs and tool directives do not consume the relative narrative budget, but
 they do count toward the absolute owner cap. All three remain subject to drift
-checks. Python function and class docstrings consume their owner budget; module
-docstrings consume the file budget.
+checks when they have meaningful normalized text. Python function and class
+docstrings consume their owner budget; module docstrings consume the file budget.
+
+Normalized-empty separators retain their existing static classification and
+budget treatment, but have no cross-revision identity and therefore cannot
+become stale or reparented.
 
 ## Supported languages
 

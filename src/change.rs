@@ -765,26 +765,39 @@ fn pair_comments(
         let Some(new_indexes) = after_by_owner.get(&key) else {
             continue;
         };
-        for (old_index, new_index) in align_comment_group(
-            &old_indexes,
-            new_indexes,
-            &before.comments,
-            &after.comments,
-            anchors,
-        )? {
+        let local_pairs = if key.1.is_some() {
+            align_comment_group(
+                &old_indexes,
+                new_indexes,
+                &before.comments,
+                &after.comments,
+                anchors,
+            )?
+        } else {
+            old_indexes
+                .iter()
+                .copied()
+                .zip(new_indexes.iter().copied())
+                .collect()
+        };
+        for (old_index, new_index) in local_pairs {
             pairs.insert(old_index, new_index)?;
         }
     }
 
     let old_leftovers = group_comments(&before.comments, |index, comment| {
-        pairs.before_to_after[index]
-            .is_none()
-            .then(|| attestation_key(&comment.text))
+        if pairs.before_to_after[index].is_none() {
+            attestation_key(&comment.text)
+        } else {
+            None
+        }
     });
     let new_leftovers = group_comments(&after.comments, |index, comment| {
-        pairs.after_to_before[index]
-            .is_none()
-            .then(|| attestation_key(&comment.text))
+        if pairs.after_to_before[index].is_none() {
+            attestation_key(&comment.text)
+        } else {
+            None
+        }
     });
     for (key, old_indexes) in old_leftovers {
         let Some(new_indexes) = new_leftovers.get(&key) else {
@@ -839,7 +852,7 @@ fn group_comments<K: Ord>(
     groups
 }
 
-fn attestation_key(comment: &str) -> String {
+fn attestation_key(comment: &str) -> Option<String> {
     let body = strip_comment_delimiters(comment.trim());
     let collapsed = body
         .lines()
@@ -848,10 +861,11 @@ fn attestation_key(comment: &str) -> String {
         .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ");
-    collapsed
+    let key = collapsed
         .trim_end_matches(['.', '!', '?', '。', '！', '？'])
         .trim_end()
-        .to_owned()
+        .to_owned();
+    (!key.is_empty()).then_some(key)
 }
 
 fn strip_comment_delimiters(comment: &str) -> &str {
@@ -1095,6 +1109,9 @@ fn change_findings(
         };
         let old_comment = &before.comments[before_comment_index];
         let new_comment = &after.comments[*after_comment_index];
+        if attestation_key(&old_comment.text).is_none() {
+            continue;
+        }
         let paired_owner = owners.before_to_after[old_comment.owner];
         if paired_owner != Some(new_comment.owner) {
             findings.push(Finding {
