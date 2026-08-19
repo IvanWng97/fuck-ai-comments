@@ -28,6 +28,10 @@ comments.
 | Stale comment                    | An unchanged comment fails when its owning code or semantic role changes                                                                          |
 | Reparented comment               | An unchanged comment fails when it moves to another owner                                                                                         |
 
+Function and type `code_lines` count physical rows assigned to that budget.
+Nested functions and types use their own budgets, while leaf code stays in its
+nearest function or type budget. File `code_lines` remain whole-file.
+
 Rust public API docs do not consume a length budget. Structurally valid safety
 proofs and tool directives do not consume the relative narrative budget, but
 they do count toward the absolute owner cap. All three remain subject to drift

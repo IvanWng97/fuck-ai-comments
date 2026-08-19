@@ -79,6 +79,31 @@ thread_local! {
     static CALLABLE_SUBTREE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CALLABLE_CANDIDATE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CALLABLE_FRONTIER_REGISTRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COMMENT_LINE_INDEX_CAPACITY: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COMMENT_LINE_INDEX_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_comment_line_index(capacity: usize, entries: usize) {
+    COMMENT_LINE_INDEX_CAPACITY.with(|total| total.set(total.get() + capacity));
+    COMMENT_LINE_INDEX_ENTRIES.with(|total| total.set(total.get() + entries));
+}
+
+#[cfg(not(test))]
+fn record_comment_line_index(_capacity: usize, _entries: usize) {}
+
+#[cfg(test)]
+fn reset_comment_line_index_counts() {
+    COMMENT_LINE_INDEX_CAPACITY.with(|total| total.set(0));
+    COMMENT_LINE_INDEX_ENTRIES.with(|total| total.set(0));
+}
+
+#[cfg(test)]
+fn comment_line_index_counts() -> (usize, usize) {
+    (
+        COMMENT_LINE_INDEX_CAPACITY.with(std::cell::Cell::get),
+        COMMENT_LINE_INDEX_ENTRIES.with(std::cell::Cell::get),
+    )
 }
 
 #[cfg(test)]
@@ -440,26 +465,13 @@ impl PhysicalCodeRows {
     }
 
     fn record_leaf(&mut self, node: Node<'_>, source: &[u8]) {
-        let Some(bytes) = source.get(node.start_byte()..node.end_byte()) else {
-            debug_assert!(false, "tree-sitter leaf range must fit the source");
-            return;
-        };
-        let mut row = node.start_position().row;
-        let mut row_has_code = false;
-        for byte in bytes {
-            if *byte == b'\n' {
-                if row_has_code {
-                    self.record_row(row);
-                }
-                row = row.saturating_add(1);
-                row_has_code = false;
-            } else if !byte.is_ascii_whitespace() {
-                row_has_code = true;
-            }
-        }
-        if row_has_code {
-            self.record_row(row);
-        }
+        for_each_physical_code_row(
+            node.start_byte(),
+            node.end_byte(),
+            node.start_position().row,
+            source,
+            |row| self.record_row(row),
+        );
     }
 
     fn record_row(&mut self, row: usize) {
@@ -470,6 +482,61 @@ impl PhysicalCodeRows {
     fn contains(&self, row: usize) -> bool {
         record_physical_attachment_operations(1);
         self.rows.contains(&row)
+    }
+}
+
+fn for_each_physical_code_row(
+    start: usize,
+    end: usize,
+    start_row: usize,
+    source: &[u8],
+    mut record: impl FnMut(usize),
+) {
+    let Some(bytes) = source.get(start..end) else {
+        debug_assert!(false, "tree-sitter leaf range must fit the source");
+        return;
+    };
+    let mut row = start_row;
+    let mut row_has_code = false;
+    for byte in bytes {
+        if *byte == b'\n' {
+            if row_has_code {
+                record(row);
+            }
+            row = row.saturating_add(1);
+            row_has_code = false;
+        } else if !byte.is_ascii_whitespace() {
+            row_has_code = true;
+        }
+    }
+    if row_has_code {
+        record(row);
+    }
+}
+
+#[derive(Default)]
+struct MonotonicCodeLineCount {
+    last_row: Option<usize>,
+    count: usize,
+}
+
+impl MonotonicCodeLineCount {
+    fn record_span(&mut self, span: &Span, source: &[u8]) {
+        let Some(start_row) = span.start_line.checked_sub(1) else {
+            debug_assert!(false, "policy spans use one-based line numbers");
+            return;
+        };
+        for_each_physical_code_row(span.start_byte, span.end_byte, start_row, source, |row| {
+            self.record_row(row)
+        });
+    }
+
+    fn record_row(&mut self, row: usize) {
+        debug_assert!(self.last_row.is_none_or(|previous| previous <= row));
+        if self.last_row != Some(row) {
+            self.last_row = Some(row);
+            self.count += 1;
+        }
     }
 }
 
@@ -634,6 +701,7 @@ impl OwnerCandidate {
                 span,
                 name,
                 identity: IdentitySource::segments(identity),
+                budget_code_lines: 0,
             }),
             suppressed_nodes: Vec::new(),
             callable_frontier_roots: Vec::new(),
@@ -650,6 +718,7 @@ impl OwnerCandidate {
                 span,
                 identity: IdentitySource::child(parent, name.clone()),
                 name,
+                budget_code_lines: 0,
             }),
             suppressed_nodes: Vec::new(),
             callable_frontier_roots: Vec::new(),
@@ -662,6 +731,7 @@ impl OwnerCandidate {
                 span,
                 name,
                 identity: IdentitySource::segments(identity),
+                budget_code_lines: 0,
             }),
             suppressed_nodes: Vec::new(),
             callable_frontier_roots: Vec::new(),
@@ -907,9 +977,10 @@ struct FactCollector<'source> {
     comment_choices: Vec<CommentChoice>,
     leaves: Vec<Leaf>,
     leaf_parents: Vec<Option<TreeOwner>>,
+    leaf_budget_owners: Vec<Option<TreeOwner>>,
     syntax: Vec<SyntaxEvent>,
-    trailing_direct: Vec<Option<OwnerSpan>>,
-    trailing_budget: Vec<Option<OwnerSpan>>,
+    trailing_direct: HashMap<usize, OwnerSpan>,
+    trailing_budget: HashMap<usize, OwnerSpan>,
     invariant_error: Option<String>,
 }
 
@@ -927,11 +998,8 @@ struct ActiveCallableFrontier {
 
 impl<'source> FactCollector<'source> {
     fn new(source: &'source str) -> Self {
-        let line_slots = source.bytes().filter(|byte| *byte == b'\n').count() + 2;
         Self {
             source,
-            trailing_direct: vec![None; line_slots],
-            trailing_budget: vec![None; line_slots],
             ..Self::default()
         }
     }
@@ -997,6 +1065,8 @@ impl<'source> FactCollector<'source> {
                 OwnerData::Leaf(leaf) => {
                     let owner = TreeOwner::Leaf(self.leaves.len());
                     self.leaves.push(leaf);
+                    self.leaf_budget_owners
+                        .push(self.active_budgets.last().copied());
                     owner
                 }
             };
@@ -1149,12 +1219,23 @@ impl<'source> FactCollector<'source> {
         if let Some(detail) = self.invariant_error {
             return Err(AnalysisError::Invariant(detail));
         }
+        record_comment_line_index(
+            self.trailing_direct.capacity() + self.trailing_budget.capacity(),
+            self.trailing_direct.len() + self.trailing_budget.len(),
+        );
         let mut choices = self.comment_choices;
         assign_leading(
             self.source,
             &self.comments,
             &owner_spans(&self.functions, &self.types, &self.leaves),
             &mut choices,
+        );
+        assign_budget_code_lines(
+            self.source,
+            &self.syntax,
+            &self.leaf_budget_owners,
+            &mut self.functions,
+            &mut self.types,
         );
         let mut ownership = TreeOwnership {
             function_budget: vec![Vec::new(); self.functions.len()],
@@ -1244,20 +1325,10 @@ impl<'source> FactCollector<'source> {
                     .last()
                     .copied()
                     .map(|owner| self.candidate(owner));
-                if let Some(owner) = self
-                    .trailing_direct
-                    .get(comment.span.start_line)
-                    .copied()
-                    .flatten()
-                {
+                if let Some(owner) = self.trailing_direct.get(&comment.span.start_line).copied() {
                     choose(&mut choice.direct, owner);
                 }
-                if let Some(owner) = self
-                    .trailing_budget
-                    .get(comment.span.start_line)
-                    .copied()
-                    .flatten()
-                {
+                if let Some(owner) = self.trailing_budget.get(&comment.span.start_line).copied() {
                     choose(&mut choice.budget, owner);
                 }
             }
@@ -1268,13 +1339,9 @@ impl<'source> FactCollector<'source> {
 
     fn record_trailing(&mut self, owner: TreeOwner) {
         let owner = self.candidate(owner);
-        if let Some(slot) = self.trailing_direct.get_mut(owner.end_line) {
-            choose(slot, owner);
-        }
-        if is_budget_owner(owner.owner)
-            && let Some(slot) = self.trailing_budget.get_mut(owner.end_line)
-        {
-            choose(slot, owner);
+        choose_line_owner(&mut self.trailing_direct, owner.end_line, owner);
+        if is_budget_owner(owner.owner) {
+            choose_line_owner(&mut self.trailing_budget, owner.end_line, owner);
         }
     }
 
@@ -1392,44 +1459,42 @@ fn assign_leading(
     owners: &[OwnerSpan],
     choices: &mut [CommentChoice],
 ) {
-    let line_starts: Vec<_> = std::iter::once(0)
-        .chain(
-            source
-                .bytes()
-                .enumerate()
-                .filter(|(_, byte)| *byte == b'\n')
-                .map(|(index, _)| index + 1),
-        )
-        .collect();
-    let mut comment_by_line = vec![None; line_starts.len() + 1];
+    let mut source_position = SourcePosition::new(source);
+    let mut standalone_by_end_line: Vec<StandaloneCommentEnd> = Vec::with_capacity(comments.len());
     for (index, comment) in comments.iter().enumerate() {
-        let line_start = line_starts[comment.span.start_line - 1];
-        if source.as_bytes()[line_start..comment.span.start_byte]
-            .iter()
-            .all(u8::is_ascii_whitespace)
-        {
-            for line in comment.span.lines() {
-                comment_by_line[line] = Some(index);
+        if source_position.starts_line_at(comment.span.start_byte) {
+            if let Some(previous) = standalone_by_end_line.last_mut()
+                && previous.end_line == comment.span.end_line
+            {
+                previous.comment_index = index;
+            } else {
+                standalone_by_end_line.push(StandaloneCommentEnd {
+                    end_line: comment.span.end_line,
+                    comment_index: index,
+                });
             }
         }
     }
+    record_comment_line_index(
+        standalone_by_end_line.capacity(),
+        standalone_by_end_line.len(),
+    );
 
     let previous: Vec<_> = comments
         .iter()
         .map(|comment| {
-            comment_by_line
-                .get(comment.span.start_line.saturating_sub(1))
-                .copied()
-                .flatten()
+            standalone_comment_ending_on(
+                &standalone_by_end_line,
+                comment.span.start_line.saturating_sub(1),
+            )
         })
         .collect();
     let mut seeds = vec![CommentChoice::default(); comments.len()];
     for owner in owners {
-        let Some(index) = comment_by_line
-            .get(owner.start_line.saturating_sub(1))
-            .copied()
-            .flatten()
-        else {
+        let Some(index) = standalone_comment_ending_on(
+            &standalone_by_end_line,
+            owner.start_line.saturating_sub(1),
+        ) else {
             continue;
         };
         if source
@@ -1448,6 +1513,18 @@ fn assign_leading(
             merge_choice(&mut seeds[previous], seed);
         }
     }
+}
+
+struct StandaloneCommentEnd {
+    end_line: usize,
+    comment_index: usize,
+}
+
+fn standalone_comment_ending_on(comments: &[StandaloneCommentEnd], line: usize) -> Option<usize> {
+    comments
+        .binary_search_by_key(&line, |comment| comment.end_line)
+        .ok()
+        .map(|index| comments[index].comment_index)
 }
 
 fn merge_choice(target: &mut CommentChoice, source: CommentChoice) {
@@ -1470,6 +1547,17 @@ fn choose(best: &mut Option<OwnerSpan>, candidate: OwnerSpan) {
     if best.is_none_or(|current| candidate.key() < current.key()) {
         *best = Some(candidate);
     }
+}
+
+fn choose_line_owner(owners: &mut HashMap<usize, OwnerSpan>, line: usize, candidate: OwnerSpan) {
+    owners
+        .entry(line)
+        .and_modify(|current| {
+            if candidate.key() < current.key() {
+                *current = candidate;
+            }
+        })
+        .or_insert(candidate);
 }
 
 fn is_budget_owner(owner: TreeOwner) -> bool {
@@ -1503,6 +1591,43 @@ fn materialize_comments(
             None => ownership.file.push(comment.clone()),
         }
         ownership.comment_owners.push(direct);
+    }
+}
+
+fn assign_budget_code_lines(
+    source: &str,
+    syntax: &[SyntaxEvent],
+    leaf_budget_owners: &[Option<TreeOwner>],
+    functions: &mut [Function],
+    types: &mut [TypeOwner],
+) {
+    let mut function_rows: Vec<MonotonicCodeLineCount> = std::iter::repeat_with(Default::default)
+        .take(functions.len())
+        .collect();
+    let mut type_rows: Vec<MonotonicCodeLineCount> = std::iter::repeat_with(Default::default)
+        .take(types.len())
+        .collect();
+    for event in syntax.iter().filter(|event| event.token.is_atom()) {
+        let budget_owner = match event.owner {
+            Some(owner @ (TreeOwner::Function(_) | TreeOwner::Type(_))) => Some(owner),
+            Some(TreeOwner::Leaf(index)) => leaf_budget_owners[index],
+            None => None,
+        };
+        match budget_owner {
+            Some(TreeOwner::Function(index)) => {
+                function_rows[index].record_span(&event.span, source.as_bytes());
+            }
+            Some(TreeOwner::Type(index)) => {
+                type_rows[index].record_span(&event.span, source.as_bytes());
+            }
+            Some(TreeOwner::Leaf(_)) | None => {}
+        }
+    }
+    for (function, rows) in functions.iter_mut().zip(function_rows) {
+        function.budget_code_lines = rows.count;
+    }
+    for (type_owner, rows) in types.iter_mut().zip(type_rows) {
+        type_owner.budget_code_lines = rows.count;
     }
 }
 
@@ -1706,7 +1831,21 @@ pub(crate) fn node_text<'source>(node: Node<'_>, source: &'source str) -> &'sour
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use crate::{SourceFile, analyze_all};
+
     use super::*;
+
+    #[test]
+    fn syntax_events_store_only_direct_owner_metadata() {
+        assert_eq!(
+            std::mem::size_of::<SyntaxEvent>(),
+            std::mem::size_of::<Span>()
+                + std::mem::size_of::<CodeToken>()
+                + std::mem::size_of::<Option<TreeOwner>>()
+        );
+    }
 
     fn assert_finish_rejects_unclosed_owner_scope(collector: FactCollector<'_>) {
         assert!(matches!(
@@ -1752,6 +1891,27 @@ mod tests {
     }
 
     #[test]
+    fn newline_dense_source_does_not_allocate_per_line_comment_owner_tables() {
+        let mut source = "\n".repeat(16 * 1_024 * 1_024);
+        source.push_str("fn operation() {}\n");
+        reset_comment_line_index_counts();
+
+        let findings = analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &source,
+        })
+        .expect("newline-dense Rust source must parse");
+
+        assert!(findings.is_empty(), "comment-free source stays clean");
+        let (capacity, entries) = comment_line_index_counts();
+        assert_eq!(entries, 2, "only the function's sparse trailing rows exist");
+        assert!(
+            capacity <= 8,
+            "comment ownership indexes must be bounded by comments and owners; capacity={capacity}"
+        );
+    }
+
+    #[test]
     fn deep_same_start_owners_share_one_long_leading_chain() {
         const COUNT: usize = 4_096;
         const COMMENT: &str = "# Why.\n";
@@ -1780,6 +1940,7 @@ mod tests {
                 },
                 name: format!("f{index}"),
                 identity: IdentitySource::segments(vec![format!("f{index}")]),
+                budget_code_lines: 0,
             })
             .collect();
 
