@@ -15,7 +15,7 @@ mod walk;
 
 use std::path::Path;
 
-use crate::model::{AnalysisError, Finding, Selection};
+use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::ParsedFile;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -80,6 +80,40 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
         Some(Adapter::Astro) => astro::parse_file(path, source),
         None => Err(AnalysisError::Unsupported(path.display().to_string())),
     }
+}
+
+pub(crate) fn parse_validated_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
+    let document = parse_file(path, source)?;
+    let display_path = path.to_string_lossy();
+    let Some(file) = document.owners.first() else {
+        return Err(AnalysisError::Invariant(format!(
+            "{display_path} has no implicit file owner"
+        )));
+    };
+    if file.kind != OwnerKind::File || file.parent.is_some() {
+        return Err(AnalysisError::Invariant(format!(
+            "{display_path} has an invalid implicit file owner"
+        )));
+    }
+    if document.owners.iter().skip(1).any(|owner| {
+        owner
+            .parent
+            .is_none_or(|parent| parent >= document.owners.len())
+    }) {
+        return Err(AnalysisError::Invariant(format!(
+            "{display_path} contains an owner with no valid parent"
+        )));
+    }
+    if document
+        .comments
+        .iter()
+        .any(|comment| comment.owner >= document.owners.len())
+    {
+        return Err(AnalysisError::Invariant(format!(
+            "{display_path} contains a comment with no valid owner"
+        )));
+    }
+    Ok(document)
 }
 
 pub(crate) fn analyze_file(

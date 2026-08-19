@@ -1,7 +1,10 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use fuck_ai_comments::{AnalysisError, SourceFile, analyze_all, analyze_change, supports_path};
+use fuck_ai_comments::{
+    AnalysisError, AnalysisProfile, SourceFile, analyze_all, analyze_all_with_profile,
+    analyze_change, analyze_change_with_profile, supports_path,
+};
 
 fn assert_parent_type_rename_stales_nested_comment(
     path: &str,
@@ -102,6 +105,110 @@ fn analyze_all_uses_the_public_source_snapshot_seam() {
             .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
         "whole-file analysis should run the same policy authority"
     );
+}
+
+#[test]
+fn attestation_profile_validates_a_snapshot_without_emitting_static_findings() {
+    let source = "// first\n// second\n// third\n// fourth\nconst LIMIT: usize = 4;\n";
+
+    let findings = analyze_all_with_profile(
+        SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: source,
+        },
+        AnalysisProfile::Attestation,
+    )
+    .expect("valid Rust should parse");
+
+    assert!(findings.is_empty(), "attestation has no snapshot policy");
+}
+
+#[test]
+fn attestation_profile_rejects_an_invalid_snapshot() {
+    let error = analyze_all_with_profile(
+        SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: "fn broken( {\n",
+        },
+        AnalysisProfile::Attestation,
+    )
+    .expect_err("attestation must validate the source before returning clean");
+
+    assert!(matches!(error, AnalysisError::Parse { .. }));
+}
+
+#[test]
+fn attestation_profile_emits_change_attestations_without_static_findings() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream window.\nconst LIMIT: usize = 3;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "// Coupled to the upstream window.\n",
+            "// First added explanation.\n",
+            "// Second added explanation.\n",
+            "// Third added explanation.\n",
+            "const LIMIT: usize = 4;\n",
+        ),
+    };
+
+    let findings = analyze_change_with_profile(before, after, AnalysisProfile::Attestation)
+        .expect("valid Rust change");
+    let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+
+    assert_eq!(rules, ["comment-policy/comment-owner-changed"]);
+}
+
+#[test]
+fn attestation_profile_rejects_a_cross_adapter_change() {
+    let error = analyze_change_with_profile(
+        SourceFile {
+            path: Path::new("config.toml"),
+            text: "value = 1\n",
+        },
+        SourceFile {
+            path: Path::new("config.py"),
+            text: "value = 1\n",
+        },
+        AnalysisProfile::Attestation,
+    )
+    .expect_err("cross-adapter ownership cannot be paired");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
+fn full_profile_preserves_the_existing_snapshot_entry_point() {
+    let file = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// first\n// second\n// third\n// fourth\nconst LIMIT: usize = 4;\n",
+    };
+
+    let existing = analyze_all(file).expect("valid Rust should parse");
+    let profiled =
+        analyze_all_with_profile(file, AnalysisProfile::Full).expect("valid Rust should parse");
+
+    assert_eq!(profiled, existing);
+}
+
+#[test]
+fn full_profile_preserves_the_existing_change_entry_point() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream window.\nconst LIMIT: usize = 3;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream window.\nconst LIMIT: usize = 4;\n",
+    };
+
+    let existing = analyze_change(before, after).expect("valid Rust change");
+    let profiled = analyze_change_with_profile(before, after, AnalysisProfile::Full)
+        .expect("valid Rust change");
+
+    assert_eq!(profiled, existing);
 }
 
 #[test]
