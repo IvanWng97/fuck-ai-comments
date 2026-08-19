@@ -254,6 +254,65 @@ fn same_line_comment_edit_attests_unchanged_code() {
 }
 
 #[test]
+fn unchanged_mixed_code_comment_line_proves_its_owner() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn freeze() {\n",
+            "    let selected = [\"claude-code\"]\n",
+            "        .into_iter()\n",
+            "        .filter(|id| *id == \"claude-code\") // only claude-code has installed hooks\n",
+            "        .count();\n",
+            "    assert_eq!(selected, 1);\n",
+            "}\n",
+        ),
+    };
+    let after_text = format!("const UNRELATED: usize = 1;\n\n{}", before.text);
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: &after_text,
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("the exact non-comment code on the mixed line proves the closure owner");
+
+    assert!(
+        findings.is_empty(),
+        "an unrelated insertion cannot make the trailing comment ambiguous: {findings:#?}"
+    );
+}
+
+#[test]
+fn astro_frontmatter_mixed_line_anchor_uses_source_coordinates() {
+    let before_text = concat!(
+        "---\n",
+        "const selected = [\"claude-code\"]\n",
+        "  .filter((id) => id === \"claude-code\"); // only claude-code has installed hooks\n",
+        "---\n",
+        "<!-- Outer template boundary. -->\n",
+        "<main>{selected.length}</main>\n",
+    );
+    let after_text = before_text.replacen("---\n", "---\nconst UNRELATED: number = 1;\n", 1);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: before_text,
+        },
+        SourceFile {
+            path: Path::new("Page.astro"),
+            text: &after_text,
+        },
+    )
+    .expect("physical comment spans should preserve the embedded closure anchor");
+
+    assert!(
+        findings.is_empty(),
+        "an unrelated frontmatter insertion cannot make the mixed-line comment stale: {findings:#?}"
+    );
+}
+
+#[test]
 fn punctuation_only_comment_edit_is_not_attestation() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
@@ -657,6 +716,77 @@ fn full_owner_replacement_without_an_exact_anchor_fails_closed() {
 }
 
 #[test]
+fn split_owner_without_a_surviving_comment_does_not_block_change() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn router_caches_until_overlay_changes() {\n",
+            "    first_shared();\n",
+            "    // Push an occupancy rect — cache should drop.\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn router_serves_the_cached_path() {\n",
+            "    first_shared();\n",
+            "}\n",
+            "fn an_overlay_evicts_the_crossed_path() {\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("a tied owner split is irrelevant when its comment was deleted");
+
+    assert!(
+        findings.is_empty(),
+        "new comment-free owners have no policy finding: {findings:#?}"
+    );
+}
+
+#[test]
+fn split_owner_with_a_surviving_comment_still_fails_closed() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn original_owner() {\n",
+            "    first_shared();\n",
+            "    // Coupled to the split owner.\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn first_owner() {\n",
+            "    first_shared();\n",
+            "}\n",
+            "fn second_owner() {\n",
+            "    // Coupled to the split owner.\n",
+            "    second_shared();\n",
+            "}\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("surviving comment identity keeps the unresolved split fail-closed");
+
+    assert!(
+        matches!(
+            error,
+            AnalysisError::AmbiguousChange(ref message)
+                if message.contains("comment text \"Coupled to the split owner\"")
+        ),
+        "comment pairing, not owner scoring, must reject the unresolved attestation: {error:#?}"
+    );
+}
+
+#[test]
 fn owner_rename_with_an_exact_code_anchor_stales_its_comment() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
@@ -687,6 +817,134 @@ fn owner_rename_with_an_exact_code_anchor_stales_its_comment() {
         }),
         "an anchored rename still requires comment attestation: {findings:#?}"
     );
+}
+
+#[test]
+fn exact_leaf_code_moved_across_parent_stales_its_comment() {
+    let before = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "fn daylight_floor_overlay() {\n",
+            "    // Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "    const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "// Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "\n",
+            "fn daylight_floor_overlay() {\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("unique stable identity and exact leaf code prove the cross-parent move");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 1
+        }),
+        "moving exact owner code across parents requires attestation: {findings:#?}"
+    );
+}
+
+#[test]
+fn sun_tint_doc_promotion_stales_after_exact_cross_parent_move() {
+    let before = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "fn daylight_floor_overlay() {\n",
+            "    // Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "    const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/sky.rs"),
+        text: concat!(
+            "/// Pale warm midday sunlight — theme-agnostic, since daylight is daylight.\n",
+            "const SUN_TINT: Rgb = Rgb { r: 255, g: 246, b: 224 };\n",
+            "\n",
+            "fn daylight_floor_overlay() {\n",
+            "    blend(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after).expect("the SUN_TINT move is exact");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 1
+        }),
+        "promoting the moved comment to public docs still requires attestation: {findings:#?}"
+    );
+}
+
+#[test]
+fn stable_leaf_identity_without_exact_code_does_not_prove_cross_parent_move() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn old_parent() {\n",
+            "    // Coupled to the exact constant value.\n",
+            "    const LIMIT: usize = 1;\n",
+            "    consume(LIMIT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "// Coupled to the exact constant value.\n",
+            "const LIMIT: usize = 2;\n",
+            "fn old_parent() { consume(LIMIT); }\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("stable identity alone cannot prove a rewritten cross-parent owner");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
+fn duplicate_leaf_identity_does_not_prove_cross_parent_move() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn dawn() {\n",
+            "    // Coupled to the sunlight constant.\n",
+            "    const SUN_TINT: usize = 1;\n",
+            "    consume(SUN_TINT);\n",
+            "}\n",
+            "fn noon() {\n",
+            "    const SUN_TINT: usize = 1;\n",
+            "    consume(SUN_TINT);\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "// Coupled to the sunlight constant.\n",
+            "const SUN_TINT: usize = 1;\n",
+            "fn dawn() { consume(SUN_TINT); }\n",
+            "fn noon() { consume(SUN_TINT); }\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("duplicate stable identity cannot identify which old leaf moved");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
 }
 
 #[test]

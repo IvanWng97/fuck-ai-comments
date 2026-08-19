@@ -22,6 +22,7 @@ thread_local! {
     static OWNER_EXACT_SPAN_COMPARISONS: Cell<usize> = const { Cell::new(0) };
     static OWNER_EXACT_COMPARISON_WORK: Cell<usize> = const { Cell::new(0) };
     static OWNER_PHYSICAL_LINE_WORK: Cell<usize> = const { Cell::new(0) };
+    static OWNER_COMMENT_SPAN_VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn analyze(
@@ -162,12 +163,10 @@ impl OwnerChangeIndex {
                 let parent_path_changed = old_owner.parent.is_some_and(|parent| {
                     before.owners[parent].kind == OwnerKind::Type && identity_path_changed[parent]
                 });
-                let type_parent_changed = old_owner.parent.is_some_and(|parent| {
-                    before.owners[parent].kind == OwnerKind::Type
-                        && new_owner.parent != expected_after_parent
-                });
+                let structural_parent_changed =
+                    old_owner.parent.is_some() && new_owner.parent != expected_after_parent;
                 identity_path_changed[before_index] = parent_path_changed
-                    || type_parent_changed
+                    || structural_parent_changed
                     || old_owner.kind != new_owner.kind
                     || identities.before[before_index].id != identities.after[after_index].id;
             }
@@ -202,30 +201,12 @@ fn pair_owners(
     let before_children = owners_by_parent(before);
     let after_children = owners_by_parent(after);
     let mut frontier = VecDeque::from([(0, 0)]);
+    let mut cross_parent_phase_complete = false;
 
-    while let Some((before_parent, after_parent)) = frontier.pop_front() {
-        let before_siblings = &before_children[before_parent];
-        let after_siblings = &after_children[after_parent];
-        let stable = unique_stable_owner_pairs(
-            before,
-            after,
-            before_siblings,
-            after_siblings,
-            &pairs,
-            identities,
-        );
-        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
-
-        let evidence = connected_owner_scores(
-            before,
-            after,
-            before_siblings,
-            after_siblings,
-            anchors,
-            &pairs,
-        )?;
-        if !evidence.exact_pairs.is_empty() {
-            enqueue_owner_pairs(evidence.exact_pairs, &mut pairs, &mut frontier)?;
+    loop {
+        while let Some((before_parent, after_parent)) = frontier.pop_front() {
+            let before_siblings = &before_children[before_parent];
+            let after_siblings = &after_children[after_parent];
             let stable = unique_stable_owner_pairs(
                 before,
                 after,
@@ -235,30 +216,57 @@ fn pair_owners(
                 identities,
             );
             enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
-        }
 
-        let anchored = anchored_owner_pairs(&evidence.scores, &pairs)?;
-        if anchored.is_empty() {
-            continue;
-        }
-        enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
+            let evidence = connected_owner_scores(
+                before,
+                after,
+                before_siblings,
+                after_siblings,
+                anchors,
+                &pairs,
+            )?;
+            if !evidence.exact_pairs.is_empty() {
+                enqueue_owner_pairs(evidence.exact_pairs, &mut pairs, &mut frontier)?;
+                let stable = unique_stable_owner_pairs(
+                    before,
+                    after,
+                    before_siblings,
+                    after_siblings,
+                    &pairs,
+                    identities,
+                );
+                enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+            }
 
-        let stable = unique_stable_owner_pairs(
-            before,
-            after,
-            before_siblings,
-            after_siblings,
-            &pairs,
-            identities,
-        );
-        enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+            let anchored = anchored_owner_pairs(&evidence.scores, &pairs);
+            if anchored.is_empty() {
+                continue;
+            }
+            enqueue_owner_pairs(anchored, &mut pairs, &mut frontier)?;
 
-        // A second anchor wave would make correspondence depend on the first wave's guesses.
-        if !anchored_owner_pairs(&evidence.scores, &pairs)?.is_empty() {
-            return Err(AnalysisError::AmbiguousChange(
-                "owner correspondence requires iterative anchor preference peeling".to_owned(),
-            ));
+            let stable = unique_stable_owner_pairs(
+                before,
+                after,
+                before_siblings,
+                after_siblings,
+                &pairs,
+                identities,
+            );
+            enqueue_owner_pairs(stable, &mut pairs, &mut frontier)?;
+
+            // A second anchor wave would make correspondence depend on the first wave's guesses.
+            if !anchored_owner_pairs(&evidence.scores, &pairs).is_empty() {
+                return Err(AnalysisError::AmbiguousChange(
+                    "owner correspondence requires iterative anchor preference peeling".to_owned(),
+                ));
+            }
         }
+        if cross_parent_phase_complete {
+            break;
+        }
+        cross_parent_phase_complete = true;
+        let moved = unique_exact_cross_parent_owner_pairs(before, after, &pairs, identities);
+        enqueue_owner_pairs(moved, &mut pairs, &mut frontier)?;
     }
     Ok(pairs)
 }
@@ -304,13 +312,13 @@ fn unique_stable_owner_pairs(
 ) -> Vec<(usize, usize)> {
     let before_by_key = stable_owners_by_key(
         before,
-        before_children,
+        before_children.iter().copied(),
         &pairs.before_to_after,
         &identities.before,
     );
     let after_by_key = stable_owners_by_key(
         after,
-        after_children,
+        after_children.iter().copied(),
         &pairs.after_to_before,
         &identities.after,
     );
@@ -323,16 +331,50 @@ fn unique_stable_owner_pairs(
         .collect()
 }
 
+fn unique_exact_cross_parent_owner_pairs(
+    before: &ParsedFile,
+    after: &ParsedFile,
+    pairs: &Pairing,
+    identities: &CanonicalOwnerIdentities,
+) -> Vec<(usize, usize)> {
+    let before_by_key = stable_owners_by_key(
+        before,
+        (1..before.owners.len()).filter(|index| pairs.before_to_after[*index].is_none()),
+        &pairs.before_to_after,
+        &identities.before,
+    );
+    let after_by_key = stable_owners_by_key(
+        after,
+        (1..after.owners.len()).filter(|index| pairs.after_to_before[*index].is_none()),
+        &pairs.after_to_before,
+        &identities.after,
+    );
+
+    before_by_key
+        .into_iter()
+        .filter_map(|(key, before_index)| {
+            before_index
+                .zip(after_by_key.get(&key).copied().flatten())
+                .filter(|(before_index, after_index)| {
+                    direct_owner_code_is_exact(
+                        &before.owners[*before_index],
+                        &after.owners[*after_index],
+                    )
+                })
+        })
+        .collect()
+}
+
 type StableOwnerKey = (OwnerKind, CanonicalIdentityId);
 
 fn stable_owners_by_key(
     document: &ParsedFile,
-    children: &[usize],
+    indexes: impl IntoIterator<Item = usize>,
     paired: &[Option<usize>],
     identities: &[CanonicalIdentity],
 ) -> BTreeMap<StableOwnerKey, Option<usize>> {
     let mut groups = BTreeMap::new();
-    for &index in children {
+    for index in indexes {
         #[cfg(test)]
         OWNER_FRONTIER_VISITS.with(|visits| visits.set(visits.get() + 1));
         let owner = &document.owners[index];
@@ -351,24 +393,19 @@ fn has_stable_identity(identity: CanonicalIdentity) -> bool {
     !identity.contains_placeholder
 }
 
-fn anchored_owner_pairs(
-    scores: &[(usize, usize, usize)],
-    pairs: &Pairing,
-) -> Result<Vec<(usize, usize)>, AnalysisError> {
+fn anchored_owner_pairs(scores: &[(usize, usize, usize)], pairs: &Pairing) -> Vec<(usize, usize)> {
     let remaining = || {
         scores.iter().copied().filter(|&(before, after, _)| {
             pairs.before_to_after[before].is_none() && pairs.after_to_before[after].is_none()
         })
     };
-    let before_choices = owner_choices(remaining(), "old owner")?;
-    let after_choices = owner_choices(
-        remaining().map(|(before, after, score)| (after, before, score)),
-        "new owner",
-    )?;
-    Ok(before_choices
+    let before_choices = owner_choices(remaining());
+    let after_choices =
+        owner_choices(remaining().map(|(before, after, score)| (after, before, score)));
+    before_choices
         .into_iter()
         .filter(|(before_index, after_index)| after_choices.get(after_index) == Some(before_index))
-        .collect())
+        .collect()
 }
 
 fn connected_owner_scores(
@@ -690,8 +727,7 @@ impl OwnerRankSweep {
 
 fn owner_choices(
     candidates: impl Iterator<Item = (usize, usize, usize)>,
-    side: &str,
-) -> Result<BTreeMap<usize, usize>, AnalysisError> {
+) -> BTreeMap<usize, usize> {
     let mut by_owner: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
     for (owner, candidate, score) in candidates {
         by_owner.entry(owner).or_default().push((candidate, score));
@@ -699,18 +735,12 @@ fn owner_choices(
     by_owner
         .into_iter()
         .filter_map(|(owner, candidates)| {
-            unique_best_choice(candidates.into_iter(), owner, side)
-                .transpose()
-                .map(|choice| choice.map(|candidate| (owner, candidate)))
+            unique_best_choice(candidates.into_iter()).map(|candidate| (owner, candidate))
         })
         .collect()
 }
 
-fn unique_best_choice(
-    candidates: impl Iterator<Item = (usize, usize)>,
-    owner_index: usize,
-    side: &str,
-) -> Result<Option<usize>, AnalysisError> {
+fn unique_best_choice(candidates: impl Iterator<Item = (usize, usize)>) -> Option<usize> {
     let mut best: Option<(usize, usize)> = None;
     let mut tied = false;
     for candidate in candidates {
@@ -725,11 +755,9 @@ fn unique_best_choice(
         }
     }
     if tied {
-        return Err(AnalysisError::AmbiguousChange(format!(
-            "{side} {owner_index} has exact anchors in multiple equally plausible owners"
-        )));
+        return None;
     }
-    Ok(best.map(|(index, _)| index))
+    best.map(|(index, _)| index)
 }
 
 fn pair_comments(
@@ -1172,15 +1200,8 @@ impl LineAnchors {
         let mut config = TextDiff::configure();
         config.algorithm(Algorithm::Myers);
         let diff = config.diff_lines(before, after);
-        let comment_lines = |document: &ParsedFile| {
-            document
-                .comments
-                .iter()
-                .flat_map(|comment| comment.span.lines())
-                .map(|line| line - 1)
-                .collect::<BTreeSet<_>>()
-        };
-        let (old_comment_lines, new_comment_lines) = (comment_lines(old), comment_lines(new));
+        let mut old_comments = CommentSpanSweep::new(&old.comments);
+        let mut new_comments = CommentSpanSweep::new(&new.comments);
         let mut exact = BTreeMap::new();
         let mut owner = Vec::new();
         let mut before_start_byte = 0;
@@ -1201,9 +1222,10 @@ impl LineAnchors {
                     if let (Some(before_line), Some(after_line)) = (before_line, after_line) {
                         exact.insert(before_line.index, after_line.index);
                         let content = line_content(line);
-                        if !old_comment_lines.contains(&before_line.index)
-                            && !new_comment_lines.contains(&after_line.index)
-                            && content.chars().any(char::is_alphanumeric)
+                        if old_comments
+                            .has_non_comment_alphanumeric(before_line.start_byte, content)
+                            && new_comments
+                                .has_non_comment_alphanumeric(after_line.start_byte, content)
                         {
                             owner.push(OwnerLineAnchor {
                                 before: before_line,
@@ -1252,6 +1274,76 @@ impl LineAnchors {
     }
 }
 
+struct CommentSpanSweep {
+    coverage: Vec<std::ops::Range<usize>>,
+    first_relevant: usize,
+    previous_line_start: Option<usize>,
+}
+
+impl CommentSpanSweep {
+    fn new(comments: &[CommentSnapshot]) -> Self {
+        let mut spans: Vec<_> = comments
+            .iter()
+            .map(|comment| comment.span.start_byte..comment.span.end_byte)
+            .collect();
+        spans.sort_unstable_by_key(|span| (span.start, span.end));
+
+        let mut coverage: Vec<std::ops::Range<usize>> = Vec::with_capacity(spans.len());
+        for span in spans {
+            debug_assert!(span.start <= span.end);
+            if let Some(previous) = coverage.last_mut()
+                && span.start <= previous.end
+            {
+                previous.end = previous.end.max(span.end);
+            } else {
+                coverage.push(span);
+            }
+        }
+        Self {
+            coverage,
+            first_relevant: 0,
+            previous_line_start: None,
+        }
+    }
+
+    fn has_non_comment_alphanumeric(&mut self, line_start: usize, content: &str) -> bool {
+        debug_assert!(
+            self.previous_line_start
+                .is_none_or(|start| start <= line_start)
+        );
+        self.previous_line_start = Some(line_start);
+        let line_end = line_start + content.len();
+        while self
+            .coverage
+            .get(self.first_relevant)
+            .is_some_and(|span| span.end <= line_start)
+        {
+            self.first_relevant += 1;
+        }
+
+        let mut uncovered_start = 0;
+        for span in &self.coverage[self.first_relevant..] {
+            if span.start >= line_end {
+                break;
+            }
+            #[cfg(test)]
+            OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(visits.get() + 1));
+            let covered_start = span.start.max(line_start) - line_start;
+            if uncovered_start < covered_start
+                && content[uncovered_start..covered_start]
+                    .chars()
+                    .any(char::is_alphanumeric)
+            {
+                return true;
+            }
+            uncovered_start = span.end.min(line_end) - line_start;
+        }
+        content[uncovered_start..]
+            .chars()
+            .any(char::is_alphanumeric)
+    }
+}
+
 fn line_content(line: &str) -> &str {
     line.strip_suffix("\r\n")
         .or_else(|| line.strip_suffix('\r'))
@@ -1274,6 +1366,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::policy::CommentKind;
 
     fn nested_kotlin(depth: usize, value: usize) -> String {
         let mut source = String::new();
@@ -1408,6 +1501,23 @@ mod tests {
         .expect("nested anonymous owners pair by exact anchors");
 
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
+    }
+
+    fn mixed_comment_line_anchor_work(count: usize) -> usize {
+        let mut source = String::from("fn work() {\n");
+        for index in 0..count {
+            writeln!(source, "    consume({index}); // rationale {index}")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("}\n");
+        let before = languages::parse_file(Path::new("src/lib.rs"), &source)
+            .expect("the sweep fixture is valid Rust");
+        let after = before.clone();
+        OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(0));
+
+        let _anchors = LineAnchors::new(&source, &source, &before, &after);
+
+        OWNER_COMMENT_SPAN_VISITS.with(Cell::get)
     }
 
     fn regrouped_anonymous_callbacks(count: usize) -> (String, String) {
@@ -1601,6 +1711,34 @@ mod tests {
         let evaluations = [10, 20, 40, 80].map(nested_anonymous_owner_anchor_evaluations);
 
         assert_eq!(evaluations, [20, 40, 80, 160]);
+    }
+
+    #[test]
+    fn mixed_line_comment_spans_are_swept_once_per_snapshot() {
+        for count in [64, 128, 256, 512] {
+            assert_eq!(mixed_comment_line_anchor_work(count), 2 * count);
+        }
+    }
+
+    #[test]
+    fn comment_span_sweep_unions_out_of_order_container_coverage() {
+        let comments =
+            [(4, 8), (0, 6), (13, 17), (9, 15)].map(|(start_byte, end_byte)| CommentSnapshot {
+                kind: CommentKind::Narrative,
+                text: "container comment".to_owned(),
+                span: Span {
+                    start_byte,
+                    end_byte,
+                    start_line: 1,
+                    end_line: 1,
+                },
+                owner: 0,
+            });
+        let mut sweep = CommentSpanSweep::new(&comments);
+        OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(0));
+
+        assert!(!sweep.has_non_comment_alphanumeric(0, "abcdefgh-ijklmnop"));
+        assert_eq!(OWNER_COMMENT_SPAN_VISITS.with(Cell::get), 2);
     }
 
     #[test]
