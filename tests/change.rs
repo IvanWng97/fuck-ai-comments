@@ -254,6 +254,35 @@ fn same_line_comment_edit_attests_unchanged_code() {
 }
 
 #[test]
+fn unchanged_mixed_code_comment_line_proves_its_owner() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn freeze() {\n",
+            "    let selected = [\"claude-code\"]\n",
+            "        .into_iter()\n",
+            "        .filter(|id| *id == \"claude-code\") // only claude-code has installed hooks\n",
+            "        .count();\n",
+            "    assert_eq!(selected, 1);\n",
+            "}\n",
+        ),
+    };
+    let after_text = format!("const UNRELATED: usize = 1;\n\n{}", before.text);
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: &after_text,
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("the exact non-comment code on the mixed line proves the closure owner");
+
+    assert!(
+        findings.is_empty(),
+        "an unrelated insertion cannot make the trailing comment ambiguous: {findings:#?}"
+    );
+}
+
+#[test]
 fn punctuation_only_comment_edit_is_not_attestation() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),

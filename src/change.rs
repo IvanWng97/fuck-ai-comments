@@ -22,6 +22,7 @@ thread_local! {
     static OWNER_EXACT_SPAN_COMPARISONS: Cell<usize> = const { Cell::new(0) };
     static OWNER_EXACT_COMPARISON_WORK: Cell<usize> = const { Cell::new(0) };
     static OWNER_PHYSICAL_LINE_WORK: Cell<usize> = const { Cell::new(0) };
+    static OWNER_COMMENT_SPAN_VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn analyze(
@@ -1172,15 +1173,8 @@ impl LineAnchors {
         let mut config = TextDiff::configure();
         config.algorithm(Algorithm::Myers);
         let diff = config.diff_lines(before, after);
-        let comment_lines = |document: &ParsedFile| {
-            document
-                .comments
-                .iter()
-                .flat_map(|comment| comment.span.lines())
-                .map(|line| line - 1)
-                .collect::<BTreeSet<_>>()
-        };
-        let (old_comment_lines, new_comment_lines) = (comment_lines(old), comment_lines(new));
+        let mut old_comments = CommentSpanSweep::new(&old.comments);
+        let mut new_comments = CommentSpanSweep::new(&new.comments);
         let mut exact = BTreeMap::new();
         let mut owner = Vec::new();
         let mut before_start_byte = 0;
@@ -1201,9 +1195,10 @@ impl LineAnchors {
                     if let (Some(before_line), Some(after_line)) = (before_line, after_line) {
                         exact.insert(before_line.index, after_line.index);
                         let content = line_content(line);
-                        if !old_comment_lines.contains(&before_line.index)
-                            && !new_comment_lines.contains(&after_line.index)
-                            && content.chars().any(char::is_alphanumeric)
+                        if old_comments
+                            .has_non_comment_alphanumeric(before_line.start_byte, content)
+                            && new_comments
+                                .has_non_comment_alphanumeric(after_line.start_byte, content)
                         {
                             owner.push(OwnerLineAnchor {
                                 before: before_line,
@@ -1249,6 +1244,64 @@ impl LineAnchors {
         self.exact
             .get(&one_based_old_line.saturating_sub(1))
             .map(|line| line + 1)
+    }
+}
+
+struct CommentSpanSweep<'comments> {
+    comments: &'comments [CommentSnapshot],
+    first_relevant: usize,
+    previous_line_start: Option<usize>,
+}
+
+impl<'comments> CommentSpanSweep<'comments> {
+    fn new(comments: &'comments [CommentSnapshot]) -> Self {
+        debug_assert!(
+            comments
+                .windows(2)
+                .all(|pair| pair[0].span.end_byte <= pair[1].span.start_byte)
+        );
+        Self {
+            comments,
+            first_relevant: 0,
+            previous_line_start: None,
+        }
+    }
+
+    fn has_non_comment_alphanumeric(&mut self, line_start: usize, content: &str) -> bool {
+        debug_assert!(
+            self.previous_line_start
+                .is_none_or(|start| start <= line_start)
+        );
+        self.previous_line_start = Some(line_start);
+        let line_end = line_start + content.len();
+        while self
+            .comments
+            .get(self.first_relevant)
+            .is_some_and(|comment| comment.span.end_byte <= line_start)
+        {
+            self.first_relevant += 1;
+        }
+
+        let mut uncovered_start = 0;
+        for comment in &self.comments[self.first_relevant..] {
+            if comment.span.start_byte >= line_end {
+                break;
+            }
+            #[cfg(test)]
+            OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(visits.get() + 1));
+            let covered_start = comment.span.start_byte.max(line_start) - line_start;
+            if uncovered_start < covered_start
+                && content[uncovered_start..covered_start]
+                    .chars()
+                    .any(char::is_alphanumeric)
+            {
+                return true;
+            }
+            uncovered_start = uncovered_start.max(comment.span.end_byte.min(line_end) - line_start);
+        }
+        content[uncovered_start..]
+            .chars()
+            .any(char::is_alphanumeric)
     }
 }
 
@@ -1408,6 +1461,23 @@ mod tests {
         .expect("nested anonymous owners pair by exact anchors");
 
         OWNER_ANCHOR_CANDIDATE_EVALUATIONS.with(Cell::get)
+    }
+
+    fn mixed_comment_line_anchor_work(count: usize) -> usize {
+        let mut source = String::from("fn work() {\n");
+        for index in 0..count {
+            writeln!(source, "    consume({index}); // rationale {index}")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("}\n");
+        let before = languages::parse_file(Path::new("src/lib.rs"), &source)
+            .expect("the sweep fixture is valid Rust");
+        let after = before.clone();
+        OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(0));
+
+        let _anchors = LineAnchors::new(&source, &source, &before, &after);
+
+        OWNER_COMMENT_SPAN_VISITS.with(Cell::get)
     }
 
     fn regrouped_anonymous_callbacks(count: usize) -> (String, String) {
@@ -1601,6 +1671,13 @@ mod tests {
         let evaluations = [10, 20, 40, 80].map(nested_anonymous_owner_anchor_evaluations);
 
         assert_eq!(evaluations, [20, 40, 80, 160]);
+    }
+
+    #[test]
+    fn mixed_line_comment_spans_are_swept_once_per_snapshot() {
+        for count in [64, 128, 256, 512] {
+            assert_eq!(mixed_comment_line_anchor_work(count), 2 * count);
+        }
     }
 
     #[test]
