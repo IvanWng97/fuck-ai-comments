@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { argStringToArray } from "../../node_modules/@actions/exec/lib/toolrunner.js";
 
-import { buildCheckArguments, executableCommand } from "../src/arguments.js";
+import {
+  buildCheckArguments,
+  buildCheckArgumentsFromInputs,
+  executableCommand,
+} from "../src/arguments.js";
 
 test("quotes a full executable path for the actions exec parser", () => {
   const executable = String.raw`C:\runner tools\fuck-ai-comments.exe`;
@@ -100,6 +104,21 @@ test("passes profile validation to the Rust CLI", () => {
       head: "",
     }),
     ["check", "--profile", "future-profile", "--", "."],
+  );
+});
+
+test("reads the Action profile input into the Rust CLI argv", () => {
+  const inputs = new Map([
+    ["mode", "worktree"],
+    ["profile", "attestation"],
+    ["path", "source tree"],
+    ["base", ""],
+    ["head", ""],
+  ]);
+
+  assert.deepEqual(
+    buildCheckArgumentsFromInputs((name) => inputs.get(name) ?? ""),
+    ["check", "--profile", "attestation", "--", "source tree"],
   );
 });
 
