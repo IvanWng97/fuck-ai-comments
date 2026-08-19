@@ -39,5 +39,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
           NEEDRESTART_SUSPEND: "1"
         with:
+          # CodSpeedHQ/codspeed#504: restored package files lack dpkg state, so reinstalling can hang.
+          cache-instruments: "false"
           mode: simulation,memory
           run: cargo codspeed run --bench analysis

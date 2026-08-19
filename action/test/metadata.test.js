@@ -299,6 +299,7 @@ test("CodSpeed runs the 10K-LOC analysis benchmarks", async () => {
         NEEDRESTART_SUSPEND: "1",
       },
       with: {
+        "cache-instruments": "false",
         mode: "simulation,memory",
         run: "cargo codspeed run --bench analysis",
       },
