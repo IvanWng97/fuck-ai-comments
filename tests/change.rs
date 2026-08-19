@@ -352,6 +352,49 @@ fn punctuation_only_comment_edit_is_not_attestation() {
 }
 
 #[test]
+fn default_ignorable_comment_edit_is_not_attestation() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream window.\nconst RETRY_LIMIT: usize = 3;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream\u{200b} window.\nconst RETRY_LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 1
+        }),
+        "invisible formatting cannot masquerade as semantic review: {findings:#?}"
+    );
+}
+
+#[test]
+fn attestation_profile_ignores_all_default_ignorable_comment_edits() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream window.\nconst RETRY_LIMIT: usize = 3;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled\u{fe0f} to the upstream\u{2060} window.\nconst RETRY_LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change_with_profile(before, after, AnalysisProfile::Attestation)
+        .expect("valid Rust change");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-owner-changed"),
+        "Unicode default-ignorables cannot attest an owner change: {findings:#?}"
+    );
+}
+
+#[test]
 fn punctuation_only_comment_edit_does_not_change_the_owner_fingerprint() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
@@ -444,6 +487,49 @@ fn added_empty_comments_still_activate_static_budget() {
             .iter()
             .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
         "normalized-empty comments still consume the static budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn added_default_ignorable_comments_still_activate_static_budget() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "const LIMIT: usize = 4;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// \u{200b}\n// \u{2060}\n// \u{fe0f}\n// \u{200b}\nconst LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust comment addition");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "default-ignorable comments still consume the static budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn default_ignorable_only_separator_has_no_attestation_identity() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// \u{200b}\nconst FIRST: usize = 1;\nconst SECOND: usize = 2;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "const FIRST: usize = 1;\n// \u{200b}\nconst SECOND: usize = 2;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust comment move");
+
+    assert!(
+        findings.iter().all(|finding| {
+            finding.rule != "comment-policy/comment-owner-changed"
+                && finding.rule != "comment-policy/comment-reparented"
+        }),
+        "default-ignorable separators carry no cross-revision identity: {findings:#?}"
     );
 }
 

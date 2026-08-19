@@ -39,8 +39,10 @@ they do count toward the absolute owner cap. All three remain subject to drift
 checks when they have meaningful normalized text. Python function and class
 docstrings consume their owner budget; module docstrings consume the file budget.
 
-Normalized-empty separators retain their existing static classification and
-budget treatment, but have no cross-revision identity and therefore cannot
+Normalization strips comment delimiters, collapses whitespace, ignores terminal
+punctuation, and removes Unicode `Default_Ignorable_Code_Point` characters.
+Comments left empty by that normalization retain their static classification
+and budget treatment, but have no cross-revision identity and therefore cannot
 become stale or reparented.
 
 ## Supported languages
@@ -239,6 +241,8 @@ The implementation deliberately delegates mechanical work:
 - `tree-sitter` and maintained upstream language grammars parse source;
 - `toml_edit` plus the official `toml_parser` lexer preserve TOML structure and
   exact comment spans;
+- ICU4X supplies the Unicode `Default_Ignorable_Code_Point` property used by
+  attestation normalization;
 - `similar` supplies Myers diff anchors;
 - `ignore` supplies repository walking and ignore semantics;
 - Git plumbing supplies revisions, rename records, and blobs;
