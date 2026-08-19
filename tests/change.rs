@@ -852,6 +852,83 @@ fn unchanged_multiline_rust_closures_sharing_a_boundary_line_pair() {
 }
 
 #[test]
+fn unchanged_multiline_rust_closure_chain_pairs_each_owner_once() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn blocked(left: &[Item], right: &[Item], third: &[Item]) -> bool {\n",
+            "    left.iter().any(|item| {\n",
+            "        item.blocked()\n",
+            "    }) || right.iter().any(|item| {\n",
+            "        item.blocked()\n",
+            "    }) || third.iter().any(|item| {\n",
+            "        item.blocked()\n",
+            "    })\n",
+            "}\n",
+        ),
+    };
+    let after_text = format!("const INSERTED: usize = 1;\n{}", before.text);
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: &after_text,
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("overlapping boundary proofs identify the same middle closure");
+
+    assert!(findings.is_empty(), "the insertion has no comments to flag");
+}
+
+#[test]
+fn swapped_nested_closures_cannot_hide_behind_exact_outer_code() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn work() {\n",
+            "    use_two(|| {\n",
+            "        consume(|| {\n",
+            "            // Coupled to alpha.\n",
+            "            alpha();\n",
+            "        });\n",
+            "    }, || {\n",
+            "        consume(|| {\n",
+            "            // Coupled to beta.\n",
+            "            beta();\n",
+            "        });\n",
+            "    });\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn work() {\n",
+            "    use_two(|| {\n",
+            "        consume(|| {\n",
+            "            // Coupled to beta.\n",
+            "            beta();\n",
+            "        });\n",
+            "    }, || {\n",
+            "        consume(|| {\n",
+            "            // Coupled to alpha.\n",
+            "            alpha();\n",
+            "        });\n",
+            "    });\n",
+            "}\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("moving different nested owners must not be accepted as a clean change");
+
+    assert!(matches!(
+        error,
+        AnalysisError::AmbiguousChange(message)
+            if message.contains("survives across owners with no exact line anchor")
+    ));
+}
+
+#[test]
 fn unchanged_same_line_rust_closures_pair_with_crlf_lines() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
