@@ -18,8 +18,7 @@ struct Python;
 
 #[derive(Default)]
 struct PythonContext {
-    statement_trailing: HashSet<usize>,
-    standalone_format_markers: HashSet<usize>,
+    tool_directives: HashSet<usize>,
     docstring_scopes: HashMap<usize, DocstringScope>,
 }
 
@@ -47,6 +46,9 @@ impl LanguageSpec for Python {
     }
 
     fn build_context(self, root: Node<'_>, source: &str) -> Result<Self::Context, AnalysisError> {
+        if !has_context_candidate(root, source) {
+            return Ok(PythonContext::default());
+        }
         PythonContextBuilder::new(source).build(root)
     }
 
@@ -102,7 +104,7 @@ impl LanguageSpec for Python {
     fn classify_comment(
         self,
         node: Node<'_>,
-        source: &str,
+        _source: &str,
         context: &Self::Context,
     ) -> Option<CommentKind> {
         if let Some(scope) = context.docstring_scopes.get(&node.id()) {
@@ -113,7 +115,7 @@ impl LanguageSpec for Python {
             });
         }
         (node.kind() == "comment").then(|| {
-            if is_tool_directive(node, source, context) {
+            if context.tool_directives.contains(&node.id()) {
                 CommentKind::ToolDirective
             } else {
                 CommentKind::Narrative
@@ -162,13 +164,32 @@ fn decorated_body<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
         .find(|child| child.kind() == kind)
 }
 
-fn is_tool_directive(node: Node<'_>, source: &str, context: &PythonContext) -> bool {
-    let body = comment_body(node_text(node, source));
+fn directive_placement(body: &str) -> Option<DirectivePlacement> {
     match body {
-        "fmt: off" | "fmt: on" => context.standalone_format_markers.contains(&node.id()),
-        "fmt: skip" => context.statement_trailing.contains(&node.id()),
-        _ => context.statement_trailing.contains(&node.id()) && is_line_suppression(body),
+        "fmt: off" | "fmt: on" => Some(DirectivePlacement::Standalone),
+        "fmt: skip" => Some(DirectivePlacement::Trailing),
+        _ => is_line_suppression(body).then_some(DirectivePlacement::Trailing),
     }
+}
+
+fn has_context_candidate(root: Node<'_>, source: &str) -> bool {
+    events(root).any(|event| {
+        let WalkEvent::Enter(node) = event else {
+            return false;
+        };
+        record_placement_operations(1);
+        match node.kind() {
+            "string" => true,
+            "comment" => directive_placement(comment_body(node_text(node, source))).is_some(),
+            _ => false,
+        }
+    })
+}
+
+#[derive(Clone, Copy)]
+enum DirectivePlacement {
+    Standalone,
+    Trailing,
 }
 
 fn comment_body(comment: &str) -> &str {
@@ -318,6 +339,7 @@ impl<'source> PythonContextBuilder<'source> {
     }
 
     fn enter(&mut self, node: Node<'_>) {
+        record_materialized_context_frame();
         record_placement_operations(1);
         let kind = node.kind();
         let frame_kind = PythonFrameKind::from_kind(kind);
@@ -348,27 +370,34 @@ impl<'source> PythonContextBuilder<'source> {
             .then(|| self.frames.last().and_then(|parent| parent.statement_scope))
             .flatten();
 
-        if kind == "comment" {
+        if kind == "comment"
+            && let Some(placement) = directive_placement(comment_body(node_text(node, self.source)))
+        {
             record_placement_operations(node.start_position().column + 1);
             let starts_line = starts_physical_line(node, self.source);
             let row = node.start_position().row;
-            if !starts_line && trailing_control_row == Some(row) {
-                self.context.statement_trailing.insert(node.id());
-            }
-            if starts_line {
-                let direct_parent_is_barrier = self.frames.last().is_some_and(|parent| {
-                    matches!(
-                        parent.kind,
-                        PythonFrameKind::Module | PythonFrameKind::Block
-                    )
-                });
-                if direct_parent_is_barrier {
-                    self.context.standalone_format_markers.insert(node.id());
-                } else if let Some(parent) = self.frames.last_mut()
-                    && parent.controls_line_directive
+            match placement {
+                DirectivePlacement::Trailing
+                    if !starts_line && trailing_control_row == Some(row) =>
                 {
-                    parent.standalone_candidates.push(node.id());
+                    self.context.tool_directives.insert(node.id());
                 }
+                DirectivePlacement::Standalone if starts_line => {
+                    let direct_parent_is_barrier = self.frames.last().is_some_and(|parent| {
+                        matches!(
+                            parent.kind,
+                            PythonFrameKind::Module | PythonFrameKind::Block
+                        )
+                    });
+                    if direct_parent_is_barrier {
+                        self.context.tool_directives.insert(node.id());
+                    } else if let Some(parent) = self.frames.last_mut()
+                        && parent.controls_line_directive
+                    {
+                        parent.standalone_candidates.push(node.id());
+                    }
+                }
+                DirectivePlacement::Standalone | DirectivePlacement::Trailing => {}
             }
         }
 
@@ -416,7 +445,7 @@ impl<'source> PythonContextBuilder<'source> {
         }
         if frame.has_direct_block {
             self.context
-                .standalone_format_markers
+                .tool_directives
                 .extend(frame.standalone_candidates);
         }
         if let Some(parent) = self.frames.last_mut() {
@@ -540,6 +569,7 @@ fn has_static_text_prefix(text: &str) -> bool {
 #[cfg(test)]
 thread_local! {
     static PLACEMENT_OPERATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MATERIALIZED_CONTEXT_FRAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -547,8 +577,16 @@ fn record_placement_operations(count: usize) {
     PLACEMENT_OPERATIONS.with(|operations| operations.set(operations.get() + count));
 }
 
+#[cfg(test)]
+fn record_materialized_context_frame() {
+    MATERIALIZED_CONTEXT_FRAMES.with(|frames| frames.set(frames.get() + 1));
+}
+
 #[cfg(not(test))]
 fn record_placement_operations(_count: usize) {}
+
+#[cfg(not(test))]
+fn record_materialized_context_frame() {}
 
 #[cfg(test)]
 mod tests {
@@ -611,6 +649,7 @@ mod tests {
         let medium = token_dense_placement_operations(128);
         let deep = token_dense_placement_operations(256);
 
+        assert!(shallow > 0);
         assert_eq!(deep - medium, 2 * (medium - shallow));
     }
 
@@ -655,5 +694,33 @@ mod tests {
             .expect("format marker comment");
 
         assert_eq!(marker.kind, CommentKind::ToolDirective);
+    }
+
+    #[test]
+    fn ordinary_comments_do_not_materialize_directive_placement_facts() {
+        let source = "# file rationale\nvalue = 1  # trailing rationale\nif ready:\n    # block rationale\n    value = 2\n";
+        let tree = python_tree(source);
+        MATERIALIZED_CONTEXT_FRAMES.with(|frames| frames.set(0));
+
+        let context = Python
+            .build_context(tree.root_node(), source)
+            .expect("valid Python placement context");
+
+        assert!(context.tool_directives.is_empty());
+        assert_eq!(MATERIALIZED_CONTEXT_FRAMES.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn directive_and_docstring_candidates_materialize_context_frames() {
+        for source in ["value = 1  # noqa\n", "\"\"\"module docs\"\"\"\n"] {
+            let tree = python_tree(source);
+            MATERIALIZED_CONTEXT_FRAMES.with(|frames| frames.set(0));
+
+            Python
+                .build_context(tree.root_node(), source)
+                .expect("valid Python placement context");
+
+            assert!(MATERIALIZED_CONTEXT_FRAMES.with(std::cell::Cell::get) > 0);
+        }
     }
 }
