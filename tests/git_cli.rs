@@ -249,6 +249,48 @@ fn unborn_detection_rejects_a_symbolic_local_branch_alias() {
 }
 
 #[test]
+fn unborn_detection_rejects_an_existing_noncommit_branch_object() {
+    let root = unborn_repository();
+    write(&root, "object.bin", "not a commit\n");
+    let object_id = git(&root, ["hash-object", "-w", "object.bin"]);
+    fs::write(
+        root.path()
+            .join(".git")
+            .join("refs")
+            .join("heads")
+            .join("noncommit"),
+        format!("{object_id}\n"),
+    )
+    .expect("non-commit branch ref should be written");
+    git(&root, ["symbolic-ref", "HEAD", "refs/heads/noncommit"]);
+
+    command(&root).arg("check").assert().code(2);
+}
+
+#[test]
+fn unborn_detection_rejects_a_branch_with_a_missing_object() {
+    let root = unborn_repository();
+    write(
+        &root,
+        "missing-object.bin",
+        "not stored in this repository\n",
+    );
+    let object_id = git(&root, ["hash-object", "missing-object.bin"]);
+    fs::write(
+        root.path()
+            .join(".git")
+            .join("refs")
+            .join("heads")
+            .join("corrupt"),
+        format!("{object_id}\n"),
+    )
+    .expect("corrupt branch ref should be written");
+    git(&root, ["symbolic-ref", "HEAD", "refs/heads/corrupt"]);
+
+    command(&root).arg("check").assert().code(2);
+}
+
+#[test]
 fn unborn_head_does_not_become_an_implicit_commit_range_fallback() {
     let root = repository();
     git(&root, ["branch", "baseline", "HEAD"]);

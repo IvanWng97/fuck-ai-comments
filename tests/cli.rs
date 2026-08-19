@@ -14,6 +14,24 @@ fn command(root: &TempDir) -> Command {
     command
 }
 
+#[test]
+fn check_help_describes_the_empty_baseline_for_unborn_branches() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    let output = command(&root)
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let normalized = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(normalized.contains("The baseline is HEAD, or empty on an unborn branch."));
+    assert!(normalized.contains(
+        "Compare the Git index with HEAD, or with an empty baseline on an unborn branch"
+    ));
+}
+
 #[cfg(unix)]
 fn assert_all_rejects_nonregular(root: &TempDir, path: &str) {
     let output = command(root)
