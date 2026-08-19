@@ -28,6 +28,24 @@ pub(super) enum Mode {
     Commits { base: String, head: Option<String> },
 }
 
+enum HeadState {
+    Commit(ObjectId),
+    Unborn,
+}
+
+enum DiffRequest<'revision> {
+    Worktree {
+        head: &'revision ObjectId,
+    },
+    Index {
+        head: Option<&'revision ObjectId>,
+    },
+    Commits {
+        base: &'revision ObjectId,
+        head: &'revision ObjectId,
+    },
+}
+
 pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result<Report> {
     let repository = Repository::discover(scope)?;
     let changes = repository.changes(mode)?;
@@ -94,24 +112,41 @@ impl Repository {
 
     fn changes(&self, mode: Mode) -> Result<ScopeChanges> {
         match mode {
-            Mode::Worktree => {
-                let head = self.verify_revision("HEAD")?;
-                let in_head = self.scope_exists_in_tree(&head)?;
-                let in_worktree = self.scope_exists_in_worktree()?;
-                Ok(ScopeChanges {
-                    files: self.worktree_changes(&head)?,
-                    scope_exists: in_head || in_worktree,
-                })
-            }
-            Mode::Staged => {
-                let head = self.verify_revision("HEAD")?;
-                let in_head = self.scope_exists_in_tree(&head)?;
-                let in_index = self.scope_exists_in_index()?;
-                Ok(ScopeChanges {
-                    files: self.diff_changes(DiffTarget::Index, &head, None)?,
-                    scope_exists: in_head || in_index,
-                })
-            }
+            Mode::Worktree => match self.head_state()? {
+                HeadState::Commit(head) => {
+                    let in_head = self.scope_exists_in_tree(&head)?;
+                    let in_worktree = self.scope_exists_in_worktree()?;
+                    Ok(ScopeChanges {
+                        files: self.worktree_changes(&head)?,
+                        scope_exists: in_head || in_worktree,
+                    })
+                }
+                HeadState::Unborn => {
+                    let in_index = self.scope_exists_in_index()?;
+                    let in_worktree = self.scope_exists_in_worktree()?;
+                    Ok(ScopeChanges {
+                        files: self.unborn_worktree_changes()?,
+                        scope_exists: in_index || in_worktree,
+                    })
+                }
+            },
+            Mode::Staged => match self.head_state()? {
+                HeadState::Commit(head) => {
+                    let in_head = self.scope_exists_in_tree(&head)?;
+                    let in_index = self.scope_exists_in_index()?;
+                    Ok(ScopeChanges {
+                        files: self.diff_changes(DiffRequest::Index { head: Some(&head) })?,
+                        scope_exists: in_head || in_index,
+                    })
+                }
+                HeadState::Unborn => {
+                    let in_index = self.scope_exists_in_index()?;
+                    Ok(ScopeChanges {
+                        files: self.diff_changes(DiffRequest::Index { head: None })?,
+                        scope_exists: in_index,
+                    })
+                }
+            },
             Mode::Commits { base, head } => {
                 let base_id = self.verify_revision(&base)?;
                 let head_name = head.as_deref().unwrap_or("HEAD");
@@ -120,7 +155,10 @@ impl Repository {
                 let in_merge_base = self.scope_exists_in_tree(&merge_base)?;
                 let in_head = self.scope_exists_in_tree(&head_id)?;
                 Ok(ScopeChanges {
-                    files: self.diff_changes(DiffTarget::Commit, &merge_base, Some(&head_id))?,
+                    files: self.diff_changes(DiffRequest::Commits {
+                        base: &merge_base,
+                        head: &head_id,
+                    })?,
                     scope_exists: in_merge_base || in_head,
                 })
             }
@@ -181,7 +219,7 @@ impl Repository {
     }
 
     fn worktree_changes(&self, head: &ObjectId) -> Result<Vec<FileChange>> {
-        let mut changes = self.diff_changes(DiffTarget::Worktree, head, None)?;
+        let mut changes = self.diff_changes(DiffRequest::Worktree { head })?;
         let output = self.git([
             OsStr::new("ls-files"),
             OsStr::new("--others"),
@@ -205,12 +243,34 @@ impl Repository {
         Ok(changes)
     }
 
-    fn diff_changes(
-        &self,
-        target: DiffTarget,
-        before: &ObjectId,
-        after: Option<&ObjectId>,
-    ) -> Result<Vec<FileChange>> {
+    fn unborn_worktree_changes(&self) -> Result<Vec<FileChange>> {
+        let output = self.git([
+            OsStr::new("ls-files"),
+            OsStr::new("--cached"),
+            OsStr::new("--others"),
+            OsStr::new("--exclude-standard"),
+            OsStr::new("--full-name"),
+            OsStr::new("-z"),
+        ])?;
+        let mut changes = Vec::new();
+        for path in parse_nul_paths(&output)? {
+            match fs::symlink_metadata(self.root.join(&path)) {
+                Ok(_) => changes.push(FileChange {
+                    before: None,
+                    after: Some(Snapshot::worktree(path)),
+                }),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("could not inspect {}", path.display()));
+                }
+            }
+        }
+        changes.sort_by(|left, right| left.sort_path().cmp(right.sort_path()));
+        Ok(changes)
+    }
+
+    fn diff_changes(&self, request: DiffRequest<'_>) -> Result<Vec<FileChange>> {
         let mut arguments = vec![
             OsString::from("diff"),
             OsString::from("--raw"),
@@ -222,16 +282,99 @@ impl Repository {
             OsString::from(format!("-l{GIT_EXHAUSTIVE_RENAME_LIMIT}")),
             OsString::from("--no-abbrev"),
         ];
-        if target == DiffTarget::Index {
-            arguments.push(OsString::from("--cached"));
-        }
-        arguments.push(OsString::from(before.as_str()));
-        if let Some(after) = after {
-            arguments.push(OsString::from(after.as_str()));
-        }
+        let target = match request {
+            DiffRequest::Worktree { head } => {
+                arguments.push(OsString::from(head.as_str()));
+                DiffTarget::Worktree
+            }
+            DiffRequest::Index { head } => {
+                arguments.push(OsString::from("--cached"));
+                if let Some(head) = head {
+                    arguments.push(OsString::from(head.as_str()));
+                }
+                DiffTarget::Index
+            }
+            DiffRequest::Commits { base, head } => {
+                arguments.push(OsString::from(base.as_str()));
+                arguments.push(OsString::from(head.as_str()));
+                DiffTarget::Commit
+            }
+        };
 
         let output = self.git(arguments.iter().map(OsString::as_os_str))?;
         parse_raw_changes(&output, target)
+    }
+
+    fn head_state(&self) -> Result<HeadState> {
+        let output = git_output(
+            &self.root,
+            [
+                OsStr::new("rev-parse"),
+                OsStr::new("--verify"),
+                OsStr::new("--quiet"),
+                OsStr::new("--end-of-options"),
+                OsStr::new("HEAD^{commit}"),
+            ],
+        )?;
+        if output.status.success() {
+            return ObjectId::parse(one_line(&output.stdout, "revision object ID")?)
+                .map(HeadState::Commit)
+                .context("revision HEAD returned an invalid object ID");
+        }
+
+        let symbolic = git_output(
+            &self.root,
+            [
+                OsStr::new("symbolic-ref"),
+                OsStr::new("--quiet"),
+                OsStr::new("--no-recurse"),
+                OsStr::new("HEAD"),
+            ],
+        )?;
+        if !symbolic.status.success() {
+            bail!("could not resolve revision HEAD");
+        }
+        let branch = one_line(&symbolic.stdout, "HEAD symbolic reference")?;
+        if !matches!(
+            branch.strip_prefix("refs/heads/"),
+            Some(branch_name) if !branch_name.is_empty()
+        ) {
+            bail!("could not resolve revision HEAD: symbolic reference is not a local branch");
+        }
+
+        let symbolic_branch = git_output(
+            &self.root,
+            [
+                OsStr::new("symbolic-ref"),
+                OsStr::new("--quiet"),
+                OsStr::new("--no-recurse"),
+                OsStr::new(branch),
+            ],
+        )?;
+        if symbolic_branch.status.success() {
+            bail!("revision HEAD does not name a commit");
+        }
+        if symbolic_branch.status.code() != Some(1) {
+            bail!(
+                "could not inspect HEAD branch: {}",
+                stderr_message(&symbolic_branch)
+            );
+        }
+
+        let existing = git_output(
+            &self.root,
+            [
+                OsStr::new("show-ref"),
+                OsStr::new("--verify"),
+                OsStr::new("--quiet"),
+                OsStr::new(branch),
+            ],
+        )?;
+        match existing.status.code() {
+            Some(1) => Ok(HeadState::Unborn),
+            Some(0) => bail!("revision HEAD does not name a commit"),
+            _ => bail!("could not inspect HEAD: {}", stderr_message(&existing)),
+        }
     }
 
     fn verify_revision(&self, revision: &str) -> Result<ObjectId> {

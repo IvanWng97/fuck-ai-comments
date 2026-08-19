@@ -26,7 +26,7 @@ enum Command {
 #[derive(Debug, Args)]
 #[command(
     about = "Enforce comment policy on source files",
-    long_about = "Enforce comment policy on source files. By default, compares HEAD with the current worktree, including staged, unstaged, and untracked files.",
+    long_about = "Enforce comment policy on source files. By default, compares the current worktree with the Git baseline, including staged, unstaged, and untracked files. The baseline is HEAD, or empty on an unborn branch.",
     group(
         ArgGroup::new("mode")
             .args(["all", "staged", "base"])
@@ -43,7 +43,10 @@ struct CheckArgs {
     profile: AnalysisProfile,
     #[arg(long, help = "Analyze every supported file instead of a Git change")]
     all: bool,
-    #[arg(long, help = "Compare HEAD with the Git index")]
+    #[arg(
+        long,
+        help = "Compare the Git index with HEAD, or with an empty baseline on an unborn branch"
+    )]
     staged: bool,
     #[arg(
         long,
