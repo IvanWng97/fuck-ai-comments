@@ -5,6 +5,7 @@ use tree_sitter::{Language, Node, Tree};
 
 use super::walk::{WalkEvent, events};
 use super::{css, javascript, tree, typescript};
+use crate::identity::IdentityArena;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::{
     CodeToken, Comment, CommentKind, CommentSnapshot, OwnerSnapshot, ParsedFile, Span,
@@ -98,12 +99,16 @@ pub(crate) fn parse_file<S: ContainerSpec>(
         regions,
     } = parse_facts(path, source, spec)?;
     let file_span = file_span(source);
+    let mut identities = IdentityArena::default();
+    let file_identity = identities.push_path(["file"])?;
+    let template_identity = identities.push_path(["template"])?;
     let mut document = ParsedFile {
+        identities,
         owners: vec![
             OwnerSnapshot {
                 kind: OwnerKind::File,
                 name: "<file>".to_owned(),
-                identity: vec!["file".to_owned()],
+                identity: file_identity,
                 span: file_span.clone(),
                 parent: None,
                 code: Vec::new(),
@@ -111,7 +116,7 @@ pub(crate) fn parse_file<S: ContainerSpec>(
             OwnerSnapshot {
                 kind: OwnerKind::Template,
                 name: "<template>".to_owned(),
-                identity: vec!["template".to_owned()],
+                identity: template_identity,
                 span: file_span,
                 parent: Some(0),
                 code: syntax,
@@ -417,9 +422,16 @@ fn merge_embedded_file(
     region: &EmbeddedRegion,
     parent: usize,
 ) -> Result<(), AnalysisError> {
+    let ParsedFile {
+        identities,
+        owners,
+        comments,
+    } = embedded;
+    let identity_mapping = destination.identities.import(identities)?;
     let owner_offset = destination.owners.len();
-    for (index, mut owner) in embedded.owners.into_iter().enumerate() {
+    for (index, mut owner) in owners.into_iter().enumerate() {
         shift_span(&mut owner.span, region)?;
+        owner.identity = IdentityArena::remap(&identity_mapping, owner.identity)?;
         if index == 0 {
             owner.name = region.owner_name.to_owned();
             owner.parent = Some(parent);
@@ -435,7 +447,7 @@ fn merge_embedded_file(
         }
         destination.owners.push(owner);
     }
-    for mut comment in embedded.comments {
+    for mut comment in comments {
         shift_span(&mut comment.span, region)?;
         comment.owner = checked_owner_offset(owner_offset, comment.owner)?;
         destination.comments.push(comment);

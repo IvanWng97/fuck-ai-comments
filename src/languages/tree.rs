@@ -3,10 +3,11 @@ use std::path::Path;
 
 use tree_sitter::{Language, Node, Parser, Tree};
 
+use crate::identity::IdentityArena;
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{
-    CodeToken, Comment, CommentKind, Function, Leaf, ParsedFile, Span, TreeInput, TreeOwner,
-    TreeOwnership, TypeOwner, tree_document, tree_findings,
+    CodeToken, Comment, CommentKind, Function, IdentitySource, Leaf, ParsedFile, Span, TreeInput,
+    TreeOwner, TreeOwnership, TypeOwner, tree_document, tree_findings,
 };
 
 use super::walk::{WalkEvent, events};
@@ -632,7 +633,7 @@ impl OwnerCandidate {
             data: OwnerData::Function(Function {
                 span,
                 name,
-                identity,
+                identity: IdentitySource::segments(identity),
             }),
             suppressed_nodes: Vec::new(),
             callable_frontier_roots: Vec::new(),
@@ -644,7 +645,7 @@ impl OwnerCandidate {
             data: OwnerData::Type(TypeOwner {
                 span,
                 name,
-                identity,
+                identity: IdentitySource::segments(identity),
             }),
             suppressed_nodes: Vec::new(),
             callable_frontier_roots: Vec::new(),
@@ -673,6 +674,7 @@ impl OwnerCandidate {
 }
 
 struct Facts {
+    identities: IdentityArena,
     functions: Vec<Function>,
     types: Vec<TypeOwner>,
     comments: Vec<Comment>,
@@ -706,6 +708,9 @@ pub(crate) trait LanguageSpec: Copy {
     fn grammar(self) -> Language;
     fn build_context(self, _root: Node<'_>, _source: &str) -> Self::Context {
         Self::Context::default()
+    }
+    fn into_identity_arena(self, _context: Self::Context) -> IdentityArena {
+        IdentityArena::default()
     }
     fn is_owner_prefix(self, _kind: &str) -> bool {
         false
@@ -751,6 +756,7 @@ pub(crate) fn document<S: LanguageSpec>(
     spec: S,
 ) -> Result<ParsedFile, AnalysisError> {
     let Facts {
+        identities,
         functions,
         types,
         comments,
@@ -759,7 +765,7 @@ pub(crate) fn document<S: LanguageSpec>(
         ownership,
     } = parse_facts(path, source, spec)?;
     let code = assign_code(syntax, functions.len(), types.len(), leaves.len());
-    Ok(tree_document(
+    tree_document(
         source,
         TreeInput {
             functions: &functions,
@@ -769,7 +775,8 @@ pub(crate) fn document<S: LanguageSpec>(
             ownership: &ownership,
         },
         code,
-    ))
+        identities,
+    )
 }
 
 fn parse_facts<S: LanguageSpec>(
@@ -803,7 +810,9 @@ fn parse_facts<S: LanguageSpec>(
             }
         }
     }
-    collector.finish()
+    let mut facts = collector.finish()?;
+    facts.identities = spec.into_identity_arena(context);
+    Ok(facts)
 }
 
 struct TraversalFrame<'tree> {
@@ -1118,6 +1127,7 @@ impl<'source> FactCollector<'source> {
         };
         materialize_comments(&self.comments, &choices, &mut ownership);
         Ok(Facts {
+            identities: IdentityArena::default(),
             functions: self.functions,
             types: self.types,
             comments: self.comments,
@@ -1689,7 +1699,7 @@ mod tests {
                     end_line: COUNT + 1,
                 },
                 name: format!("f{index}"),
-                identity: vec![format!("f{index}")],
+                identity: IdentitySource::segments(vec![format!("f{index}")]),
             })
             .collect();
 

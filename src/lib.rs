@@ -5,6 +5,7 @@
 use std::path::Path;
 
 mod change;
+mod identity;
 mod languages;
 mod model;
 mod policy;

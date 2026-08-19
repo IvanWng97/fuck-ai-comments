@@ -5,6 +5,7 @@ use toml_edit::{Document, Item, Table};
 use toml_parser::Source;
 use toml_parser::lexer::{Token, TokenKind};
 
+use crate::identity::IdentityArena;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::{
     CodeToken, Comment, CommentKind, CommentSnapshot, LEAF_COMMENT_MAX_LINES, OwnerSnapshot,
@@ -86,11 +87,13 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
 
     let line_starts = line_starts(source);
     let drafts = owner_drafts(path, &document)?;
+    let mut identities = IdentityArena::default();
     let mut owners = Vec::with_capacity(drafts.len() + 1);
+    let file_identity = identities.push_path(["file"])?;
     owners.push(OwnerSnapshot {
         kind: OwnerKind::File,
         name: "<file>".to_owned(),
-        identity: vec!["file".to_owned()],
+        identity: file_identity,
         span: Span {
             start_byte: 0,
             end_byte: source.len(),
@@ -100,9 +103,9 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
         parent: None,
         code: Vec::new(),
     });
-    owners.extend(drafts.into_iter().map(|draft| {
-        let identity = vec![draft.name.clone()];
-        OwnerSnapshot {
+    for draft in drafts {
+        let identity = identities.push_path([draft.name.as_str()])?;
+        owners.push(OwnerSnapshot {
             kind: OwnerKind::TomlKey,
             name: draft.name,
             identity,
@@ -113,8 +116,8 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
                 .into_iter()
                 .map(|text| CodeToken::atom(TABLE_PATH_TOKEN_KIND, &text))
                 .collect(),
-        }
-    }));
+        });
+    }
     validate_flat_owner_spans(path, &owners)?;
 
     let comment_tokens: Vec<_> = tokens
@@ -139,7 +142,11 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
         .collect::<Result<Vec<_>, AnalysisError>>()?;
 
     assign_code_tokens(path, source, &tokens, &mut owners)?;
-    Ok(ParsedFile { owners, comments })
+    Ok(ParsedFile {
+        identities,
+        owners,
+        comments,
+    })
 }
 
 fn toml_error(path: &Path, detail: impl Into<String>) -> AnalysisError {
