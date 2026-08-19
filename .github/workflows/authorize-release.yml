@@ -1,0 +1,131 @@
+name: Authorize release
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+      requested_tag:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  authorize-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      EVENT_NAME: ${{ github.event_name }}
+      EVENT_REF: ${{ github.ref }}
+      GH_TOKEN: ${{ github.token }}
+      PLAN: ${{ inputs.plan }}
+      RELEASE_COMMIT: ${{ github.sha }}
+      REQUESTED_TAG: ${{ inputs.requested_tag }}
+    steps:
+      - name: Require an unused canonical tag on tested main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_ref="refs/heads/main"
+          if [[ $EVENT_NAME != workflow_dispatch || $EVENT_REF != "$expected_ref" ]]; then
+            echo "releases must be dispatched from ${expected_ref}" >&2
+            exit 1
+          fi
+
+          release_count=$(jq -er '
+            .releases |
+            if type == "array" then length else error("releases must be an array") end
+          ' <<<"$PLAN")
+          if [[ $release_count != 1 ]]; then
+            echo "expected exactly one planned release, got ${release_count}" >&2
+            exit 1
+          fi
+
+          announcement_tag=$(jq -er '
+            .announcement_tag |
+            if type == "string" then . else error("announcement_tag must be a string") end
+          ' <<<"$PLAN")
+          app_version=$(jq -er '
+            .releases[0].app_version |
+            if type == "string" then . else error("app_version must be a string") end
+          ' <<<"$PLAN")
+          expected_tag="v${app_version}"
+          if [[ $REQUESTED_TAG != "$announcement_tag" ]]; then
+            echo "release tag mismatch: requested=${REQUESTED_TAG} announcement=${announcement_tag}" >&2
+            exit 1
+          fi
+          if [[ $REQUESTED_TAG != "$expected_tag" ]]; then
+            echo "release tag mismatch: requested=${REQUESTED_TAG} announcement=${announcement_tag} expected=${expected_tag}" >&2
+            exit 1
+          fi
+
+          default_head=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/${DEFAULT_BRANCH}" \
+            --jq .object.sha)
+          if [[ $RELEASE_COMMIT != "$default_head" ]]; then
+            echo "release commit is not the default branch head" >&2
+            exit 1
+          fi
+
+          if ! gh api \
+            --paginate \
+            --slurp \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f head_sha="$RELEASE_COMMIT" \
+            -f event=push \
+            -f status=completed \
+            -F per_page=100 |
+            jq -e --arg sha "$RELEASE_COMMIT" '
+              any(
+                .[].workflow_runs[];
+                .head_sha == $sha and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success"
+              )
+            ' >/dev/null
+          then
+            echo "ci.yml has no successful push run for the release commit" >&2
+            exit 1
+          fi
+
+          tag_count=$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${REQUESTED_TAG}" |
+            jq -er --arg ref "refs/tags/${REQUESTED_TAG}" '
+              if type == "array" then
+                map(select(.ref == $ref)) | length
+              else
+                error("matching refs response must be an array")
+              end
+            ')
+          if [[ $tag_count != 0 ]]; then
+            echo "release tag already exists: ${REQUESTED_TAG}" >&2
+            exit 1
+          fi
+
+          release_count=$(gh api \
+            --paginate \
+            --slurp \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/releases" \
+            -F per_page=100 |
+            jq -er --arg tag "$REQUESTED_TAG" '
+              if type == "array" and all(.[]; type == "array") then
+                [.[][] | select(.tag_name == $tag)] | length
+              else
+                error("releases response must contain arrays of releases")
+              end
+            ')
+          if [[ $release_count != 0 ]]; then
+            echo "release already exists: ${REQUESTED_TAG}" >&2
+            exit 1
+          fi

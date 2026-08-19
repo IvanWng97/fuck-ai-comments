@@ -1,0 +1,35 @@
+name: Released Action E2E
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  action-e2e:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - ubuntu-24.04
+          - windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ fromJSON(inputs.plan).announcement_tag }}
+      - name: Run packaged Action
+        uses: ./
+        with:
+          version: ${{ fromJSON(inputs.plan).releases[0].app_version }}
+          mode: all
+          path: .

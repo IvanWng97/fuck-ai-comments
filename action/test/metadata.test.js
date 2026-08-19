@@ -1,9 +1,58 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
+
+const ACTION_PINS = {
+  "CodSpeedHQ/action": {
+    sha: "4296e51e7041e24dadb86d1d6e8b9320d223dbe8",
+    version: "v5",
+  },
+  "actions/attest": {
+    sha: "1e69f48acb82d1966a394da916b4c1698aa569d6",
+    version: "v4",
+  },
+  "actions/checkout": {
+    sha: "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    version: "v7",
+  },
+  "actions/download-artifact": {
+    sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    version: "v8",
+  },
+  "actions/setup-node": {
+    sha: "820762786026740c76f36085b0efc47a31fe5020",
+    version: "v7",
+  },
+  "actions/upload-artifact": {
+    sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    version: "v7",
+  },
+  "codecov/codecov-action": {
+    sha: "fb8b3582c8e4def4969c97caa2f19720cb33a72f",
+    version: "v7",
+  },
+};
+
+function pinnedAction(name) {
+  return `${name}@${ACTION_PINS[name].sha}`;
+}
+
+async function workflowPaths(directory) {
+  const paths = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      paths.push(...(await workflowPaths(path)));
+    } else if (/\.ya?ml$/u.test(entry.name)) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
 
 test("action metadata uses Node 24 and a committed bundle", async () => {
   const metadata = parseYaml(await readFile("action.yml", "utf8"));
@@ -24,18 +73,63 @@ test("action metadata uses Node 24 and a committed bundle", async () => {
   ]);
 });
 
-test("workflow actions use official major tags", async () => {
-  for (const workflow of [
+test("workflow actions use reviewed commits with version comments", async () => {
+  const workflowDirectory = ".github/workflows";
+  const workflows = await workflowPaths(workflowDirectory);
+  const seen = new Set();
+  for (const workflow of workflows) {
+    const contents = await readFile(workflow, "utf8");
+    const references = [
+      ...contents.matchAll(
+        /^\s*(?:-\s*)?uses:\s+([^\s#]+)(?:\s+#\s+(v\d+))?\s*$/gmu,
+      ),
+    ];
+    for (const [, reference, version] of references) {
+      if (reference.startsWith("./")) {
+        continue;
+      }
+      const match = /^([^@]+)@([a-f\d]{40})$/u.exec(reference);
+      assert.ok(match, `${workflow}: ${reference} is not commit-pinned`);
+      const [, action, sha] = match;
+      assert.deepEqual(
+        { sha, version },
+        ACTION_PINS[action],
+        `${workflow}: unexpected ${action} pin`,
+      );
+      seen.add(action);
+    }
+  }
+  assert.deepEqual(seen, new Set(Object.keys(ACTION_PINS)));
+
+  const config = parseToml(await readFile("dist-workspace.toml", "utf8"));
+  assert.deepEqual(config.dist["github-action-commits"], {
+    "actions/attest": `${ACTION_PINS["actions/attest"].sha} # v4`,
+    "actions/checkout": `${ACTION_PINS["actions/checkout"].sha} # v7`,
+    "actions/download-artifact": `${ACTION_PINS["actions/download-artifact"].sha} # v8`,
+    "actions/upload-artifact": `${ACTION_PINS["actions/upload-artifact"].sha} # v7`,
+  });
+});
+
+test("cargo-dist installer version follows the dist configuration", async () => {
+  const config = parseToml(await readFile("dist-workspace.toml", "utf8"));
+  const version = config.dist["cargo-dist-version"];
+  const officialInstaller = `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh | sh`;
+  for (const workflowPath of [
     ".github/workflows/ci.yml",
-    ".github/workflows/codspeed.yml",
-    ".github/workflows/coverage.yml",
     ".github/workflows/release.yml",
   ]) {
-    const contents = await readFile(workflow, "utf8");
-    const references = [...contents.matchAll(/uses:\s+[^@\s]+@([^\s]+)/gu)];
-    assert.ok(references.length > 0, `${workflow} has no action references`);
-    for (const [, reference] of references) {
-      assert.match(reference, /^v\d+$/u, `${workflow}: ${reference}`);
+    const workflow = parseYaml(await readFile(workflowPath, "utf8"));
+    const steps = Object.values(workflow.jobs).flatMap(
+      (job) => job.steps ?? [],
+    );
+    const installers = steps.filter(
+      (step) =>
+        step.name === "Install dist" &&
+        step.run.includes("cargo-dist/releases/download"),
+    );
+    assert.ok(installers.length > 0, `${workflowPath} has no dist installer`);
+    for (const installer of installers) {
+      assert.equal(installer.run, officialInstaller);
     }
   }
 });
@@ -70,7 +164,7 @@ test("Codecov uploads one explicit Rust coverage report", async () => {
     "id-token": "write",
   });
   assert.deepEqual(job.steps[0], {
-    uses: "actions/checkout@v7",
+    uses: pinnedAction("actions/checkout"),
     with: { "persist-credentials": false },
   });
   assert.deepEqual(
@@ -112,7 +206,7 @@ test("Codecov uploads one explicit Rust coverage report", async () => {
     job.steps.find((step) => step.name === "Upload coverage"),
     {
       name: "Upload coverage",
-      uses: "codecov/codecov-action@v7",
+      uses: pinnedAction("codecov/codecov-action"),
       with: {
         disable_search: true,
         fail_ci_if_error: true,
@@ -178,7 +272,7 @@ test("CodSpeed runs the 10K-LOC analysis benchmarks", async () => {
     "id-token": "write",
   });
   assert.deepEqual(job.steps[0], {
-    uses: "actions/checkout@v7",
+    uses: pinnedAction("actions/checkout"),
     with: { "persist-credentials": false },
   });
   assert.deepEqual(
@@ -199,7 +293,7 @@ test("CodSpeed runs the 10K-LOC analysis benchmarks", async () => {
     job.steps.find((step) => step.name === "Run benchmarks"),
     {
       name: "Run benchmarks",
-      uses: "CodSpeedHQ/action@v5",
+      uses: pinnedAction("CodSpeedHQ/action"),
       with: {
         mode: "simulation,memory",
         run: "cargo codspeed run --bench analysis",
