@@ -15,6 +15,29 @@ pub(crate) const LEAF_COMMENT_MAX_LINES: usize = 3;
 const TEMPLATE_COMMENT_MAX_LINES: usize = 3;
 const OWNER_COMMENT_CAP_RULE: &str = "comment-policy/owner-comment-cap";
 
+#[cfg(test)]
+thread_local! {
+    static LINE_START_STORAGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_line_start_storage() {
+    LINE_START_STORAGE.with(|entries| entries.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn line_start_storage() -> usize {
+    LINE_START_STORAGE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_line_start_storage(entries: usize) {
+    LINE_START_STORAGE.with(|total| total.set(total.get() + entries));
+}
+
+#[cfg(not(test))]
+fn record_line_start_storage(_entries: usize) {}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct Span {
     pub(crate) start_byte: usize,
@@ -61,6 +84,7 @@ pub(crate) struct Function {
     pub(crate) span: Span,
     pub(crate) name: String,
     pub(crate) identity: IdentitySource,
+    pub(crate) budget_code_lines: usize,
 }
 
 #[derive(Debug)]
@@ -68,6 +92,7 @@ pub(crate) struct TypeOwner {
     pub(crate) span: Span,
     pub(crate) name: String,
     pub(crate) identity: IdentitySource,
+    pub(crate) budget_code_lines: usize,
 }
 
 #[derive(Debug)]
@@ -406,6 +431,7 @@ fn function_findings(
                 budget_rule: "comment-policy/function-comment-budget",
                 name: &function.name,
                 span: &function.span,
+                budget_code_lines: function.budget_code_lines,
             },
             budget_comments,
         ));
@@ -434,6 +460,7 @@ fn type_findings(
                 budget_rule: "comment-policy/type-comment-budget",
                 name: &type_owner.name,
                 span: &type_owner.span,
+                budget_code_lines: type_owner.budget_code_lines,
             },
             budget_comments,
         ));
@@ -447,6 +474,7 @@ struct ScopedOwner<'owner> {
     budget_rule: &'static str,
     name: &'owner str,
     span: &'owner Span,
+    budget_code_lines: usize,
 }
 
 fn scoped_owner_findings(
@@ -492,7 +520,7 @@ fn scoped_owner_findings(
         }
     }
 
-    let code_lines = code_line_count(source, owner.span, &budget_comments);
+    let code_lines = owner.budget_code_lines;
     let allowance = FUNCTION_COMMENT_ABSOLUTE_MAX
         .min(1_usize.max(code_lines / FUNCTION_CODE_LINES_PER_COMMENT));
     if narrative_lines.len() > allowance {
@@ -565,6 +593,9 @@ pub(crate) fn file_findings(
     comments: &[Comment],
     all_comments: &[Comment],
 ) -> Vec<Finding> {
+    if comments.is_empty() {
+        return Vec::new();
+    }
     let line_starts = LineStarts::new(source);
     file_findings_with_lines(
         path,
@@ -676,7 +707,7 @@ struct LineStarts(Vec<usize>);
 
 impl LineStarts {
     fn new(source: &str) -> Self {
-        Self(
+        let starts = Self(
             std::iter::once(0)
                 .chain(
                     source
@@ -686,7 +717,9 @@ impl LineStarts {
                         .map(|(index, _)| index + 1),
                 )
                 .collect(),
-        )
+        );
+        record_line_start_storage(starts.0.capacity());
+        starts
     }
 
     fn for_line(&self, one_based_line: usize) -> usize {

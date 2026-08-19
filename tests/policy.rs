@@ -18,6 +18,143 @@ fn analyze_line_change(
 }
 
 #[test]
+fn nested_function_code_does_not_expand_the_parent_function_budget() {
+    let child_body = (0..24)
+        .map(|line| format!("    let child_{line:02} = {line};\n"))
+        .collect::<String>();
+    let source = format!(
+        concat!(
+            "fn parent() {{\n",
+            "    // The first call initializes the outer protocol.\n",
+            "    initialize();\n",
+            "    // The second call publishes the outer result.\n",
+            "    publish();\n",
+            "    fn child() {{\n",
+            "{}",
+            "    }}\n",
+            "}}\n",
+        ),
+        child_body,
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), &source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "child function code must not earn the parent more comments: {findings:#?}"
+    );
+}
+
+#[test]
+fn child_method_code_does_not_expand_the_parent_type_budget() {
+    let method_body = (0..24)
+        .map(|line| format!("    const child{line:02} = {line};\n"))
+        .collect::<String>();
+    let source = format!(
+        concat!(
+            "class Service {{\n",
+            "  // The first field selects the wire protocol.\n",
+            "  protocol = 1;\n",
+            "  // The second field caps retry behavior.\n",
+            "  retries = 2;\n",
+            "  operate() {{\n",
+            "{}",
+            "  }}\n",
+            "}}\n",
+        ),
+        method_body,
+    );
+
+    let findings =
+        analyze(Path::new("service.ts"), &source).expect("valid TypeScript should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "child method code must not earn its type more comments: {findings:#?}"
+    );
+}
+
+#[test]
+fn nested_function_code_still_contributes_to_the_file_budget() {
+    let function_body = (0..64)
+        .map(|line| format!("    let file_{line:02} = {line};\n"))
+        .collect::<String>();
+    let source = format!(
+        concat!(
+            "// The first file rule covers deployment.\n\n",
+            "// The second file rule covers recovery.\n\n",
+            "// The third file rule covers observability.\n\n",
+            "fn operation() {{\n",
+            "{}",
+            "}}\n",
+        ),
+        function_body,
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), &source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/file-comment-budget"),
+        "whole-file code keeps the existing file denominator semantics: {findings:#?}"
+    );
+}
+
+#[test]
+fn leaf_code_contributes_to_its_parent_function_budget() {
+    let mut source =
+        String::from("fn operation() {\n    // The first constant fixes the protocol version.\n");
+    for constant in 0..6 {
+        source.push_str(&format!(
+            "    const FIRST_{constant}: usize = {constant};\n"
+        ));
+    }
+    source.push_str("    // The second group fixes the retry schedule.\n");
+    for constant in 6..12 {
+        source.push_str(&format!(
+            "    const SECOND_{constant}: usize = {constant};\n"
+        ));
+    }
+    source.push_str("}\n");
+
+    let findings = analyze(Path::new("src/lib.rs"), &source).expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/function-comment-budget"),
+        "leaf constants remain code in their parent function budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn leaf_code_contributes_to_its_parent_type_budget() {
+    let mut source =
+        String::from("class Service:\n    # The first fields define the protocol contract.\n");
+    for field in 0..6 {
+        source.push_str(&format!("    FIRST_{field} = {field}\n"));
+    }
+    source.push_str("    # The second fields define the retry contract.\n");
+    for field in 6..12 {
+        source.push_str(&format!("    SECOND_{field} = {field}\n"));
+    }
+
+    let findings = analyze(Path::new("service.py"), &source).expect("valid Python should parse");
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule != "comment-policy/type-comment-budget"),
+        "leaf fields remain code in their parent type budget: {findings:#?}"
+    );
+}
+
+#[test]
 fn rust_short_function_rejects_ten_comment_lines() {
     let source = r#"
 fn render() {
