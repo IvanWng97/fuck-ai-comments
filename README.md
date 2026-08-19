@@ -80,13 +80,13 @@ fuck-ai-comments check --all
 # Scan one directory or file; absolute paths work too.
 fuck-ai-comments check --all ./src
 
-# Local default: HEAD versus staged + unstaged + untracked content.
+# Local default: HEAD, or an empty pre-first-commit baseline, versus current content.
 fuck-ai-comments check
 
 # Restrict changed-owner analysis to one directory.
 fuck-ai-comments check ./src
 
-# Pre-commit: HEAD versus the index only.
+# Pre-commit: HEAD, or an empty pre-first-commit baseline, versus the index only.
 fuck-ai-comments check --staged
 
 # CI or a committed branch range. The CLI compares merge-base(base, head) to head.

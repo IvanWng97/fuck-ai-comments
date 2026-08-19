@@ -19,14 +19,19 @@ const UNPAIRED_ADD_DELETE_ERROR: &str =
 const GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT: usize = 1_000;
 
 fn repository() -> TempDir {
-    let root = TempDir::new().expect("temporary repository should be created");
-    git(&root, ["init", "--quiet"]);
-    git(&root, ["config", "user.email", "tests@example.com"]);
-    git(&root, ["config", "user.name", "Test User"]);
+    let root = unborn_repository();
     git(
         &root,
         ["commit", "--quiet", "--allow-empty", "-m", "initial"],
     );
+    root
+}
+
+fn unborn_repository() -> TempDir {
+    let root = TempDir::new().expect("temporary repository should be created");
+    git(&root, ["init", "--quiet"]);
+    git(&root, ["config", "user.email", "tests@example.com"]);
+    git(&root, ["config", "user.name", "Test User"]);
     root
 }
 
@@ -133,6 +138,152 @@ fn default_compares_head_to_the_worktree() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(stdout.contains("src/lib.rs:2: comment-policy/comment-owner-changed"));
+}
+
+#[test]
+fn default_analyzes_supported_files_before_the_first_commit() {
+    let root = unborn_repository();
+    write(&root, "src/lib.rs", SLOPPY_RUST);
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("src/lib.rs:1: comment-policy/leaf-comment-budget"));
+}
+
+#[test]
+fn staged_analyzes_supported_files_before_the_first_commit() {
+    let root = unborn_repository();
+    write(&root, "src/lib.rs", SLOPPY_RUST);
+    git(&root, ["add", "src/lib.rs"]);
+
+    let output = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("src/lib.rs:1: comment-policy/leaf-comment-budget"));
+}
+
+#[test]
+fn unborn_default_reads_the_worktree_while_staged_reads_the_index() {
+    let root = unborn_repository();
+    write(&root, "lib.rs", SLOPPY_RUST);
+    git(&root, ["add", "lib.rs"]);
+    write(&root, "lib.rs", CLEAN_RUST);
+
+    command(&root)
+        .arg("check")
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+    let staged = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    assert!(
+        String::from_utf8(staged.stdout)
+            .expect("stdout should be UTF-8")
+            .contains("lib.rs:1: comment-policy/leaf-comment-budget")
+    );
+}
+
+#[test]
+fn unborn_modes_accept_an_empty_repository() {
+    let root = unborn_repository();
+
+    command(&root)
+        .arg("check")
+        .assert()
+        .code(0)
+        .stdout("clean: 0 files scanned\n");
+    command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(0)
+        .stdout("clean: 0 files scanned\n");
+}
+
+#[test]
+fn unborn_detection_rejects_a_recursive_nonbranch_symbolic_head() {
+    let root = unborn_repository();
+    git(
+        &root,
+        ["symbolic-ref", "refs/meta/alias", "refs/heads/missing"],
+    );
+    git(&root, ["symbolic-ref", "HEAD", "refs/meta/alias"]);
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("stderr should be UTF-8")
+            .contains("could not resolve revision HEAD")
+    );
+}
+
+#[test]
+fn unborn_detection_rejects_a_symbolic_local_branch_alias() {
+    let root = unborn_repository();
+    git(
+        &root,
+        ["symbolic-ref", "refs/heads/alias", "refs/tags/missing"],
+    );
+    git(&root, ["symbolic-ref", "HEAD", "refs/heads/alias"]);
+
+    command(&root).arg("check").assert().code(2);
+}
+
+#[test]
+fn unborn_head_does_not_become_an_implicit_commit_range_fallback() {
+    let root = repository();
+    git(&root, ["branch", "baseline", "HEAD"]);
+    git(&root, ["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+
+    let output = command(&root)
+        .args(["check", "--base", "baseline"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("stderr should be UTF-8")
+            .contains("could not resolve revision HEAD")
+    );
+}
+
+#[test]
+fn unborn_staged_still_fails_closed_on_parse_errors() {
+    let root = unborn_repository();
+    write(&root, "broken.rs", "fn broken( {\n");
+    git(&root, ["add", "broken.rs"]);
+
+    let output = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("stderr should be UTF-8")
+            .contains("could not parse broken.rs as Rust")
+    );
 }
 
 #[test]
