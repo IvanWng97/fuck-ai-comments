@@ -42,41 +42,48 @@ impl LanguageSpec for Python {
         node: Node<'_>,
         location: OwnerLocation<'_>,
         source: &str,
+        _context: &Self::Context,
         function_depth: usize,
         _callable_subtrees: &CallableSubtrees,
-    ) -> Option<OwnerCandidate> {
+    ) -> Result<Option<OwnerCandidate>, AnalysisError> {
         if let Some(class) = class_owner_node(node, location) {
             let name = class
                 .child_by_field_name("name")
-                .map(|name| node_text(name, source).to_owned())?;
-            return Some(OwnerCandidate::type_owner(
+                .map(|name| node_text(name, source).to_owned());
+            let Some(name) = name else {
+                return Ok(None);
+            };
+            return Ok(Some(OwnerCandidate::type_owner(
                 Span::from_node(node),
                 name.clone(),
                 vec![format!("class:{name}")],
-            ));
+            )));
         }
         if let Some(function) = function_owner_node(node, location) {
-            return Some(OwnerCandidate::function(
+            return Ok(Some(OwnerCandidate::function(
                 Span::from_node(node),
                 function
                     .child_by_field_name("name")
                     .map_or(ANONYMOUS_FUNCTION_NAME, |name| node_text(name, source))
                     .to_owned(),
                 Vec::new(),
-            ));
+            )));
         }
         if node.kind() != "assignment" || function_depth != 0 {
-            return None;
+            return Ok(None);
         }
         let name = node
             .child_by_field_name("left")
             .filter(|left| left.kind() == "identifier")
-            .map(|left| node_text(left, source))?;
+            .map(|left| node_text(left, source));
+        let Some(name) = name else {
+            return Ok(None);
+        };
         let uppercase = name.bytes().any(|byte| byte.is_ascii_uppercase())
             && name
                 .bytes()
                 .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
-        uppercase.then(|| OwnerCandidate::leaf(Span::from_node(node), name.to_owned()))
+        Ok(uppercase.then(|| OwnerCandidate::leaf(Span::from_node(node), name.to_owned())))
     }
 
     fn classify_comment(

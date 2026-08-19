@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tree_sitter::{Language, Node, Parser, Tree};
 
-use crate::identity::IdentityArena;
+use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{
     CodeToken, Comment, CommentKind, Function, IdentitySource, Leaf, ParsedFile, Span, TreeInput,
@@ -640,6 +640,22 @@ impl OwnerCandidate {
         }
     }
 
+    pub(crate) fn function_with_identity_parent(
+        span: Span,
+        name: String,
+        parent: Option<IdentityId>,
+    ) -> Self {
+        Self {
+            data: OwnerData::Function(Function {
+                span,
+                identity: IdentitySource::child(parent, name.clone()),
+                name,
+            }),
+            suppressed_nodes: Vec::new(),
+            callable_frontier_roots: Vec::new(),
+        }
+    }
+
     pub(crate) fn type_owner(span: Span, name: String, identity: Vec<String>) -> Self {
         Self {
             data: OwnerData::Type(TypeOwner {
@@ -706,8 +722,8 @@ pub(crate) trait LanguageSpec: Copy {
 
     fn label(self) -> &'static str;
     fn grammar(self) -> Language;
-    fn build_context(self, _root: Node<'_>, _source: &str) -> Self::Context {
-        Self::Context::default()
+    fn build_context(self, _root: Node<'_>, _source: &str) -> Result<Self::Context, AnalysisError> {
+        Ok(Self::Context::default())
     }
     fn into_identity_arena(self, _context: Self::Context) -> IdentityArena {
         IdentityArena::default()
@@ -723,9 +739,10 @@ pub(crate) trait LanguageSpec: Copy {
         node: Node<'_>,
         location: OwnerLocation<'_>,
         source: &str,
+        context: &Self::Context,
         function_depth: usize,
         callable_subtrees: &CallableSubtrees,
-    ) -> Option<OwnerCandidate>;
+    ) -> Result<Option<OwnerCandidate>, AnalysisError>;
     fn classify_comment(
         self,
         node: Node<'_>,
@@ -786,7 +803,7 @@ fn parse_facts<S: LanguageSpec>(
 ) -> Result<Facts, AnalysisError> {
     let tree = parse(path, source, spec.label(), spec.grammar())?;
     let callable_subtrees = CallableSubtrees::from_root(tree.root_node(), spec.callable_kind());
-    let context = spec.build_context(tree.root_node(), source);
+    let context = spec.build_context(tree.root_node(), source)?;
     let mut collector = FactCollector::new(source);
     let mut traversal = Vec::new();
     for event in events(tree.root_node()) {
@@ -800,7 +817,7 @@ fn parse_facts<S: LanguageSpec>(
                 if let Some(frame) = traversal.last_mut() {
                     frame.record_child(node, source, spec);
                 }
-                collector.enter(node, location, spec, &context, &callable_subtrees);
+                collector.enter(node, location, spec, &context, &callable_subtrees)?;
                 traversal.push(TraversalFrame::new(node));
             }
             WalkEvent::Leave(node) => {
@@ -926,9 +943,9 @@ impl<'source> FactCollector<'source> {
         spec: S,
         context: &S::Context,
         callable_subtrees: &CallableSubtrees,
-    ) {
+    ) -> Result<(), AnalysisError> {
         if self.comment_node.is_some() {
-            return;
+            return Ok(());
         }
         self.open_callable_frontiers(node);
         if let Some(kind) = spec.classify_comment(node, self.source, context) {
@@ -938,7 +955,7 @@ impl<'source> FactCollector<'source> {
                 text: node_text(node, self.source).to_owned(),
             });
             self.comment_node = Some(node.id());
-            return;
+            return Ok(());
         }
 
         let is_callable = callable_subtrees.is_callable(node);
@@ -946,18 +963,19 @@ impl<'source> FactCollector<'source> {
             record_callable_candidate_check();
         }
         let callable_is_suppressed = is_callable && self.callable_frontier_is_active();
-        let candidate = (!self.suppressed_owner_nodes.contains(&node.id())
-            && !callable_is_suppressed)
-            .then(|| {
+        let candidate =
+            if !self.suppressed_owner_nodes.contains(&node.id()) && !callable_is_suppressed {
                 spec.owner(
                     node,
                     location,
                     self.source,
+                    context,
                     self.active_function_depth,
                     callable_subtrees,
-                )
-            })
-            .flatten();
+                )?
+            } else {
+                None
+            };
         if let Some(candidate) = candidate {
             let OwnerCandidate {
                 data,
@@ -1001,6 +1019,7 @@ impl<'source> FactCollector<'source> {
             }
         }
         self.callable_depth += usize::from(is_callable);
+        Ok(())
     }
 
     fn leave(&mut self, node: Node<'_>, callable_subtrees: &CallableSubtrees) {
@@ -1602,10 +1621,6 @@ pub(crate) fn reset_owner_parent_probes() {
 #[cfg(test)]
 pub(crate) fn owner_parent_probes() -> usize {
     OWNER_PARENT_PROBES.with(std::cell::Cell::get)
-}
-
-pub(crate) fn ancestors(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
-    std::iter::successors(node.parent(), |ancestor| ancestor.parent())
 }
 
 pub(crate) fn direct_named_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {

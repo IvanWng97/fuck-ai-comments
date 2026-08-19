@@ -40,8 +40,12 @@ impl LanguageSpec for JavaScript {
         tree_sitter_javascript::LANGUAGE.into()
     }
 
-    fn build_context(self, root: Node<'_>, source: &str) -> Self::Context {
-        AttachmentIndex::with_syntax(root, source, attachment_syntax())
+    fn build_context(self, root: Node<'_>, source: &str) -> Result<Self::Context, AnalysisError> {
+        Ok(AttachmentIndex::with_syntax(
+            root,
+            source,
+            attachment_syntax(),
+        ))
     }
 
     fn is_owner_prefix(self, kind: &str) -> bool {
@@ -57,10 +61,11 @@ impl LanguageSpec for JavaScript {
         node: Node<'_>,
         location: OwnerLocation<'_>,
         source: &str,
+        _context: &Self::Context,
         _function_depth: usize,
         callable_subtrees: &CallableSubtrees,
-    ) -> Option<OwnerCandidate> {
-        owner_from_node(node, location, source, callable_subtrees)
+    ) -> Result<Option<OwnerCandidate>, AnalysisError> {
+        Ok(owner_from_node(node, location, source, callable_subtrees))
     }
 
     fn classify_comment(

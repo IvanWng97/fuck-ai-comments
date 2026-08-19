@@ -39,12 +39,12 @@ impl LanguageSpec for Swift {
         tree_sitter_swift::LANGUAGE.into()
     }
 
-    fn build_context(self, root: Node<'_>, source: &str) -> Self::Context {
-        AttachmentIndex::with_syntax(
+    fn build_context(self, root: Node<'_>, source: &str) -> Result<Self::Context, AnalysisError> {
+        Ok(AttachmentIndex::with_syntax(
             root,
             source,
             AttachmentSyntax::default().with_physical_lines(),
-        )
+        ))
     }
 
     fn callable_kind(self) -> Option<fn(&str) -> bool> {
@@ -56,10 +56,11 @@ impl LanguageSpec for Swift {
         node: Node<'_>,
         _location: OwnerLocation<'_>,
         source: &str,
+        _context: &Self::Context,
         _function_depth: usize,
         callable_subtrees: &CallableSubtrees,
-    ) -> Option<OwnerCandidate> {
-        owner_from_node(node, source, callable_subtrees)
+    ) -> Result<Option<OwnerCandidate>, AnalysisError> {
+        Ok(owner_from_node(node, source, callable_subtrees))
     }
 
     fn classify_comment(

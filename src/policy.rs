@@ -73,6 +73,10 @@ pub(crate) struct TypeOwner {
 #[derive(Debug)]
 pub(crate) enum IdentitySource {
     Segments(Vec<String>),
+    Child {
+        parent: Option<IdentityId>,
+        segment: String,
+    },
 }
 
 impl IdentitySource {
@@ -80,9 +84,14 @@ impl IdentitySource {
         Self::Segments(segments)
     }
 
+    pub(crate) fn child(parent: Option<IdentityId>, segment: String) -> Self {
+        Self::Child { parent, segment }
+    }
+
     fn insert(&self, arena: &mut IdentityArena) -> Result<IdentityId, AnalysisError> {
         match self {
             Self::Segments(segments) => arena.push_path(segments.iter().map(String::as_str)),
+            Self::Child { parent, segment } => arena.push(*parent, segment.clone()),
         }
     }
 }

@@ -103,6 +103,31 @@ fn thousands_of_html_comment_edits_do_not_stale_stable_template_attestation() {
 }
 
 #[test]
+fn reversing_many_unique_rust_statements_stales_the_function_comment() {
+    let before = reversed_rust_function_source(600, false);
+    let after = reversed_rust_function_source(600, true);
+
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &before,
+        },
+        SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &after,
+        },
+    )
+    .expect("reordered Rust snapshots must retain owner correspondence");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(stale_lines, [2]);
+}
+
+#[test]
 #[ignore = "manual release-mode scaling evidence"]
 fn report_many_owner_release_scaling() {
     for owner_count in [1_000, 2_000, 4_000] {
@@ -238,5 +263,23 @@ fn html_source(comment_count: usize, attestation: usize) -> String {
         writeln!(source, "<div data-card=\"{card:05}\">{card}</div>")
             .expect("writing to a String cannot fail");
     }
+    source
+}
+
+fn reversed_rust_function_source(statement_count: usize, reverse: bool) -> String {
+    let mut source = String::with_capacity(statement_count * 32);
+    source.push_str("fn work() {\n    // Coupled to the execution order.\n");
+    if reverse {
+        for statement in (0..statement_count).rev() {
+            writeln!(source, "    step_{statement:05}();")
+                .expect("writing to a String cannot fail");
+        }
+    } else {
+        for statement in 0..statement_count {
+            writeln!(source, "    step_{statement:05}();")
+                .expect("writing to a String cannot fail");
+        }
+    }
+    source.push_str("}\n");
     source
 }

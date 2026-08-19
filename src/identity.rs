@@ -278,6 +278,24 @@ fn record_canonical_identity_hash_probe() {
 fn record_canonical_identity_hash_probe() {}
 
 #[cfg(test)]
+pub(crate) fn reset_identity_work() {
+    IDENTITY_ARENA_NODES.with(|nodes| nodes.set(0));
+    CANONICAL_IDENTITY_VISITS.with(|visits| visits.set(0));
+    CANONICAL_IDENTITY_NODES.with(|nodes| nodes.set(0));
+    CANONICAL_IDENTITY_HASH_PROBES.with(|probes| probes.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn identity_work() -> (usize, usize, usize, usize) {
+    (
+        IDENTITY_ARENA_NODES.with(std::cell::Cell::get),
+        CANONICAL_IDENTITY_VISITS.with(std::cell::Cell::get),
+        CANONICAL_IDENTITY_NODES.with(std::cell::Cell::get),
+        CANONICAL_IDENTITY_HASH_PROBES.with(std::cell::Cell::get),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

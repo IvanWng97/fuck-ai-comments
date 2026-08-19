@@ -44,10 +44,11 @@ impl LanguageSpec for Kotlin {
         node: Node<'_>,
         _location: OwnerLocation<'_>,
         source: &str,
+        _context: &Self::Context,
         _function_depth: usize,
         callable_subtrees: &CallableSubtrees,
-    ) -> Option<OwnerCandidate> {
-        owner_from_node(node, source, callable_subtrees)
+    ) -> Result<Option<OwnerCandidate>, AnalysisError> {
+        Ok(owner_from_node(node, source, callable_subtrees))
     }
 
     fn classify_comment(
