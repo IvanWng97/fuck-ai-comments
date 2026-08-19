@@ -51,8 +51,19 @@ test("release runbook requires trusted main and an all-tag ruleset", async () =>
       "u",
     ),
   );
-  assert.match(readme, /all tag refs \(`~ALL`\)/u);
-  assert.match(readme, /GitHub Actions App ID `15368`/u);
+  assert.match(readme, /all tag\s+refs\s+\(`~ALL`\)/u);
+  assert.match(
+    readme,
+    /requires a successful\s+`release-authorization`\s+deployment/u,
+  );
+  assert.match(readme, /restricts deletion/u);
+  assert.match(readme, /blocks force pushes and non-fast-forward\s+updates/u);
+  assert.match(
+    readme,
+    /`release-authorization` environment only permits\s+protected\s+branches/u,
+  );
+  assert.match(readme, /no owner or administrator bypass/u);
+  assert.doesNotMatch(readme, /GitHub Actions App ID `15368`/u);
   assert.match(readme, /protect `main`/u);
   assert.doesNotMatch(readme, /push(?:ing)? (?:a |the )?tag/u);
 });
@@ -439,7 +450,8 @@ test("release authorization accepts one unused canonical prerelease on green mai
     plan: { required: true, type: "string" },
     requested_tag: { required: true, type: "string" },
   });
-  const job = Object.values(workflow.jobs)[0];
+  const job = workflow.jobs["authorize-release"];
+  assert.equal(job.environment, "release-authorization");
   assert.deepEqual(job.permissions, { actions: "read", contents: "read" });
   assert.equal(job.env.EVENT_NAME, "${{ github.event_name }}");
   assert.equal(job.env.EVENT_REF, "${{ github.ref }}");
