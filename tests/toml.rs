@@ -10,11 +10,23 @@ fn source(text: &str) -> SourceFile<'_> {
 }
 
 fn stale_lines(before: &str, after: &str) -> Vec<usize> {
+    comment_drift(before, after)
+        .into_iter()
+        .filter_map(|(rule, line)| (rule == "comment-policy/comment-owner-changed").then_some(line))
+        .collect()
+}
+
+fn comment_drift(before: &str, after: &str) -> Vec<(&'static str, usize)> {
     analyze_change(source(before), source(after))
         .expect("valid TOML change")
         .into_iter()
-        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
-        .map(|finding| finding.line)
+        .filter(|finding| {
+            matches!(
+                finding.rule,
+                "comment-policy/comment-owner-changed" | "comment-policy/comment-reparented"
+            )
+        })
+        .map(|finding| (finding.rule, finding.line))
         .collect()
 }
 
@@ -33,7 +45,7 @@ fn quoted_dotted_key_change_stales_its_comment() {
 }
 
 #[test]
-fn table_header_change_stales_the_owned_key_comment() {
+fn table_rename_pairs_the_key_owner_and_stales_its_comment() {
     let before = concat!(
         "[primary]\n",
         "# Coupled to the primary service contract.\n",
@@ -45,7 +57,34 @@ fn table_header_change_stales_the_owned_key_comment() {
         "timeout = 200\n",
     );
 
-    assert_eq!(stale_lines(before, after), [2]);
+    let drift = comment_drift(before, after);
+
+    assert_eq!(
+        drift,
+        [("comment-policy/comment-owner-changed", 2)],
+        "the table identity and table-path code token both change the paired owner"
+    );
+}
+
+#[test]
+fn leading_utf8_crlf_trivia_does_not_stale_or_reparent_existing_comments() {
+    let base = concat!("# Coupled to the retry contract.\r\n", "timeout = 200\r\n",);
+    let with_trivia = concat!(
+        "# Déploiement à Montréal.\r\n",
+        "\r\n",
+        "# Coupled to the retry contract.\r\n",
+        "timeout = 200\r\n",
+    );
+
+    let drift: Vec<_> = [(base, with_trivia), (with_trivia, base)]
+        .into_iter()
+        .flat_map(|(before, after)| comment_drift(before, after))
+        .collect();
+
+    assert!(
+        drift.is_empty(),
+        "trivia-only movement must stay clean: {drift:#?}"
+    );
 }
 
 #[test]
@@ -179,6 +218,33 @@ fn eof_parse_error_reports_the_original_location() {
             "config.toml",
             Some("TOML parse error at line 3, column 12"),
             Some("3 | workers = ["),
+        )
+    );
+}
+
+#[test]
+fn unclosed_toml_before_trailing_trivia_reports_the_original_physical_coordinate() {
+    let input = concat!(
+        "# Removed from the semantic view.\n",
+        "\n",
+        "workers = [\n",
+        "    \"alpha\",\n",
+        "# Trailing parser trivia.\n",
+        "\n",
+    );
+
+    let error = analyze_all(source(input))
+        .expect_err("unterminated TOML must map compact coordinates through trailing trivia");
+    let AnalysisError::Toml { path, detail } = error else {
+        panic!("expected TOML error");
+    };
+
+    assert_eq!(
+        (path.as_str(), detail.lines().next(), detail.lines().nth(2)),
+        (
+            "config.toml",
+            Some("TOML parse error at line 4, column 13"),
+            Some("4 |     \"alpha\","),
         )
     );
 }

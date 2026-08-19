@@ -155,6 +155,75 @@ fn leaf_code_contributes_to_its_parent_type_budget() {
 }
 
 #[test]
+fn outer_function_budget_counts_leaf_code_after_a_nested_function_closes() {
+    let child_body = (0..24)
+        .map(|line| format!("        let child_{line:02} = {line};\n"))
+        .collect::<String>();
+    let mut source = format!("fn operation() {{\n    fn child() {{\n{child_body}    }}\n");
+    source.push_str("    // The first constant fixes the protocol version.\n");
+    for constant in 0..3 {
+        source.push_str(&format!(
+            "    const FIRST_{constant}: usize = {constant};\n"
+        ));
+    }
+    source.push_str("    // The second group fixes the retry schedule.\n");
+    for constant in 3..6 {
+        source.push_str(&format!(
+            "    const SECOND_{constant}: usize = {constant};\n"
+        ));
+    }
+    source.push_str("    // The third group fixes the recovery schedule.\n");
+    for constant in 6..8 {
+        source.push_str(&format!(
+            "    const THIRD_{constant}: usize = {constant};\n"
+        ));
+    }
+    source.push_str("}\n");
+
+    let findings = analyze(Path::new("src/lib.rs"), &source).expect("valid Rust should parse");
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule == "comment-policy/function-comment-budget")
+        .expect("the outer function must exceed its two-line allowance");
+
+    assert_eq!(
+        finding.message,
+        "function `operation` owns 3 comment lines for 10 code lines; allowance is 2"
+    );
+}
+
+#[test]
+fn outer_type_budget_counts_leaf_code_after_a_nested_type_closes() {
+    let child_body = (0..24)
+        .map(|field| format!("        CHILD_{field:02} = {field}\n"))
+        .collect::<String>();
+    let mut source = format!("class Service:\n    class Child:\n{child_body}");
+    source.push_str("    # The first fields define the protocol contract.\n");
+    for field in 0..3 {
+        source.push_str(&format!("    FIRST_{field} = {field}\n"));
+    }
+    source.push_str("    # The second fields define the retry contract.\n");
+    for field in 3..6 {
+        source.push_str(&format!("    SECOND_{field} = {field}\n"));
+    }
+    source.push_str("    # The third fields define the recovery contract.\n");
+    for field in 6..8 {
+        source.push_str(&format!("    THIRD_{field} = {field}\n"));
+    }
+
+    let findings = analyze(Path::new("service.py"), &source).expect("valid Python should parse");
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule == "comment-policy/type-comment-budget")
+        .expect("the outer type must exceed its two-line allowance");
+
+    assert_eq!(
+        finding.message,
+        "type `Service` owns 3 comment lines for 9 code lines; allowance is 2"
+    );
+}
+
+#[test]
 fn rust_short_function_rejects_ten_comment_lines() {
     let source = r#"
 fn render() {
