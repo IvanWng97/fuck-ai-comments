@@ -692,6 +692,192 @@ fn anonymous_duplicate_owners_without_exact_anchors_fail_closed() {
 }
 
 #[test]
+fn unchanged_same_line_rust_closures_survive_an_insertion_before_them() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn resolve(value: Option<usize>) -> usize {\n",
+            "    value.map_or_else(|| 0, |value| value)\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn resolve(value: Option<usize>) -> usize {\n",
+            "    inspect();\n",
+            "    value.map_or_else(|| 0, |value| value)\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("unchanged closure spans on one exact line prove their correspondence");
+
+    assert!(findings.is_empty(), "the insertion has no comments to flag");
+}
+
+#[test]
+fn unchanged_inline_and_multiline_rust_closures_survive_an_insertion_before_them() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn parse(tail: &[u8]) {\n",
+            "    tail.split(|byte| *byte == b'\\n').filter_map(|line| {\n",
+            "        parse_line(line)\n",
+            "    });\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "const INSERTED: usize = 1;\n",
+            "fn parse(tail: &[u8]) {\n",
+            "    tail.split(|byte| *byte == b'\\n').filter_map(|line| {\n",
+            "        parse_line(line)\n",
+            "    });\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("the unchanged full closure bodies prove their correspondence");
+
+    assert!(findings.is_empty(), "the insertion has no comments to flag");
+}
+
+#[test]
+fn one_rewritten_multiline_closure_pairs_by_exact_sibling_elimination() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn parse(tail: &[u8]) {\n",
+            "    tail.split(|byte| *byte == b'\\n').filter_map(|line| {\n",
+            "        // Coupled to the legacy marker.\n",
+            "        parse_line(line, \"toolCall\")\n",
+            "    });\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "const BLOCK_TOOL_CALL: &str = \"toolCall\";\n",
+            "fn parse(tail: &[u8]) {\n",
+            "    tail.split(|byte| *byte == b'\\n').filter_map(|line| {\n",
+            "        // Coupled to the legacy marker.\n",
+            "        parse_line(line, BLOCK_TOOL_CALL)\n",
+            "    });\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("the exact inline sibling leaves one possible multiline correspondence");
+    let stale_lines: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+
+    assert_eq!(stale_lines, [4]);
+}
+
+#[test]
+fn two_rewritten_multiline_closures_cannot_pair_by_elimination() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn blocked(left: &[Item], right: &[Item]) -> bool {\n",
+            "    left.iter().any(|item| {\n",
+            "        old_left(item)\n",
+            "    }) || right.iter().any(|item| {\n",
+            "        old_right(item)\n",
+            "    })\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn blocked(left: &[Item], right: &[Item]) -> bool {\n",
+            "    left.iter().any(|entry| {\n",
+            "        new_left(entry)\n",
+            "    }) || right.iter().any(|item| {\n",
+            "        new_right(item)\n",
+            "    })\n",
+            "}\n",
+        ),
+    };
+
+    let error = analyze_change(before, after)
+        .expect_err("one exact boundary cannot identify two rewritten anonymous owners");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
+fn unchanged_multiline_rust_closures_sharing_a_boundary_line_pair() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn blocked(left: &[Item], right: &[Item]) -> bool {\n",
+            "    left.iter().any(|item| {\n",
+            "        item.blocked()\n",
+            "    }) || right.iter().any(|item| {\n",
+            "        item.blocked()\n",
+            "    })\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "const INSERTED: usize = 1;\n",
+            "fn blocked(left: &[Item], right: &[Item]) -> bool {\n",
+            "    left.iter().any(|item| {\n",
+            "        item.blocked()\n",
+            "    }) || right.iter().any(|item| {\n",
+            "        item.blocked()\n",
+            "    })\n",
+            "}\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("the exact shared boundary and full closure bodies prove correspondence");
+
+    assert!(findings.is_empty(), "the insertion has no comments to flag");
+}
+
+#[test]
+fn unchanged_same_line_rust_closures_pair_with_crlf_lines() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn resolve(value: Option<usize>) -> usize {\r\n",
+            "    value.map_or_else(|| 0, |value| value)\r\n",
+            "}\r\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn resolve(value: Option<usize>) -> usize {\r\n",
+            "    inspect();\r\n",
+            "    value.map_or_else(|| 0, |value| value)\r\n",
+            "}\r\n",
+        ),
+    };
+
+    let findings = analyze_change(before, after)
+        .expect("CRLF line starts preserve the closures' relative byte spans");
+
+    assert!(findings.is_empty(), "the insertion has no comments to flag");
+}
+
+#[test]
 fn flat_anonymous_siblings_pair_through_the_public_change_seam() {
     const CALLBACKS: usize = 256;
     const CHANGED: usize = CALLBACKS / 2;
@@ -740,7 +926,7 @@ fn flat_anonymous_siblings_pair_through_the_public_change_seam() {
 }
 
 #[test]
-fn same_line_anonymous_siblings_fail_closed_through_the_public_change_seam() {
+fn same_line_anonymous_siblings_pair_through_the_public_change_seam() {
     const CALLBACKS: usize = 256;
 
     let callbacks = |version| {
@@ -755,7 +941,7 @@ fn same_line_anonymous_siblings_fail_closed_through_the_public_change_seam() {
     let before = callbacks(1);
     let after = callbacks(2);
 
-    let error = analyze_change(
+    let findings = analyze_change(
         SourceFile {
             path: Path::new("callbacks.js"),
             text: &before,
@@ -765,11 +951,11 @@ fn same_line_anonymous_siblings_fail_closed_through_the_public_change_seam() {
             text: &after,
         },
     )
-    .expect_err("one shared line cannot prove anonymous sibling correspondence");
+    .expect("identical ordered sub-line spans prove anonymous sibling correspondence");
 
     assert!(
-        matches!(error, AnalysisError::AmbiguousChange(_)),
-        "ambiguous same-line evidence must fail closed: {error:#?}"
+        findings.is_empty(),
+        "changing the separate version line has no comment finding: {findings:#?}"
     );
 }
 
