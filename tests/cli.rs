@@ -2,7 +2,7 @@ use std::fs;
 use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
-use std::path::MAIN_SEPARATOR;
+use std::path::{MAIN_SEPARATOR, Path};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use assert_cmd::Command;
@@ -12,6 +12,14 @@ fn command(root: &TempDir) -> Command {
     let mut command = assert_cmd::cargo::cargo_bin_cmd!("fuck-ai-comments");
     command.current_dir(root.path());
     command
+}
+
+fn rendered_path(path: &str) -> String {
+    if MAIN_SEPARATOR == '\\' {
+        path.replace('/', "\\\\")
+    } else {
+        path.to_owned()
+    }
 }
 
 #[test]
@@ -66,14 +74,328 @@ fn all_reports_findings_in_stable_path_order() {
     let a = stdout
         .find("a.rs:1:")
         .expect("a.rs finding should be printed");
-    let separator = if MAIN_SEPARATOR == '\\' { "\\\\" } else { "/" };
-    let nested_finding = format!("nested{separator}z.rs:1:");
+    let nested_finding = format!("{}:1:", rendered_path("nested/z.rs"));
     let z = stdout
         .find(&nested_finding)
         .expect("nested z.rs finding should be printed");
     assert!(a < z, "findings were not path-sorted:\n{stdout}");
     assert!(stdout.contains("comment-policy/leaf-comment-budget"));
     assert!(stdout.contains("2 violations in 2 files"));
+}
+
+#[test]
+fn all_uses_cargo_metadata_for_a_custom_library_root() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir(root.path().join("custom")).expect("custom directory should be created");
+    fs::write(
+        root.path().join("Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"custom-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    )
+    .expect("Cargo.toml should be written");
+    fs::write(
+        root.path().join("custom/root.rs"),
+        concat!(
+            "//! detail one\n",
+            "//! detail two\n",
+            "//! detail three\n",
+            "//! detail four\n",
+            "//! detail five\n",
+            "//! detail six\n",
+            "pub fn work() {}\n",
+        ),
+    )
+    .expect("custom library root should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 2 files scanned\n");
+}
+
+#[test]
+fn all_does_not_infer_a_library_root_without_cargo_metadata() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir(root.path().join("src")).expect("source directory should be created");
+    fs::write(
+        root.path().join("src/lib.rs"),
+        concat!(
+            "//! detail one\n",
+            "//! detail two\n",
+            "//! detail three\n",
+            "//! detail four\n",
+            "//! detail five\n",
+            "//! detail six\n",
+            "pub fn work() {}\n",
+        ),
+    )
+    .expect("ordinary Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    let finding = format!(
+        "{}:1: comment-policy/comment-block-budget",
+        rendered_path("src/lib.rs")
+    );
+    assert!(stdout.contains(&finding), "unexpected stdout:\n{stdout}");
+}
+
+#[test]
+fn all_discovers_a_manifest_hidden_by_a_file_only_ignore_rule() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir_all(root.path().join("rust/custom"))
+        .expect("nested custom directory should be created");
+    fs::write(root.path().join(".ignore"), "**/Cargo.toml\n")
+        .expect("ignore rules should be written");
+    fs::write(
+        root.path().join("rust/Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"file-ignored-manifest\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    )
+    .expect("nested Cargo.toml should be written");
+    fs::write(
+        root.path().join("rust/custom/root.rs"),
+        concat!(
+            "//! detail one\n",
+            "//! detail two\n",
+            "//! detail three\n",
+            "//! detail four\n",
+            "//! detail five\n",
+            "//! detail six\n",
+            "pub fn work() {}\n",
+        ),
+    )
+    .expect("custom library root should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_discovers_a_nested_cargo_project_without_a_root_manifest() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir_all(root.path().join("rust/custom"))
+        .expect("nested custom directory should be created");
+    fs::write(
+        root.path().join("rust/Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"nested-custom-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    )
+    .expect("nested Cargo.toml should be written");
+    fs::write(
+        root.path().join("rust/custom/root.rs"),
+        concat!(
+            "//! detail one\n",
+            "//! detail two\n",
+            "//! detail three\n",
+            "//! detail four\n",
+            "//! detail five\n",
+            "//! detail six\n",
+            "pub fn work() {}\n",
+        ),
+    )
+    .expect("nested custom library root should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 2 files scanned\n");
+}
+
+#[test]
+fn all_keeps_nested_workspace_roots_in_repository_coordinates() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir_all(root.path().join("rust/custom"))
+        .expect("nested custom directory should be created");
+    fs::create_dir(root.path().join("custom"))
+        .expect("top-level custom directory should be created");
+    fs::write(
+        root.path().join("rust/Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"nested-coordinate-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    )
+    .expect("nested Cargo.toml should be written");
+    let inner_docs = concat!(
+        "//! detail one\n",
+        "//! detail two\n",
+        "//! detail three\n",
+        "//! detail four\n",
+        "//! detail five\n",
+        "//! detail six\n",
+        "pub fn work() {}\n",
+    );
+    fs::write(root.path().join("rust/custom/root.rs"), inner_docs)
+        .expect("nested custom library root should be written");
+    fs::write(root.path().join("custom/root.rs"), inner_docs)
+        .expect("ordinary top-level module should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    let ordinary_finding = format!("{}:1:", rendered_path("custom/root.rs"));
+    let library_finding = format!("{}:1:", rendered_path("rust/custom/root.rs"));
+    assert!(
+        stdout.contains(&ordinary_finding),
+        "unexpected stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains(&library_finding));
+}
+
+#[test]
+fn all_normalizes_a_parent_relative_repository_path() {
+    let parent = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir_all(parent.path().join("repo/custom"))
+        .expect("custom directory should be created");
+    fs::create_dir(parent.path().join("sibling")).expect("sibling directory should be created");
+    fs::write(
+        parent.path().join("repo/Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"parent-relative-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    )
+    .expect("Cargo.toml should be written");
+    fs::write(
+        parent.path().join("repo/custom/root.rs"),
+        concat!(
+            "//! detail one\n",
+            "//! detail two\n",
+            "//! detail three\n",
+            "//! detail four\n",
+            "//! detail five\n",
+            "//! detail six\n",
+            "pub fn work() {}\n",
+        ),
+    )
+    .expect("custom library root should be written");
+    let mut command = assert_cmd::cargo::cargo_bin_cmd!("fuck-ai-comments");
+    command.current_dir(parent.path().join("sibling"));
+
+    command
+        .args(["check", "--all"])
+        .arg(Path::new("..").join("repo"))
+        .assert()
+        .code(0)
+        .stdout("clean: 2 files scanned\n");
+}
+
+#[test]
+fn all_uses_workspace_metadata_for_a_member_custom_library_root() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir_all(root.path().join("crates/member/source"))
+        .expect("workspace member directory should be created");
+    fs::write(
+        root.path().join("Cargo.toml"),
+        concat!(
+            "[workspace]\n",
+            "members = [\"crates/member\"]\n",
+            "resolver = \"3\"\n",
+        ),
+    )
+    .expect("workspace Cargo.toml should be written");
+    fs::write(
+        root.path().join("crates/member/Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"workspace-member\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"source/root.rs\"\n",
+        ),
+    )
+    .expect("member Cargo.toml should be written");
+    fs::write(
+        root.path().join("crates/member/source/root.rs"),
+        concat!(
+            "//! detail one\n",
+            "//! detail two\n",
+            "//! detail three\n",
+            "//! detail four\n",
+            "//! detail five\n",
+            "//! detail six\n",
+            "pub fn work() {}\n",
+        ),
+    )
+    .expect("member custom library root should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 3 files scanned\n");
+}
+
+#[test]
+fn all_fails_closed_when_a_detected_cargo_workspace_cannot_be_resolved() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = \"missing-required-fields\"\n",
+    )
+    .expect("invalid Cargo manifest should be written");
+    fs::write(root.path().join("clean.rs"), "pub fn work() {}\n")
+        .expect("clean Rust should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains("Cargo metadata failed for detected manifest"));
 }
 
 #[test]

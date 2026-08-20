@@ -1,10 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::borrow::Cow;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use fuck_ai_comments::{Finding, SourceFile, analyze_all, supports_path};
+use fuck_ai_comments::{Finding, SourceFile, supports_path};
 use ignore::WalkBuilder;
 
-use super::source;
+use super::{cargo_context, source};
 
 pub(super) struct Report {
     pub(super) findings: Vec<Finding>,
@@ -13,17 +14,33 @@ pub(super) struct Report {
 
 pub(super) fn scan_all(root: &Path) -> Result<Report> {
     let files = supported_files(root)?;
+    let current_directory =
+        std::env::current_dir().context("could not resolve current directory")?;
+    let cargo_context = cargo_context::discover(root, &current_directory)?;
     let mut findings = Vec::new();
 
     for disk_path in &files {
         let source_path = without_dot_prefix(disk_path);
+        let analysis_path = if source_path
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
+            Cow::Owned(cargo_context::normalized_absolute_path(
+                source_path,
+                "source path",
+            )?)
+        } else {
+            Cow::Borrowed(source_path)
+        };
         let bytes = source::read_regular(disk_path, source_path)?;
         let text = source::utf8(source_path, &bytes)?;
-        let mut file_findings = analyze_all(SourceFile {
-            path: source_path,
-            text,
-        })
-        .with_context(|| format!("could not analyze {}", source_path.display()))?;
+        let mut file_findings = cargo_context
+            .analysis()
+            .analyze_all(SourceFile {
+                path: &analysis_path,
+                text,
+            })
+            .with_context(|| format!("could not analyze {}", source_path.display()))?;
         findings.append(&mut file_findings);
     }
     findings.sort();
@@ -63,4 +80,88 @@ fn supported_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn without_dot_prefix(path: &Path) -> &Path {
     path.strip_prefix(".").unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::super::cargo_context::{cargo_metadata_discoveries, reset_discovery_count};
+    use super::scan_all;
+
+    #[test]
+    fn scan_all_discovers_cargo_targets_once_for_many_files() {
+        let root = TempDir::new().expect("temporary directory should be created");
+        fs::write(
+            root.path().join("Cargo.toml"),
+            concat!(
+                "[package]\n",
+                "name = \"discovery-count\"\n",
+                "version = \"0.1.0\"\n",
+                "edition = \"2024\"\n",
+            ),
+        )
+        .expect("Cargo.toml should be written");
+        fs::create_dir(root.path().join("src")).expect("source directory should be created");
+        fs::write(root.path().join("src/lib.rs"), "pub fn work() {}\n")
+            .expect("library root should be written");
+        for index in 0..8 {
+            fs::write(
+                root.path().join(format!("src/module_{index}.rs")),
+                format!("pub const VALUE_{index}: usize = {index};\n"),
+            )
+            .expect("module should be written");
+        }
+        reset_discovery_count();
+
+        let report = scan_all(root.path()).expect("the Cargo project should scan cleanly");
+
+        assert_eq!(report.files_scanned, 10);
+        assert_eq!(cargo_metadata_discoveries(), 1);
+    }
+
+    #[test]
+    fn scan_all_queries_one_workspace_once_including_member_manifests() {
+        let root = TempDir::new().expect("temporary directory should be created");
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\nresolver = \"3\"\n",
+        )
+        .expect("workspace Cargo.toml should be written");
+        fs::create_dir_all(root.path().join("member/custom"))
+            .expect("member source directory should be created");
+        fs::write(
+            root.path().join("member/Cargo.toml"),
+            concat!(
+                "[package]\n",
+                "name = \"discovery-member\"\n",
+                "version = \"0.1.0\"\n",
+                "edition = \"2024\"\n",
+                "\n",
+                "[lib]\n",
+                "path = \"custom/root.rs\"\n",
+            ),
+        )
+        .expect("member Cargo.toml should be written");
+        fs::write(
+            root.path().join("member/custom/root.rs"),
+            "pub fn work() {}\n",
+        )
+        .expect("member root should be written");
+        for index in 0..8 {
+            fs::write(
+                root.path().join(format!("member/custom/module_{index}.rs")),
+                format!("pub const VALUE_{index}: usize = {index};\n"),
+            )
+            .expect("module should be written");
+        }
+        reset_discovery_count();
+
+        let report = scan_all(root.path()).expect("the Cargo workspace should scan cleanly");
+
+        assert_eq!(report.files_scanned, 11);
+        assert_eq!(cargo_metadata_discoveries(), 1);
+    }
 }

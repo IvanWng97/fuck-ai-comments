@@ -2,11 +2,48 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use fuck_ai_comments::{
-    AnalysisError, AnalysisProfile, Finding, SourceFile, analyze_all, analyze_all_with_profile,
-    analyze_change, analyze_change_with_profile, supports_path,
+    AnalysisContext, AnalysisError, AnalysisProfile, Finding, SourceFile, analyze_all,
+    analyze_all_with_profile, analyze_change, analyze_change_with_profile, supports_path,
 };
 
 const MAX_SOURCE_BYTES: usize = 16 * 1_024 * 1_024;
+
+#[test]
+fn repository_context_classifies_a_custom_root_in_change_analysis() {
+    let before = concat!(
+        "//! before detail one\n",
+        "//! before detail two\n",
+        "//! before detail three\n",
+        "//! before detail four\n",
+        "//! before detail five\n",
+        "//! before detail six\n",
+        "pub fn work() -> usize { 1 }\n",
+    );
+    let after = concat!(
+        "//! after detail one\n",
+        "//! after detail two\n",
+        "//! after detail three\n",
+        "//! after detail four\n",
+        "//! after detail five\n",
+        "//! after detail six\n",
+        "pub fn work() -> usize { 2 }\n",
+    );
+    let path = Path::new("custom/root.rs");
+    let context = AnalysisContext::from_rust_library_roots([path])
+        .expect("the repository-relative Cargo target should be valid");
+
+    let findings = context
+        .analyze_change(
+            SourceFile { path, text: before },
+            SourceFile { path, text: after },
+        )
+        .expect("valid Rust change should be analyzed");
+
+    assert!(
+        findings.is_empty(),
+        "both changed crate docs and changed code are clean: {findings:#?}"
+    );
+}
 
 fn newline_dense_rust(value: usize) -> (String, usize) {
     let tail = format!(

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use fuck_ai_comments::{AnalysisError, Finding, SourceFile, analyze_all, analyze_change};
+use fuck_ai_comments::{
+    AnalysisContext, AnalysisError, Finding, SourceFile, analyze_all, analyze_change,
+};
 
 fn analyze(path: &Path, source: &str) -> Result<Vec<Finding>, AnalysisError> {
     analyze_all(SourceFile { path, text: source })
@@ -653,6 +655,73 @@ fn rust_workspace_crate_root_inner_docs_are_exempt() {
     assert!(
         findings.is_empty(),
         "a conventional workspace crate root exposes its inner docs: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_custom_crate_root_inner_docs_are_exempt_with_repository_context() {
+    let source = concat!(
+        "//! detail one\n",
+        "//! detail two\n",
+        "//! detail three\n",
+        "//! detail four\n",
+        "//! detail five\n",
+        "//! detail six\n",
+        "pub fn work() {}\n",
+    );
+    let context = AnalysisContext::from_rust_library_roots([Path::new("custom/root.rs")])
+        .expect("the repository-relative Cargo target should be valid");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("custom/root.rs"),
+            text: source,
+        })
+        .expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "Cargo-proven custom crate-root docs are public API: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_authoritative_context_does_not_infer_an_unlisted_conventional_root() {
+    let source = concat!(
+        "//! detail one\n",
+        "//! detail two\n",
+        "//! detail three\n",
+        "//! detail four\n",
+        "//! detail five\n",
+        "//! detail six\n",
+        "pub fn work() {}\n",
+    );
+    let context = AnalysisContext::from_rust_library_roots(std::iter::empty::<&Path>())
+        .expect("an empty authoritative target set should be valid");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: source,
+        })
+        .expect("valid Rust should parse");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+        "an authoritative target set must not fall back to path inference: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_repository_context_rejects_parent_traversal() {
+    let error = AnalysisContext::from_rust_library_roots([Path::new("../custom/root.rs")])
+        .expect_err("repository target paths must not escape their coordinate root");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid analysis context: Rust library root ../custom/root.rs contains a parent traversal"
     );
 }
 
