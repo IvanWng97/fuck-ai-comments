@@ -55,6 +55,14 @@ pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result
         .into_iter()
         .map(|manifest| repository.root.join(manifest))
         .collect();
+    required_manifests.extend(
+        changes
+            .files
+            .iter()
+            .filter_map(|change| change.after.as_ref())
+            .filter(|snapshot| is_cargo_manifest_path(&snapshot.path))
+            .map(|snapshot| repository.root.join(&snapshot.path)),
+    );
     required_manifests.extend(cargo_context::nearest_manifests_for_rust_sources(
         changes
             .files
@@ -981,8 +989,12 @@ fn parse_nul_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
 fn cargo_manifest_paths(output: &[u8]) -> Result<BTreeSet<PathBuf>> {
     Ok(parse_nul_paths(output)?
         .into_iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("Cargo.toml")))
+        .filter(|path| is_cargo_manifest_path(path))
         .collect())
+}
+
+fn is_cargo_manifest_path(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("Cargo.toml"))
 }
 
 fn take_nul<'output>(

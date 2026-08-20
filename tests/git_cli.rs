@@ -445,6 +445,41 @@ fn default_rejects_an_untracked_manifest_hidden_by_ignore_rules() {
 }
 
 #[test]
+fn default_rejects_a_hidden_untracked_manifest_without_a_rust_change() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(&root, ".ignore", "nested/\n");
+    write(&root, "nested/custom/root.rs", CLEAN_RUST);
+    commit_all(&root, "add ignored ordinary Rust source");
+    write(
+        &root,
+        "nested/Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"hidden-new-manifest\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(
+        stderr.contains("manifest nested/Cargo.toml is absent from HEAD"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 fn attestation_profile_validates_a_clean_added_file() {
     let root = repository();
     write(&root, "untracked.rs", SLOPPY_RUST);
