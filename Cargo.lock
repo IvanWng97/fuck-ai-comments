@@ -363,6 +363,8 @@ dependencies = [
  "icu_properties",
  "ignore",
  "imara-diff",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "toml_edit",

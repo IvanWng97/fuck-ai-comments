@@ -10,7 +10,74 @@ mod languages;
 mod model;
 mod policy;
 
-pub use model::{AnalysisError, AnalysisProfile, Finding, SourceFile};
+pub use model::{
+    AnalysisContext, AnalysisContextError, AnalysisError, AnalysisProfile, Finding, SourceFile,
+};
+
+impl AnalysisContext {
+    /// Analyze every owner in one source snapshot using this repository context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file extension is unsupported or parsing fails.
+    pub fn analyze_all(&self, file: SourceFile<'_>) -> Result<Vec<Finding>, AnalysisError> {
+        self.analyze_all_with_profile(file, AnalysisProfile::Full)
+    }
+
+    /// Analyze one source snapshot under the selected profile and repository context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file extension is unsupported, parsing fails,
+    /// or the normalized ownership model is invalid.
+    pub fn analyze_all_with_profile(
+        &self,
+        file: SourceFile<'_>,
+        profile: AnalysisProfile,
+    ) -> Result<Vec<Finding>, AnalysisError> {
+        if profile.runs_static_policy() {
+            languages::analyze_file_with_context(
+                self,
+                file.path,
+                file.text,
+                &model::Selection::all(),
+            )
+        } else {
+            languages::parse_validated_file_with_context(self, file.path, file.text)?;
+            Ok(Vec::new())
+        }
+    }
+
+    /// Analyze only owners changed between two snapshots using this repository context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either snapshot cannot be parsed, exceeds the diff
+    /// engine's token capacity, or ownership cannot be paired without guessing.
+    pub fn analyze_change(
+        &self,
+        before: SourceFile<'_>,
+        after: SourceFile<'_>,
+    ) -> Result<Vec<Finding>, AnalysisError> {
+        self.analyze_change_with_profile(before, after, AnalysisProfile::Full)
+    }
+
+    /// Analyze a source change under the selected profile and repository context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either snapshot cannot be parsed or exceeds the
+    /// diff engine's token capacity, when the snapshots use different language
+    /// adapters, or when ownership cannot be paired without guessing.
+    pub fn analyze_change_with_profile(
+        &self,
+        before: SourceFile<'_>,
+        after: SourceFile<'_>,
+        profile: AnalysisProfile,
+    ) -> Result<Vec<Finding>, AnalysisError> {
+        change::analyze_with_context(self, before, after, profile)
+    }
+}
 
 /// Return whether a path has a registered language adapter.
 #[must_use]
@@ -41,12 +108,7 @@ pub fn analyze_all_with_profile(
     file: SourceFile<'_>,
     profile: AnalysisProfile,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    if profile.runs_static_policy() {
-        languages::analyze_file(file.path, file.text, &model::Selection::all())
-    } else {
-        languages::parse_validated_file(file.path, file.text)?;
-        Ok(Vec::new())
-    }
+    AnalysisContext::default().analyze_all_with_profile(file, profile)
 }
 
 /// Analyze only owners changed between two source snapshots.

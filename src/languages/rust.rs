@@ -9,18 +9,12 @@ use super::tree::{
 };
 use super::walk::{WalkEvent, events};
 use crate::identity::{IdentityArena, IdentityId};
-use crate::model::{AnalysisError, Finding, Selection};
+use crate::model::{AnalysisError, Finding, RustFileRole, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Rust {
     file_role: RustFileRole,
-}
-
-#[derive(Clone, Copy)]
-enum RustFileRole {
-    ConventionalCrateRoot,
-    ModuleOrUnknown,
 }
 
 #[derive(Default)]
@@ -174,24 +168,17 @@ pub(crate) fn analyze_file(
     path: &Path,
     source: &str,
     selection: &Selection,
+    file_role: RustFileRole,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    analyze(path, source, selection, Rust::for_path(path))
+    analyze(path, source, selection, Rust { file_role })
 }
 
-pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
-    document(path, source, Rust::for_path(path))
-}
-
-impl Rust {
-    fn for_path(path: &Path) -> Self {
-        Self {
-            file_role: if path.ends_with(Path::new("src/lib.rs")) {
-                RustFileRole::ConventionalCrateRoot
-            } else {
-                RustFileRole::ModuleOrUnknown
-            },
-        }
-    }
+pub(crate) fn parse_file(
+    path: &Path,
+    source: &str,
+    file_role: RustFileRole,
+) -> Result<ParsedFile, AnalysisError> {
+    document(path, source, Rust { file_role })
 }
 
 impl LanguageSpec for Rust {
@@ -331,7 +318,7 @@ fn is_public_inner_doc(node: Node<'_>, file_role: RustFileRole, context: &RustCo
         return false;
     };
     if node_context.direct_parent_is_source_file {
-        return matches!(file_role, RustFileRole::ConventionalCrateRoot);
+        return matches!(file_role, RustFileRole::CrateRoot);
     }
     !node_context.within_callable
         && node_context.has_module_ancestor

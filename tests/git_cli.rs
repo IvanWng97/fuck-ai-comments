@@ -1007,6 +1007,58 @@ fn base_and_head_read_committed_blobs() {
 }
 
 #[test]
+fn base_uses_cargo_metadata_for_a_custom_library_root() {
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"custom-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "custom/root.rs",
+        concat!(
+            "//! before detail one\n",
+            "//! before detail two\n",
+            "//! before detail three\n",
+            "//! before detail four\n",
+            "//! before detail five\n",
+            "//! before detail six\n",
+            "pub fn work() -> usize { 1 }\n",
+        ),
+    );
+    let base = commit_all(&root, "add custom library root");
+    write(
+        &root,
+        "custom/root.rs",
+        concat!(
+            "//! after detail one\n",
+            "//! after detail two\n",
+            "//! after detail three\n",
+            "//! after detail four\n",
+            "//! after detail five\n",
+            "//! after detail six\n",
+            "pub fn work() -> usize { 2 }\n",
+        ),
+    );
+    let head = commit_all(&root, "change custom library root");
+
+    command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
 fn attestation_profile_skips_static_commit_findings() {
     let root = repository();
     write(&root, "lib.rs", CLEAN_RUST);

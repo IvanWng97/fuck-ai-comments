@@ -15,7 +15,7 @@ mod walk;
 
 use std::path::Path;
 
-use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
+use crate::model::{AnalysisContext, AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::ParsedFile;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -64,9 +64,18 @@ pub(crate) fn same_adapter(before: &Path, after: &Path) -> Result<bool, Analysis
     Ok(Adapter::for_path(before) == Some(after_adapter))
 }
 
+#[cfg(test)]
 pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
+    parse_file_with_context(&AnalysisContext::default(), path, source)
+}
+
+pub(crate) fn parse_file_with_context(
+    context: &AnalysisContext,
+    path: &Path,
+    source: &str,
+) -> Result<ParsedFile, AnalysisError> {
     match Adapter::for_path(path) {
-        Some(Adapter::Rust) => rust::parse_file(path, source),
+        Some(Adapter::Rust) => rust::parse_file(path, source, context.rust_file_role(path)),
         Some(Adapter::Python) => python::parse_file(path, source),
         Some(Adapter::JavaScript) => javascript::parse_file(path, source),
         Some(Adapter::TypeScript) => typescript::parse_file(path, source),
@@ -82,8 +91,12 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
     }
 }
 
-pub(crate) fn parse_validated_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
-    let document = parse_file(path, source)?;
+pub(crate) fn parse_validated_file_with_context(
+    context: &AnalysisContext,
+    path: &Path,
+    source: &str,
+) -> Result<ParsedFile, AnalysisError> {
+    let document = parse_file_with_context(context, path, source)?;
     let display_path = path.to_string_lossy();
     let Some(file) = document.owners.first() else {
         return Err(AnalysisError::Invariant(format!(
@@ -116,13 +129,16 @@ pub(crate) fn parse_validated_file(path: &Path, source: &str) -> Result<ParsedFi
     Ok(document)
 }
 
-pub(crate) fn analyze_file(
+pub(crate) fn analyze_file_with_context(
+    context: &AnalysisContext,
     path: &Path,
     source: &str,
     selection: &Selection,
 ) -> Result<Vec<Finding>, AnalysisError> {
     match Adapter::for_path(path) {
-        Some(Adapter::Rust) => rust::analyze_file(path, source, selection),
+        Some(Adapter::Rust) => {
+            rust::analyze_file(path, source, selection, context.rust_file_role(path))
+        }
         Some(Adapter::Python) => python::analyze_file(path, source, selection),
         Some(Adapter::JavaScript) => javascript::analyze_file(path, source, selection),
         Some(Adapter::TypeScript) => typescript::analyze_file(path, source, selection),

@@ -33,11 +33,15 @@ Function and type `code_lines` count physical rows assigned to that budget.
 Nested functions and types use their own budgets, while leaf code stays in its
 nearest function or type budget. File `code_lines` remain whole-file.
 
-Rust public API docs do not consume a length budget. Structurally valid safety
-proofs and tool directives do not consume the relative narrative budget, but
-they do count toward the absolute owner cap. All three remain subject to drift
-checks when they have meaningful normalized text. Python function and class
-docstrings consume their owner budget; module docstrings consume the file budget.
+Rust public API docs do not consume a length budget. The CLI asks Cargo once per
+invocation for authoritative library target roots, including custom `[lib].path`
+and workspace members. Pure library calls retain the conservative `src/lib.rs`
+default unless the caller supplies an `AnalysisContext` with proven roots.
+Structurally valid safety proofs and tool directives do not consume the relative
+narrative budget, but they do count toward the absolute owner cap. All three
+remain subject to drift checks when they have meaningful normalized text. Python
+function and class docstrings consume their owner budget; module docstrings
+consume the file budget.
 
 Normalization strips comment delimiters, collapses whitespace, ignores terminal
 punctuation, and removes Unicode `Default_Ignorable_Code_Point` characters.
@@ -112,6 +116,9 @@ remain unpaired, the CLI cannot prove ancestry and exits with code `2`.
 Before and after snapshots that select different language adapters likewise
 exit with code `2`; the changed file is never reinterpreted as a new static
 baseline.
+When a Cargo manifest is detected, failure to resolve its workspace metadata
+also exits with code `2`; the CLI never guesses custom Rust library roots from
+filenames or a partial manifest parse.
 The default `--profile full` preserves all policy checks. The `attestation`
 profile is valid only for Git change modes and emits only
 `comment-owner-changed` and `comment-reparented`; added files are still parsed
@@ -264,6 +271,7 @@ The implementation deliberately delegates mechanical work:
 - `imara-diff` supplies fixed-Myers line and comment anchors through one
   interned-input and hunk pipeline;
 - `ignore` supplies repository walking and ignore semantics;
+- Cargo metadata supplies workspace membership and Rust library target roots;
 - Git plumbing supplies revisions, rename records, and blobs;
 - `dist` supplies release planning and native archives; and
 - the official GitHub Actions toolkit supplies download, extraction, cache,

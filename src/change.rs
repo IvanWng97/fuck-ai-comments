@@ -10,7 +10,9 @@ use crate::identity::{
     CanonicalIdentity, CanonicalIdentityId, CanonicalIdentityInterner, CanonicalIdentityMap,
 };
 use crate::languages;
-use crate::model::{AnalysisError, AnalysisProfile, Finding, OwnerKind, Selection, SourceFile};
+use crate::model::{
+    AnalysisContext, AnalysisError, AnalysisProfile, Finding, OwnerKind, Selection, SourceFile,
+};
 use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
 
 mod attestation_key;
@@ -129,6 +131,15 @@ pub(crate) fn analyze_with_profile(
     after: SourceFile<'_>,
     profile: AnalysisProfile,
 ) -> Result<Vec<Finding>, AnalysisError> {
+    analyze_with_context(&AnalysisContext::default(), before, after, profile)
+}
+
+pub(crate) fn analyze_with_context(
+    context: &AnalysisContext,
+    before: SourceFile<'_>,
+    after: SourceFile<'_>,
+    profile: AnalysisProfile,
+) -> Result<Vec<Finding>, AnalysisError> {
     if !languages::same_adapter(before.path, after.path)? {
         return Err(AnalysisError::AmbiguousChange(format!(
             "cannot attest a change across language adapters: {} -> {}",
@@ -137,8 +148,10 @@ pub(crate) fn analyze_with_profile(
         )));
     }
 
-    let before_document = languages::parse_validated_file(before.path, before.text)?;
-    let after_document = languages::parse_validated_file(after.path, after.text)?;
+    let before_document =
+        languages::parse_validated_file_with_context(context, before.path, before.text)?;
+    let after_document =
+        languages::parse_validated_file_with_context(context, after.path, after.text)?;
     let identities = CanonicalOwnerIdentities::new(&before_document, &after_document)?;
 
     let anchors = LineAnchors::new(before.text, after.text, &before_document, &after_document)?;
@@ -154,7 +167,7 @@ pub(crate) fn analyze_with_profile(
             &comments,
             &owner_changes,
         );
-        languages::analyze_file(after.path, after.text, &selection)?
+        languages::analyze_file_with_context(context, after.path, after.text, &selection)?
     } else {
         Vec::new()
     };

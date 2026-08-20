@@ -7,11 +7,9 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use anyhow::{Context, Result, bail};
-use fuck_ai_comments::{
-    AnalysisProfile, SourceFile, analyze_all_with_profile, analyze_change_with_profile,
-    supports_path,
-};
+use fuck_ai_comments::{AnalysisContext, AnalysisProfile, SourceFile, supports_path};
 
+use super::cargo_context;
 use super::check::Report;
 use super::source::{self, MAX_SOURCE_BYTES};
 
@@ -52,7 +50,8 @@ pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result
     if !changes.scope_exists {
         bail!("scope {} does not exist", scope.display());
     }
-    analyze_changes(&repository, changes.files, profile)
+    let context = cargo_context::discover(&repository.root, &repository.root)?;
+    analyze_changes(&repository, &context, changes.files, profile)
 }
 
 struct ScopeChanges {
@@ -814,6 +813,7 @@ fn bytes_to_path(bytes: &[u8]) -> Result<PathBuf> {
 
 fn analyze_changes(
     repository: &Repository,
+    context: &AnalysisContext,
     mut changes: Vec<FileChange>,
     profile: AnalysisProfile,
 ) -> Result<Report> {
@@ -847,7 +847,7 @@ fn analyze_changes(
     let blobs = repository.read_blobs(&object_ids)?;
     let mut findings = Vec::new();
     for plan in &plans {
-        let mut plan_findings = analyze_plan(repository, plan, &blobs, profile)?;
+        let mut plan_findings = analyze_plan(repository, context, plan, &blobs, profile)?;
         findings.append(&mut plan_findings);
     }
     findings.sort();
@@ -922,6 +922,7 @@ fn validate_modes(change: &FileChange) -> Result<()> {
 
 fn analyze_plan(
     repository: &Repository,
+    context: &AnalysisContext,
     plan: &Plan,
     blobs: &BTreeMap<ObjectId, Vec<u8>>,
     profile: AnalysisProfile,
@@ -930,38 +931,40 @@ fn analyze_plan(
         Plan::All(after) => {
             let bytes = read_snapshot(repository, after, blobs)?;
             let text = source::utf8(&after.path, &bytes)?;
-            analyze_all_with_profile(
-                SourceFile {
-                    path: &after.path,
-                    text,
-                },
-                profile,
-            )
-            .with_context(|| format!("could not analyze {}", after.path.display()))
+            context
+                .analyze_all_with_profile(
+                    SourceFile {
+                        path: &after.path,
+                        text,
+                    },
+                    profile,
+                )
+                .with_context(|| format!("could not analyze {}", after.path.display()))
         }
         Plan::Change { before, after } => {
             let before_bytes = read_snapshot(repository, before, blobs)?;
             let after_bytes = read_snapshot(repository, after, blobs)?;
             let before_text = source::utf8(&before.path, &before_bytes)?;
             let after_text = source::utf8(&after.path, &after_bytes)?;
-            analyze_change_with_profile(
-                SourceFile {
-                    path: &before.path,
-                    text: before_text,
-                },
-                SourceFile {
-                    path: &after.path,
-                    text: after_text,
-                },
-                profile,
-            )
-            .with_context(|| {
-                format!(
-                    "could not analyze change {} -> {}",
-                    before.path.display(),
-                    after.path.display()
+            context
+                .analyze_change_with_profile(
+                    SourceFile {
+                        path: &before.path,
+                        text: before_text,
+                    },
+                    SourceFile {
+                        path: &after.path,
+                        text: after_text,
+                    },
+                    profile,
                 )
-            })
+                .with_context(|| {
+                    format!(
+                        "could not analyze change {} -> {}",
+                        before.path.display(),
+                        after.path.display()
+                    )
+                })
         }
     }
 }

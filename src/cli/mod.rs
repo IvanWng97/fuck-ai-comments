@@ -1,3 +1,4 @@
+mod cargo_context;
 mod check;
 mod git;
 pub(crate) mod safe_output;
