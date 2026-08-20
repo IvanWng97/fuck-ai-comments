@@ -1,0 +1,110 @@
+name: Publish crate to crates.io
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  publish-crate:
+    name: Publish crate with Trusted Publishing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-authorization
+    permissions:
+      contents: read
+      id-token: write # crates.io exchanges the OIDC identity for a short-lived token.
+    env:
+      PACKAGE_NAME: fuck-ai-comments
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Validate the crate publish plan
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release=$(jq -cer '
+            if (.releases | type) == "array" and (.releases | length) == 1 then
+              .releases[0]
+            else
+              error("expected exactly one planned release")
+            end
+          ' <<<"$PLAN")
+          planned_name=$(jq -er '
+            .app_name |
+            if type == "string" then . else error("app_name must be a string") end
+          ' <<<"$release")
+          planned_version=$(jq -er '
+            .app_version |
+            if type == "string" then . else error("app_version must be a string") end
+          ' <<<"$release")
+
+          metadata=$(cargo metadata --locked --no-deps --format-version 1)
+          manifest_version=$(jq -er --arg package "$PACKAGE_NAME" '
+            [.packages[] | select(.name == $package)] |
+            if length == 1 then
+              .[0].version
+            else
+              error("expected exactly one matching Cargo package")
+            end
+          ' <<<"$metadata")
+
+          if [[ $planned_name != "$PACKAGE_NAME" ]]; then
+            echo "planned package mismatch: ${planned_name}" >&2
+            exit 1
+          fi
+          if [[ $planned_version != "$manifest_version" ]]; then
+            echo "planned version mismatch: plan=${planned_version} manifest=${manifest_version}" >&2
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$planned_version" >> "$GITHUB_OUTPUT"
+      - name: Package and compile the crate
+        shell: bash
+        run: cargo publish --dry-run --locked --package "$PACKAGE_NAME"
+      - name: Authenticate with crates.io
+        id: crates_io_auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish the crate
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
+        run: cargo publish --locked --package "$PACKAGE_NAME"
+      - name: Verify the public registry package
+        shell: bash
+        env:
+          VERSION: ${{ steps.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          install_root="$RUNNER_TEMP/crates-io-install"
+          for attempt in 1 2 3 4 5; do
+            if cargo install \
+              --registry crates-io \
+              --version "=${VERSION}" \
+              --locked \
+              --root "$install_root" \
+              "$PACKAGE_NAME"
+            then
+              "$install_root/bin/$PACKAGE_NAME" --version |
+                grep -Fqx "$PACKAGE_NAME $VERSION"
+              exit 0
+            fi
+
+            if [[ $attempt -eq 5 ]]; then
+              echo "crates.io did not serve ${PACKAGE_NAME} ${VERSION}" >&2
+              exit 1
+            fi
+            sleep 10
+          done

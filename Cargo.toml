@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
+publish = ["crates-io"]
 description = "Required, owner-aware comment policy for multi-language repositories"
 homepage = "https://github.com/IvanWng97/fuck-ai-comments"
 repository = "https://github.com/IvanWng97/fuck-ai-comments"

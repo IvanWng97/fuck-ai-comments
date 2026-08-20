@@ -378,14 +378,28 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" "${prerelease_args[@]}" --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+  custom-publish-crate:
+    needs:
+      - plan
+      - host
+    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    uses: ./.github/workflows/publish-crate.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    # publish jobs get escalated permissions
+    permissions:
+      "contents": "read"
+      "id-token": "write" # crates.io exchanges the OIDC identity for a short-lived token.
+
   announce:
     needs:
       - plan
       - host
+      - custom-publish-crate
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.custom-publish-crate.result == 'skipped' || needs.custom-publish-crate.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
