@@ -63,6 +63,12 @@ struct CheckArgs {
     )]
     head: Option<String>,
     #[arg(
+        long,
+        value_name = "PATH",
+        help = "Load comment policy from this TOML file"
+    )]
+    config: Option<PathBuf>,
+    #[arg(
         value_name = "PATH",
         default_value = ".",
         help = "File or directory to check"
@@ -87,9 +93,14 @@ fn run_check(arguments: CheckArgs, output: &mut impl Write) -> Result<ExitCode> 
         bail!("--all cannot use the attestation profile");
     }
     let report = if arguments.all {
-        check::scan_all(&arguments.path)?
+        check::scan_all(&arguments.path, arguments.config.as_deref())?
     } else if arguments.staged {
-        git::scan(&arguments.path, git::Mode::Staged, arguments.profile)?
+        git::scan(
+            &arguments.path,
+            git::Mode::Staged,
+            arguments.profile,
+            arguments.config.as_deref(),
+        )?
     } else if let Some(base) = arguments.base {
         git::scan(
             &arguments.path,
@@ -98,9 +109,15 @@ fn run_check(arguments: CheckArgs, output: &mut impl Write) -> Result<ExitCode> 
                 head: arguments.head,
             },
             arguments.profile,
+            arguments.config.as_deref(),
         )?
     } else {
-        git::scan(&arguments.path, git::Mode::Worktree, arguments.profile)?
+        git::scan(
+            &arguments.path,
+            git::Mode::Worktree,
+            arguments.profile,
+            arguments.config.as_deref(),
+        )?
     };
 
     render_report(&report, output)

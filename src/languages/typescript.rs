@@ -8,8 +8,9 @@ use super::javascript::{
 };
 use super::tree::{
     AttachmentIndex, CallableSubtrees, DirectivePlacement, LanguageSpec, OwnerCandidate,
-    OwnerLocation, analyze, canonical_syntax, direct_named_child, document, node_text,
+    OwnerLocation, analyze_with_policy, canonical_syntax, direct_named_child, document, node_text,
 };
+use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile};
 
@@ -23,16 +24,18 @@ pub(crate) fn analyze_file(
     path: &Path,
     source: &str,
     selection: &Selection,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    analyze(path, source, selection, TypeScript::Standard)
+    analyze_with_policy(path, source, selection, TypeScript::Standard, policy)
 }
 
 pub(crate) fn analyze_tsx_file(
     path: &Path,
     source: &str,
     selection: &Selection,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    analyze(path, source, selection, TypeScript::Tsx)
+    analyze_with_policy(path, source, selection, TypeScript::Tsx, policy)
 }
 
 pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {

@@ -4,11 +4,12 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze, canonical_syntax,
-    document, function_name, has_direct_child, node_text,
+    CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze_with_policy,
+    canonical_syntax, document, function_name, has_direct_child, node_text,
 };
 use super::walk::{WalkEvent, events};
 use crate::RustFileRole;
+use crate::config::PolicyConfig;
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
@@ -25,6 +26,7 @@ struct RustContext {
     namespaces: IdentityArena,
     containers: HashMap<usize, RustContainerKind>,
     public_local_impls: HashMap<usize, bool>,
+    attached_outer_docs: HashSet<usize>,
     public_outer_docs: HashSet<usize>,
     safety_proof_comments: HashSet<usize>,
     invalid_scope: bool,
@@ -63,6 +65,7 @@ struct RustContextFrame {
     node_id: usize,
     is_source_file: bool,
     is_declaration_list: bool,
+    is_ordered_field_declaration_list: bool,
     namespace_before: Option<IdentityId>,
     callable_pushed: bool,
     module_is_private: bool,
@@ -170,8 +173,9 @@ pub(crate) fn analyze_file(
     source: &str,
     selection: &Selection,
     file_role: RustFileRole,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    analyze(path, source, selection, Rust { file_role })
+    analyze_with_policy(path, source, selection, Rust { file_role }, policy)
 }
 
 pub(crate) fn parse_file(
@@ -246,6 +250,9 @@ impl LanguageSpec for Rust {
         }
         if is_public_rustdoc(node, source, self.file_role, context) {
             return Some(CommentKind::PublicDocs);
+        }
+        if is_attached_rustdoc(node, source, context) {
+            return Some(CommentKind::RustDocs);
         }
         if context.safety_proof_comments.contains(&node.id()) {
             return Some(CommentKind::SafetyProof);
@@ -326,6 +333,21 @@ fn is_public_inner_doc(node: Node<'_>, file_role: RustFileRole, context: &RustCo
         && node_context.public_module_ancestry
 }
 
+fn is_attached_rustdoc(node: Node<'_>, source: &str, context: &RustContext) -> bool {
+    if context.invalid_scope {
+        return false;
+    }
+    if context.attached_outer_docs.contains(&node.id()) {
+        return true;
+    }
+    if !is_inner_rustdoc(node, source) {
+        return false;
+    }
+    context.nodes.get(&node.id()).is_some_and(|node| {
+        node.direct_parent_is_source_file || (!node.within_callable && node.has_module_ancestor)
+    })
+}
+
 fn is_reachable_target(target: usize, context: &RustContext) -> bool {
     if context.invalid_scope {
         return false;
@@ -391,6 +413,11 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     &mut private_module_depth,
                 );
                 let parent = frames.last();
+                let rustdoc_target = is_outer_rustdoc_target(node)
+                    || parent.is_some_and(|frame| {
+                        frame.is_ordered_field_declaration_list
+                            && is_ordered_field_rustdoc_target(node)
+                    });
                 let node_context = RustNodeContext {
                     direct_parent_is_source_file: parent.is_some_and(|frame| frame.is_source_file),
                     within_callable: callable_depth > 0,
@@ -400,7 +427,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     nearest_container: containers.last().copied(),
                     bare_public: false,
                 };
-                if !outer_rustdocs.is_empty()
+                if (!outer_rustdocs.is_empty() && rustdoc_target)
                     || is_inner_rustdoc(node, source)
                     || matches!(
                         node.kind(),
@@ -409,11 +436,13 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                 {
                     context.nodes.insert(node.id(), node_context);
                 }
-                outer_doc_targets.extend(
-                    outer_rustdocs
-                        .into_iter()
-                        .map(|comment| (comment, node.id())),
-                );
+                if rustdoc_target {
+                    outer_doc_targets.extend(
+                        outer_rustdocs
+                            .into_iter()
+                            .map(|comment| (comment, node.id())),
+                    );
+                }
 
                 if matches!(node.kind(), "function_item" | "closure_expression") {
                     context.function_namespaces.insert(node.id(), namespace);
@@ -467,6 +496,8 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     node_id: node.id(),
                     is_source_file: node.kind() == "source_file",
                     is_declaration_list: node.kind() == "declaration_list",
+                    is_ordered_field_declaration_list: node.kind()
+                        == "ordered_field_declaration_list",
                     namespace_before,
                     callable_pushed,
                     module_is_private,
@@ -525,6 +556,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
     }
     for (comment, target) in outer_doc_targets {
         record_rustdoc_target_probe();
+        context.attached_outer_docs.insert(comment);
         if is_reachable_target(target, &context) {
             context.public_outer_docs.insert(comment);
         }
@@ -535,6 +567,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
             + context.namespaces.len()
             + context.containers.len()
             + context.public_local_impls.len()
+            + context.attached_outer_docs.len()
             + context.public_outer_docs.len()
             + context.safety_proof_comments.len(),
     );
@@ -611,7 +644,11 @@ impl RustContextFrame {
                 safety_proofs,
             };
         }
-        if adjacent && (node.kind() == "attribute_item" || is_inner_rustdoc(node, source)) {
+        if adjacent
+            && (node.kind() == "attribute_item"
+                || is_inner_rustdoc(node, source)
+                || (self.is_ordered_field_declaration_list && node.kind() == "visibility_modifier"))
+        {
             self.pending_outer_rustdoc_end = Some(node.end_byte());
             return RustDirectChildFacts {
                 outer_rustdocs: Vec::new(),
@@ -676,6 +713,39 @@ fn is_outer_rustdoc(node: Node<'_>, source: &str) -> bool {
     let text = node_text(node, source).trim_start();
     (text.starts_with("///") && !text.starts_with("////"))
         || (text.starts_with("/**") && !text.starts_with("/***"))
+}
+
+fn is_outer_rustdoc_target(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "associated_type"
+            | "const_item"
+            | "enum_item"
+            | "enum_variant"
+            | "extern_crate_declaration"
+            | "field_declaration"
+            | "foreign_mod_item"
+            | "function_item"
+            | "function_signature_item"
+            | "impl_item"
+            | "macro_definition"
+            | "macro_invocation"
+            | "mod_item"
+            | "static_item"
+            | "struct_item"
+            | "trait_item"
+            | "type_item"
+            | "union_item"
+            | "use_declaration"
+    )
+}
+
+fn is_ordered_field_rustdoc_target(node: Node<'_>) -> bool {
+    node.is_named()
+        && !matches!(
+            node.kind(),
+            "attribute_item" | "block_comment" | "line_comment" | "visibility_modifier"
+        )
 }
 
 fn is_inner_rustdoc(node: Node<'_>, source: &str) -> bool {

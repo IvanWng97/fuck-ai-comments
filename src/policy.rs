@@ -1,8 +1,9 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use tree_sitter::Node;
 
+use crate::config::{PolicyConfig, StaticPolicy};
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 
@@ -14,6 +15,7 @@ const FILE_CODE_LINES_PER_COMMENT: usize = 16;
 pub(crate) const LEAF_COMMENT_MAX_LINES: usize = 3;
 const TEMPLATE_COMMENT_MAX_LINES: usize = 3;
 const OWNER_COMMENT_CAP_RULE: &str = "comment-policy/owner-comment-cap";
+const COMMENT_TYPE_CAP_RULE: &str = "comment-policy/comment-type-cap";
 
 #[cfg(test)]
 thread_local! {
@@ -144,17 +146,44 @@ pub(crate) enum CommentKind {
     Narrative,
     FileNarrative,
     TypeNarrative,
+    RustDocs,
     ToolDirective,
     SafetyProof,
     PublicDocs,
 }
 
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum CommentCategory {
+    Narrative,
+    Rustdoc,
+    SafetyProof,
+    ToolDirective,
+}
+
 impl CommentKind {
-    fn is_narrative(self) -> bool {
-        matches!(
-            self,
-            Self::Narrative | Self::FileNarrative | Self::TypeNarrative
-        )
+    fn static_policy(self, policy: &PolicyConfig) -> StaticPolicy {
+        match self {
+            Self::Narrative | Self::FileNarrative | Self::TypeNarrative => policy.narrative(),
+            Self::RustDocs => policy.rustdoc(false),
+            Self::PublicDocs => policy.rustdoc(true),
+            Self::SafetyProof => policy.safety_proof(),
+            Self::ToolDirective => policy.tool_directive(),
+        }
+    }
+
+    fn category(self) -> CommentCategory {
+        match self {
+            Self::Narrative | Self::FileNarrative | Self::TypeNarrative => {
+                CommentCategory::Narrative
+            }
+            Self::RustDocs | Self::PublicDocs => CommentCategory::Rustdoc,
+            Self::SafetyProof => CommentCategory::SafetyProof,
+            Self::ToolDirective => CommentCategory::ToolDirective,
+        }
+    }
+
+    pub(crate) fn is_narrative_under(self, policy: &PolicyConfig) -> bool {
+        self.static_policy(policy) == StaticPolicy::Relative
     }
 }
 
@@ -354,6 +383,7 @@ pub(crate) fn tree_findings(
     selection: &Selection,
     input: TreeInput<'_>,
     language: &str,
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     let positions = PhysicalCommentPositions::new(source, input.comments);
     let mut findings = function_findings(
@@ -362,6 +392,7 @@ pub(crate) fn tree_findings(
         selection,
         input.functions,
         &input.ownership.function_budget,
+        policy,
     );
     findings.extend(type_findings(
         path,
@@ -369,6 +400,7 @@ pub(crate) fn tree_findings(
         selection,
         input.types,
         &input.ownership.type_budget,
+        policy,
     ));
     findings.extend(leaf_findings(
         path,
@@ -376,6 +408,7 @@ pub(crate) fn tree_findings(
         input.leaves,
         &input.ownership.leaves,
         language,
+        policy,
     ));
     findings.extend(file_findings_with_lines(
         path,
@@ -384,6 +417,7 @@ pub(crate) fn tree_findings(
         selection,
         &input.ownership.file,
         input.comments,
+        policy,
     ));
     findings
 }
@@ -393,18 +427,28 @@ pub(crate) fn template_findings(
     selection: &Selection,
     comments: &[Comment],
     owner: &Span,
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     let template_selected =
         selection.selects_owner(OwnerKind::Template, owner.start_byte, owner.end_byte);
     if comments.is_empty() || !template_selected {
         return Vec::new();
     }
-    let mut findings = owner_comment_cap_finding(path, OwnerKind::Template, "template", comments)
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut findings = owner_comment_cap_finding_with_policy(
+        path,
+        OwnerKind::Template,
+        "template",
+        comments,
+        policy,
+    )
+    .into_iter()
+    .collect::<Vec<_>>();
+    findings.extend(configured_comment_cap_findings(
+        path, "template", comments, policy,
+    ));
     let narrative: Vec<Comment> = comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative())
+        .filter(|comment| comment.kind.is_narrative_under(policy))
         .cloned()
         .collect();
     let lines = comment_lines(&narrative);
@@ -429,6 +473,7 @@ fn function_findings(
     selection: &Selection,
     functions: &[Function],
     budget: &[Vec<Comment>],
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (function, budget_comments) in functions.iter().zip(budget) {
@@ -445,6 +490,7 @@ fn function_findings(
                 budget_code_lines: function.budget_code_lines,
             },
             budget_comments,
+            policy,
         ));
     }
     findings
@@ -456,6 +502,7 @@ fn type_findings(
     selection: &Selection,
     types: &[TypeOwner],
     budget: &[Vec<Comment>],
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (type_owner, budget_comments) in types.iter().zip(budget) {
@@ -472,6 +519,7 @@ fn type_findings(
                 budget_code_lines: type_owner.budget_code_lines,
             },
             budget_comments,
+            policy,
         ));
     }
     findings
@@ -492,6 +540,7 @@ fn scoped_owner_findings(
     selection: &Selection,
     owner: ScopedOwner<'_>,
     budget_comments: &[Comment],
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     if budget_comments.is_empty()
         || !selection.selects_owner(owner.kind, owner.span.start_byte, owner.span.end_byte)
@@ -502,12 +551,24 @@ fn scoped_owner_findings(
     let mut budget_comments = budget_comments.to_vec();
     budget_comments.sort_by_key(|comment| comment.span.start_byte);
     let owner_label = format!("{} `{}`", owner.kind_label, owner.name);
-    let mut findings = owner_comment_cap_finding(path, owner.kind, &owner_label, &budget_comments)
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut findings = owner_comment_cap_finding_with_policy(
+        path,
+        owner.kind,
+        &owner_label,
+        &budget_comments,
+        policy,
+    )
+    .into_iter()
+    .collect::<Vec<_>>();
+    findings.extend(configured_comment_cap_findings(
+        path,
+        &owner_label,
+        &budget_comments,
+        policy,
+    ));
     let narrative: Vec<Comment> = budget_comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative())
+        .filter(|comment| comment.kind.is_narrative_under(policy))
         .cloned()
         .collect();
     let narrative_lines = comment_lines(&narrative);
@@ -558,12 +619,13 @@ fn leaf_findings(
     leaves: &[Leaf],
     owned: &[Vec<Comment>],
     language: &str,
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (leaf, owned_comments) in leaves.iter().zip(owned) {
         let narrative: Vec<Comment> = owned_comments
             .iter()
-            .filter(|comment| comment.kind.is_narrative())
+            .filter(|comment| comment.kind.is_narrative_under(policy))
             .cloned()
             .collect();
         let narrative_lines = comment_lines(&narrative);
@@ -572,11 +634,18 @@ fn leaf_findings(
         if !owner_touched {
             continue;
         }
-        findings.extend(owner_comment_cap_finding(
+        findings.extend(owner_comment_cap_finding_with_policy(
             path,
             OwnerKind::Leaf,
             &format!("{language} leaf `{}`", leaf.name),
             owned_comments,
+            policy,
+        ));
+        findings.extend(configured_comment_cap_findings(
+            path,
+            &format!("{language} leaf `{}`", leaf.name),
+            owned_comments,
+            policy,
         ));
         if narrative_lines.len() > LEAF_COMMENT_MAX_LINES {
             findings.push(Finding {
@@ -600,12 +669,21 @@ pub(crate) fn file_findings(
     selection: &Selection,
     comments: &[Comment],
     all_comments: &[Comment],
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     if comments.is_empty() {
         return Vec::new();
     }
     let positions = PhysicalCommentPositions::new(source, all_comments);
-    file_findings_with_lines(path, source, &positions, selection, comments, all_comments)
+    file_findings_with_lines(
+        path,
+        source,
+        &positions,
+        selection,
+        comments,
+        all_comments,
+        policy,
+    )
 }
 
 fn file_findings_with_lines(
@@ -615,6 +693,7 @@ fn file_findings_with_lines(
     selection: &Selection,
     comments: &[Comment],
     all_comments: &[Comment],
+    policy: &PolicyConfig,
 ) -> Vec<Finding> {
     let file_span = Span {
         start_byte: 0,
@@ -627,12 +706,24 @@ fn file_findings_with_lines(
     {
         return Vec::new();
     }
-    let mut findings = owner_comment_cap_finding(path, OwnerKind::File, "file scope", comments)
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut findings = owner_comment_cap_finding_with_policy(
+        path,
+        OwnerKind::File,
+        "file scope",
+        comments,
+        policy,
+    )
+    .into_iter()
+    .collect::<Vec<_>>();
+    findings.extend(configured_comment_cap_findings(
+        path,
+        "file scope",
+        comments,
+        policy,
+    ));
     let narrative: Vec<Comment> = comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative())
+        .filter(|comment| comment.kind.is_narrative_under(policy))
         .cloned()
         .collect();
     let narrative_lines = comment_lines(&narrative);
@@ -671,20 +762,21 @@ fn file_findings_with_lines(
     findings
 }
 
-pub(crate) fn owner_comment_cap_finding(
+pub(crate) fn owner_comment_cap_finding_with_policy(
     path: &Path,
     owner_kind: OwnerKind,
     owner: &str,
     comments: &[Comment],
+    policy: &PolicyConfig,
 ) -> Option<Finding> {
     let lines: BTreeSet<usize> = comments
         .iter()
-        .filter(|comment| comment.kind != CommentKind::PublicDocs)
+        .filter(|comment| comment.kind.static_policy(policy) != StaticPolicy::Unlimited)
         .flat_map(|comment| comment.span.lines())
         .collect();
     let narrative_lines: BTreeSet<usize> = comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative())
+        .filter(|comment| comment.kind.is_narrative_under(policy))
         .flat_map(|comment| comment.span.lines())
         .collect();
     let allowance = match owner_kind {
@@ -698,10 +790,54 @@ pub(crate) fn owner_comment_cap_finding(
         line: first_line(&lines),
         rule: OWNER_COMMENT_CAP_RULE,
         message: format!(
-            "{owner} owns {} non-public comment lines; absolute allowance is {allowance}",
+            "{owner} owns {} statically budgeted comment lines; absolute allowance is {allowance}",
             lines.len()
         ),
     })
+}
+
+pub(crate) fn configured_comment_cap_findings(
+    path: &Path,
+    owner: &str,
+    comments: &[Comment],
+    policy: &PolicyConfig,
+) -> Vec<Finding> {
+    let mut capped_lines: BTreeMap<(CommentCategory, usize), BTreeSet<usize>> = BTreeMap::new();
+    for comment in comments {
+        let StaticPolicy::Capped(allowance) = comment.kind.static_policy(policy) else {
+            continue;
+        };
+        capped_lines
+            .entry((comment.kind.category(), allowance))
+            .or_default()
+            .extend(comment.span.lines());
+    }
+    capped_lines
+        .into_iter()
+        .filter_map(|((category, allowance), lines)| {
+            (lines.len() > allowance).then(|| Finding {
+                path: path.display().to_string(),
+                line: first_line(&lines),
+                rule: COMMENT_TYPE_CAP_RULE,
+                message: format!(
+                    "{owner} owns {} {} comment lines; configured allowance is {allowance}",
+                    lines.len(),
+                    category.label()
+                ),
+            })
+        })
+        .collect()
+}
+
+impl CommentCategory {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Narrative => "narrative",
+            Self::Rustdoc => "rustdoc",
+            Self::SafetyProof => "safety-proof",
+            Self::ToolDirective => "tool-directive",
+        }
+    }
 }
 
 struct PhysicalCommentPositions(HashMap<usize, PhysicalLinePosition>);

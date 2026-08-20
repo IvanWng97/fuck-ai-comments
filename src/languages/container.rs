@@ -5,6 +5,7 @@ use tree_sitter::{Language, Node, Tree};
 
 use super::walk::{WalkEvent, events};
 use super::{css, javascript, tree, typescript};
+use crate::config::PolicyConfig;
 use crate::identity::IdentityArena;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::{
@@ -78,12 +79,15 @@ pub(crate) fn analyze<S: ContainerSpec>(
     source: &str,
     selection: &Selection,
     spec: S,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
     let facts = parse_facts(path, source, spec)?;
     let owner = file_span(source);
-    let mut findings = template_findings(path, selection, &facts.comments, &owner);
+    let mut findings = template_findings(path, selection, &facts.comments, &owner, policy);
     for region in facts.regions {
-        findings.extend(analyze_embedded_region(path, source, selection, &region)?);
+        findings.extend(analyze_embedded_region(
+            path, source, selection, &region, policy,
+        )?);
     }
     Ok(findings)
 }
@@ -489,17 +493,18 @@ fn analyze_embedded_region(
     source: &str,
     selection: &Selection,
     region: &EmbeddedRegion,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
     let embedded = embedded_source(path, source, region)?;
     let line_offset = region.span.start_line - 1;
     let embedded_selection = selection.project_into(region.span.start_byte, region.span.end_byte);
     let mut findings = match region.language {
-        EmbeddedLanguage::Css => css::analyze_file(path, embedded, &embedded_selection)?,
+        EmbeddedLanguage::Css => css::analyze_file(path, embedded, &embedded_selection, policy)?,
         EmbeddedLanguage::JavaScript => {
-            javascript::analyze_file(path, embedded, &embedded_selection)?
+            javascript::analyze_file(path, embedded, &embedded_selection, policy)?
         }
         EmbeddedLanguage::TypeScript => {
-            typescript::analyze_file(path, embedded, &embedded_selection)?
+            typescript::analyze_file(path, embedded, &embedded_selection, policy)?
         }
     };
     for finding in &mut findings {

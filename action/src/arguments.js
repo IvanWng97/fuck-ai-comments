@@ -15,10 +15,18 @@ export function buildCheckArgumentsFromInputs(getInput) {
     path: getInput("path", { required: true }),
     base: getInput("base"),
     head: getInput("head"),
+    config: getInput("config"),
   });
 }
 
-export function buildCheckArguments({ mode, profile, path, base, head }) {
+export function buildCheckArguments({
+  mode,
+  profile,
+  path,
+  base,
+  head,
+  config,
+}) {
   if (!MODES.has(mode)) {
     throw new Error(`unsupported check mode: ${mode}`);
   }
@@ -42,6 +50,9 @@ export function buildCheckArguments({ mode, profile, path, base, head }) {
   }
 
   result.push("--profile", profile);
+  if (config) {
+    result.push("--config", config);
+  }
   result.push("--", path);
   return result;
 }

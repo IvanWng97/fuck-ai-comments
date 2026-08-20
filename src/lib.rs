@@ -6,11 +6,13 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 mod change;
+mod config;
 mod identity;
 mod languages;
 mod model;
 mod policy;
 
+pub use config::PolicyConfigError;
 pub use model::{AnalysisError, AnalysisProfile, Finding, SourceFile};
 
 /// Repository-level facts used to classify source files during analysis.
@@ -22,6 +24,7 @@ pub use model::{AnalysisError, AnalysisProfile, Finding, SourceFile};
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisContext {
     rust_targets: RustTargets,
+    policy: config::PolicyConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,7 +67,23 @@ impl AnalysisContext {
             .collect::<Result<_, _>>()?;
         Ok(Self {
             rust_targets: RustTargets::CargoLibraryRoots(roots),
+            policy: config::PolicyConfig::default(),
         })
+    }
+
+    /// Apply repository comment policy from a TOML document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the document is malformed, uses an unsupported
+    /// schema version, or contains an invalid policy declaration.
+    pub fn with_policy_toml(mut self, source: &str) -> Result<Self, PolicyConfigError> {
+        self.policy = config::PolicyConfig::parse(source)?;
+        Ok(self)
+    }
+
+    pub(crate) fn policy(&self) -> &config::PolicyConfig {
+        &self.policy
     }
 
     pub(crate) fn rust_file_role(&self, path: &Path) -> RustFileRole {

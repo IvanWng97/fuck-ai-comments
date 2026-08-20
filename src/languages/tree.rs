@@ -3,6 +3,7 @@ use std::path::Path;
 
 use tree_sitter::{Language, Node, Parser, Tree};
 
+use crate::config::PolicyConfig;
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{
@@ -821,11 +822,12 @@ pub(crate) trait LanguageSpec: Copy {
     ) -> Option<CommentKind>;
 }
 
-pub(crate) fn analyze<S: LanguageSpec>(
+pub(crate) fn analyze_with_policy<S: LanguageSpec>(
     path: &Path,
     source: &str,
     selection: &Selection,
     spec: S,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
     let facts = parse_facts(path, source, spec)?;
     Ok(tree_findings(
@@ -834,6 +836,7 @@ pub(crate) fn analyze<S: LanguageSpec>(
         selection,
         facts.input(),
         spec.label(),
+        policy,
     ))
 }
 
@@ -1312,6 +1315,7 @@ impl<'source> FactCollector<'source> {
                 }
             }
             CommentKind::Narrative
+            | CommentKind::RustDocs
             | CommentKind::ToolDirective
             | CommentKind::SafetyProof
             | CommentKind::PublicDocs => {

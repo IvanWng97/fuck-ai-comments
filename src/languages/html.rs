@@ -5,6 +5,7 @@ use tree_sitter::Node;
 use super::container::{
     ContainerSpec, EmbeddedRegion, analyze, parse_file as parse, script_region, style_region,
 };
+use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::ParsedFile;
 
@@ -15,8 +16,9 @@ pub(crate) fn analyze_file(
     path: &Path,
     source: &str,
     selection: &Selection,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    analyze(path, source, selection, Html)
+    analyze(path, source, selection, Html, policy)
 }
 
 pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {

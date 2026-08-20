@@ -4,9 +4,10 @@ use tree_sitter::Node;
 
 use super::tree::{
     ANONYMOUS_FUNCTION_NAME, CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation,
-    analyze, direct_named_child, document, first_descendant_with_kind, node_text,
+    analyze_with_policy, direct_named_child, document, first_descendant_with_kind, node_text,
 };
 use super::walk::{WalkEvent, events};
+use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
 
@@ -17,8 +18,9 @@ pub(crate) fn analyze_file(
     path: &Path,
     source: &str,
     selection: &Selection,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    analyze(path, source, selection, ObjectiveC)
+    analyze_with_policy(path, source, selection, ObjectiveC, policy)
 }
 
 pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {

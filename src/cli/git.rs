@@ -19,6 +19,7 @@ const GIT_OBJECT_ID_HEX_LENGTHS: [usize; 2] = [40, 64];
 const MAX_GIT_SIMILARITY_SCORE: u16 = 100;
 // Git's default keeps its exhaustive O(N^2) rename fallback finite.
 const GIT_EXHAUSTIVE_RENAME_LIMIT: usize = 1_000;
+const POLICY_CONFIG_PATH: &str = "fuck-ai-comments.toml";
 
 pub(super) enum Mode {
     Worktree,
@@ -44,7 +45,12 @@ enum DiffRequest<'revision> {
     },
 }
 
-pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result<Report> {
+pub(super) fn scan(
+    scope: &Path,
+    mode: Mode,
+    profile: AnalysisProfile,
+    explicit_config: Option<&Path>,
+) -> Result<Report> {
     let repository = Repository::discover(scope)?;
     let changes = repository.changes(mode)?;
     if !changes.scope_exists {
@@ -84,12 +90,28 @@ pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result
         required_manifests,
     )?;
     repository.validate_cargo_context(&cargo_context, &changes.cargo_authority)?;
+    let policy = repository.load_policy(
+        cargo_context.analysis(),
+        &changes.cargo_authority,
+        explicit_config,
+    )?;
+    let full_static_snapshots = (policy.changed && profile == AnalysisProfile::Full)
+        .then(|| repository.snapshots_for_authority(&changes.cargo_authority))
+        .transpose()?;
     analyze_changes(
         &repository,
-        cargo_context.analysis(),
+        &policy.analysis,
         changes.files,
         profile,
+        &policy.excluded_paths,
+        full_static_snapshots,
     )
+}
+
+struct LoadedPolicy {
+    analysis: AnalysisContext,
+    changed: bool,
+    excluded_paths: BTreeSet<PathBuf>,
 }
 
 struct ScopeChanges {
@@ -714,6 +736,183 @@ impl Repository {
         self.scope == Path::new(".") || path.starts_with(&self.scope)
     }
 
+    fn load_policy(
+        &self,
+        analysis: &AnalysisContext,
+        authority: &CargoAuthority,
+        explicit_config: Option<&Path>,
+    ) -> Result<LoadedPolicy> {
+        if let Some(config_path) = explicit_config {
+            let absolute = cargo_context::normalized_absolute_path(config_path, "policy config")?;
+            let bytes = source::read_regular(&absolute, config_path)?;
+            let text = source::utf8(config_path, &bytes)?;
+            let analysis = analysis
+                .clone()
+                .with_policy_toml(text)
+                .with_context(|| format!("could not load {}", config_path.display()))?;
+            let explicit_path = absolute
+                .strip_prefix(&self.root)
+                .ok()
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(Path::to_owned);
+            return Ok(LoadedPolicy {
+                analysis,
+                changed: false,
+                excluded_paths: std::iter::once(PathBuf::from(POLICY_CONFIG_PATH))
+                    .chain(explicit_path)
+                    .collect(),
+            });
+        }
+
+        let config_path = Path::new(POLICY_CONFIG_PATH);
+        let (before, after) = self.policy_snapshots(authority)?;
+        for snapshot in before.iter().chain(after.iter()) {
+            validate_policy_snapshot(snapshot)?;
+        }
+        let object_ids: BTreeSet<_> = before
+            .iter()
+            .chain(after.iter())
+            .filter_map(|snapshot| match &snapshot.source {
+                SnapshotSource::Blob(object_id) => Some(object_id.clone()),
+                SnapshotSource::Worktree => None,
+            })
+            .collect();
+        let blobs = self.read_blobs(&object_ids)?;
+        let before_bytes = before
+            .as_ref()
+            .map(|snapshot| read_snapshot(self, snapshot, &blobs))
+            .transpose()?;
+        let after_bytes = after
+            .as_ref()
+            .map(|snapshot| read_snapshot(self, snapshot, &blobs))
+            .transpose()?;
+        let changed = before_bytes.as_deref() != after_bytes.as_deref();
+        let analysis = match after_bytes {
+            Some(bytes) => {
+                let text = source::utf8(config_path, &bytes)?;
+                analysis
+                    .clone()
+                    .with_policy_toml(text)
+                    .with_context(|| format!("could not load {POLICY_CONFIG_PATH}"))?
+            }
+            None => analysis.clone(),
+        };
+        Ok(LoadedPolicy {
+            analysis,
+            changed,
+            excluded_paths: std::iter::once(config_path.to_owned()).collect(),
+        })
+    }
+
+    fn policy_snapshots(
+        &self,
+        authority: &CargoAuthority,
+    ) -> Result<(Option<Snapshot>, Option<Snapshot>)> {
+        let path = Path::new(POLICY_CONFIG_PATH);
+        match authority {
+            CargoAuthority::Worktree { before } => Ok((
+                before
+                    .as_ref()
+                    .map(|tree| self.snapshot_in_tree(tree, path))
+                    .transpose()?
+                    .flatten(),
+                self.snapshot_in_worktree(path)?,
+            )),
+            CargoAuthority::Index { before } => Ok((
+                before
+                    .as_ref()
+                    .map(|tree| self.snapshot_in_tree(tree, path))
+                    .transpose()?
+                    .flatten(),
+                self.snapshot_in_index(path)?,
+            )),
+            CargoAuthority::Commits { before, after } => Ok((
+                self.snapshot_in_tree(before, path)?,
+                self.snapshot_in_tree(after, path)?,
+            )),
+        }
+    }
+
+    fn snapshot_in_worktree(&self, path: &Path) -> Result<Option<Snapshot>> {
+        match fs::symlink_metadata(self.root.join(path)) {
+            Ok(_) => Ok(Some(Snapshot::worktree(path.to_owned()))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => {
+                Err(error).with_context(|| format!("could not inspect {}", path.display()))
+            }
+        }
+    }
+
+    fn snapshot_in_tree(&self, tree: &ObjectId, path: &Path) -> Result<Option<Snapshot>> {
+        let output = self.git([
+            OsStr::new("ls-tree"),
+            OsStr::new("-z"),
+            OsStr::new(tree.as_str()),
+            OsStr::new("--"),
+            path.as_os_str(),
+        ])?;
+        one_snapshot(parse_tree_snapshots(&output)?, path, "Git tree")
+    }
+
+    fn snapshot_in_index(&self, path: &Path) -> Result<Option<Snapshot>> {
+        let output = self.git([
+            OsStr::new("ls-files"),
+            OsStr::new("--stage"),
+            OsStr::new("--full-name"),
+            OsStr::new("-z"),
+            OsStr::new("--"),
+            path.as_os_str(),
+        ])?;
+        one_snapshot(parse_index_snapshots(&output)?, path, "Git index")
+    }
+
+    fn snapshots_for_authority(&self, authority: &CargoAuthority) -> Result<Vec<Snapshot>> {
+        match authority {
+            CargoAuthority::Worktree { .. } => self.worktree_snapshots(),
+            CargoAuthority::Index { .. } => {
+                let output = self.git([
+                    OsStr::new("ls-files"),
+                    OsStr::new("--stage"),
+                    OsStr::new("--full-name"),
+                    OsStr::new("-z"),
+                ])?;
+                parse_index_snapshots(&output)
+            }
+            CargoAuthority::Commits { after, .. } => {
+                let output = self.git([
+                    OsStr::new("ls-tree"),
+                    OsStr::new("-r"),
+                    OsStr::new("-z"),
+                    OsStr::new(after.as_str()),
+                ])?;
+                parse_tree_snapshots(&output)
+            }
+        }
+    }
+
+    fn worktree_snapshots(&self) -> Result<Vec<Snapshot>> {
+        let output = self.git([
+            OsStr::new("ls-files"),
+            OsStr::new("--cached"),
+            OsStr::new("--others"),
+            OsStr::new("--exclude-standard"),
+            OsStr::new("--full-name"),
+            OsStr::new("-z"),
+        ])?;
+        let mut snapshots = Vec::new();
+        for path in parse_nul_paths(&output)? {
+            match fs::symlink_metadata(self.root.join(&path)) {
+                Ok(_) => snapshots.push(Snapshot::worktree(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("could not inspect {}", path.display()));
+                }
+            }
+        }
+        Ok(snapshots)
+    }
+
     fn read_blobs(&self, object_ids: &BTreeSet<ObjectId>) -> Result<BTreeMap<ObjectId, Vec<u8>>> {
         if object_ids.is_empty() {
             return Ok(BTreeMap::new());
@@ -1034,6 +1233,86 @@ fn parse_mode(text: &str) -> Result<FileMode> {
     })
 }
 
+fn parse_tree_snapshots(output: &[u8]) -> Result<Vec<Snapshot>> {
+    parse_snapshot_records(output, "Git tree entry", |header| {
+        let mut fields = header.split_ascii_whitespace();
+        let mode = parse_mode(fields.next().context("Git tree entry had no mode")?)?;
+        let _object_type = fields.next().context("Git tree entry had no object type")?;
+        let object_id = ObjectId::parse(fields.next().context("Git tree entry had no object ID")?)?;
+        if fields.next().is_some() {
+            bail!("malformed Git tree entry header {header:?}");
+        }
+        Ok((mode, object_id))
+    })
+}
+
+fn parse_index_snapshots(output: &[u8]) -> Result<Vec<Snapshot>> {
+    parse_snapshot_records(output, "Git index entry", |header| {
+        let mut fields = header.split_ascii_whitespace();
+        let mode = parse_mode(fields.next().context("Git index entry had no mode")?)?;
+        let object_id =
+            ObjectId::parse(fields.next().context("Git index entry had no object ID")?)?;
+        let stage = fields.next().context("Git index entry had no stage")?;
+        if stage != "0" || fields.next().is_some() {
+            bail!("cannot analyze an unmerged Git index entry");
+        }
+        Ok((mode, object_id))
+    })
+}
+
+fn parse_snapshot_records(
+    output: &[u8],
+    label: &str,
+    mut parse_header: impl FnMut(&str) -> Result<(FileMode, ObjectId)>,
+) -> Result<Vec<Snapshot>> {
+    let mut cursor = 0;
+    let mut snapshots = Vec::new();
+    while cursor < output.len() {
+        let record = take_nul(output, &mut cursor, label)?;
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .with_context(|| format!("{label} had no path separator"))?;
+        let header = std::str::from_utf8(&record[..tab])
+            .with_context(|| format!("{label} header was not ASCII"))?;
+        let path = parse_git_path(&record[tab + 1..])?;
+        let (mode, object_id) = parse_header(header)?;
+        snapshots.push(Snapshot::blob(path, object_id, mode));
+    }
+    Ok(snapshots)
+}
+
+fn one_snapshot(
+    mut snapshots: Vec<Snapshot>,
+    expected_path: &Path,
+    label: &str,
+) -> Result<Option<Snapshot>> {
+    if snapshots.len() > 1 {
+        bail!(
+            "{label} returned duplicate entries for {}",
+            expected_path.display()
+        );
+    }
+    let snapshot = snapshots.pop();
+    if snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.path != expected_path)
+    {
+        bail!("{label} returned an unexpected path");
+    }
+    Ok(snapshot)
+}
+
+fn validate_policy_snapshot(snapshot: &Snapshot) -> Result<()> {
+    if snapshot.mode.is_some_and(|mode| mode != FileMode::Regular) {
+        bail!(
+            "policy config {} is not a regular file",
+            snapshot.path.display()
+        );
+    }
+    Ok(())
+}
+
 fn parse_raw_object_id(text: &str) -> Result<Option<ObjectId>> {
     if text.bytes().all(|byte| byte == b'0') {
         if GIT_OBJECT_ID_HEX_LENGTHS.contains(&text.len()) {
@@ -1138,7 +1417,26 @@ fn analyze_changes(
     context: &AnalysisContext,
     mut changes: Vec<FileChange>,
     profile: AnalysisProfile,
+    excluded_paths: &BTreeSet<PathBuf>,
+    full_static_snapshots: Option<Vec<Snapshot>>,
 ) -> Result<Report> {
+    for change in &mut changes {
+        if change
+            .before
+            .path()
+            .is_some_and(|path| excluded_paths.contains(path))
+        {
+            change.before = None;
+        }
+        if change
+            .after
+            .path()
+            .is_some_and(|path| excluded_paths.contains(path))
+        {
+            change.after = None;
+        }
+    }
+    changes.retain(|change| change.before.is_some() || change.after.is_some());
     reject_unpaired_supported_addition_and_deletion(repository, &changes)?;
     changes.retain(|change| {
         change
@@ -1165,18 +1463,62 @@ fn analyze_changes(
         }
     }
 
-    let object_ids = plans.iter().flat_map(Plan::object_ids).cloned().collect();
+    let static_plans = full_static_snapshots
+        .map(|snapshots| {
+            snapshots
+                .into_iter()
+                .filter(|snapshot| {
+                    repository.in_scope(&snapshot.path)
+                        && !excluded_paths.contains(&snapshot.path)
+                        && supports_path(&snapshot.path)
+                })
+                .map(|snapshot| {
+                    validate_snapshot_mode(&snapshot)?;
+                    Ok(Plan::All(snapshot))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?;
+    let object_ids = plans
+        .iter()
+        .chain(static_plans.iter().flatten())
+        .flat_map(Plan::object_ids)
+        .cloned()
+        .collect();
     let blobs = repository.read_blobs(&object_ids)?;
     let mut findings = Vec::new();
-    for plan in &plans {
-        let mut plan_findings = analyze_plan(repository, context, plan, &blobs, profile)?;
-        findings.append(&mut plan_findings);
-    }
+    let files_scanned = if let Some(static_plans) = &static_plans {
+        for plan in static_plans {
+            let mut plan_findings =
+                analyze_plan(repository, context, plan, &blobs, AnalysisProfile::Full)?;
+            findings.append(&mut plan_findings);
+        }
+        for plan in plans
+            .iter()
+            .filter(|plan| matches!(plan, Plan::Change { .. }))
+        {
+            let mut plan_findings = analyze_plan(
+                repository,
+                context,
+                plan,
+                &blobs,
+                AnalysisProfile::Attestation,
+            )?;
+            findings.append(&mut plan_findings);
+        }
+        static_plans.len()
+    } else {
+        for plan in &plans {
+            let mut plan_findings = analyze_plan(repository, context, plan, &blobs, profile)?;
+            findings.append(&mut plan_findings);
+        }
+        plans.len()
+    };
     findings.sort();
     findings.dedup();
     Ok(Report {
         findings,
-        files_scanned: plans.len(),
+        files_scanned,
     })
 }
 
@@ -1238,6 +1580,16 @@ fn validate_modes(change: &FileChange) -> Result<()> {
                 snapshot.path.display()
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_mode(snapshot: &Snapshot) -> Result<()> {
+    if snapshot.mode.is_some_and(|mode| mode != FileMode::Regular) {
+        bail!(
+            "supported path {} is not a regular file",
+            snapshot.path.display()
+        );
     }
     Ok(())
 }

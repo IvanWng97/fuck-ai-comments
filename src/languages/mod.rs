@@ -137,20 +137,32 @@ pub(crate) fn analyze_file_with_context(
     selection: &Selection,
 ) -> Result<Vec<Finding>, AnalysisError> {
     match Adapter::for_path(path) {
-        Some(Adapter::Rust) => {
-            rust::analyze_file(path, source, selection, context.rust_file_role(path))
+        Some(Adapter::Rust) => rust::analyze_file(
+            path,
+            source,
+            selection,
+            context.rust_file_role(path),
+            context.policy(),
+        ),
+        Some(Adapter::Python) => python::analyze_file(path, source, selection, context.policy()),
+        Some(Adapter::JavaScript) => {
+            javascript::analyze_file(path, source, selection, context.policy())
         }
-        Some(Adapter::Python) => python::analyze_file(path, source, selection),
-        Some(Adapter::JavaScript) => javascript::analyze_file(path, source, selection),
-        Some(Adapter::TypeScript) => typescript::analyze_file(path, source, selection),
-        Some(Adapter::Tsx) => typescript::analyze_tsx_file(path, source, selection),
-        Some(Adapter::Kotlin) => kotlin::analyze_file(path, source, selection),
-        Some(Adapter::ObjectiveC) => objective_c::analyze_file(path, source, selection),
-        Some(Adapter::Swift) => swift::analyze_file(path, source, selection),
-        Some(Adapter::Toml) => toml::analyze_file(path, source, selection),
-        Some(Adapter::Html) => html::analyze_file(path, source, selection),
-        Some(Adapter::Css) => css::analyze_file(path, source, selection),
-        Some(Adapter::Astro) => astro::analyze_file(path, source, selection),
+        Some(Adapter::TypeScript) => {
+            typescript::analyze_file(path, source, selection, context.policy())
+        }
+        Some(Adapter::Tsx) => {
+            typescript::analyze_tsx_file(path, source, selection, context.policy())
+        }
+        Some(Adapter::Kotlin) => kotlin::analyze_file(path, source, selection, context.policy()),
+        Some(Adapter::ObjectiveC) => {
+            objective_c::analyze_file(path, source, selection, context.policy())
+        }
+        Some(Adapter::Swift) => swift::analyze_file(path, source, selection, context.policy()),
+        Some(Adapter::Toml) => toml::analyze_file(path, source, selection, context.policy()),
+        Some(Adapter::Html) => html::analyze_file(path, source, selection, context.policy()),
+        Some(Adapter::Css) => css::analyze_file(path, source, selection, context.policy()),
+        Some(Adapter::Astro) => astro::analyze_file(path, source, selection, context.policy()),
         None => Err(AnalysisError::Unsupported(path.display().to_string())),
     }
 }
