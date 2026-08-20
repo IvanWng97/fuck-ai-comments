@@ -66,10 +66,7 @@ fn supported_files<'path>(
 ) -> Result<Vec<PathBuf>> {
     let absolute_configs: BTreeSet<_> = config_paths
         .into_iter()
-        .map(|path| {
-            std::path::absolute(path)
-                .with_context(|| format!("could not resolve {}", path.display()))
-        })
+        .map(|path| cargo_context::normalized_absolute_path(path, "policy config"))
         .collect::<Result<_>>()?;
     let mut builder = WalkBuilder::new(root);
     builder
@@ -91,8 +88,7 @@ fn supported_files<'path>(
         if !supports_path(entry.path()) {
             continue;
         }
-        let absolute_entry = std::path::absolute(entry.path())
-            .with_context(|| format!("could not resolve {}", entry.path().display()))?;
+        let absolute_entry = cargo_context::normalized_absolute_path(entry.path(), "source path")?;
         if absolute_configs.contains(&absolute_entry) {
             continue;
         }

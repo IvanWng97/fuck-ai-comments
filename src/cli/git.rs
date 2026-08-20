@@ -750,7 +750,13 @@ impl Repository {
                 .clone()
                 .with_policy_toml(text)
                 .with_context(|| format!("could not load {}", config_path.display()))?;
-            let explicit_path = absolute
+            // Repository roots are canonicalized during discovery. Canonicalize the
+            // already-validated regular config as well so Windows verbatim prefixes
+            // cannot prevent a repository-relative exclusion from matching.
+            let canonical = fs::canonicalize(&absolute).with_context(|| {
+                format!("could not resolve policy config {}", config_path.display())
+            })?;
+            let explicit_path = canonical
                 .strip_prefix(&self.root)
                 .ok()
                 .filter(|path| !path.as_os_str().is_empty())
