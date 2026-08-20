@@ -305,7 +305,7 @@ pub(crate) fn analyze_file(
         let lines: BTreeSet<_> = owned
             .iter()
             .map(|comment_index| &document.comments[*comment_index])
-            .filter(|comment| comment.kind.is_narrative_under(policy))
+            .filter(|comment| comment.kind.uses_relative_budget(policy))
             .flat_map(|comment| comment.span.lines())
             .collect();
         if lines.len() > LEAF_COMMENT_MAX_LINES {

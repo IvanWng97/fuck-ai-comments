@@ -319,6 +319,42 @@ fn default_uses_an_explicit_worktree_policy_file() {
 }
 
 #[test]
+fn explicit_policy_rescans_unchanged_sources() {
+    let root = repository();
+    write(
+        &root,
+        "private.rs",
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    );
+    commit_all(&root, "add documented source");
+    write(
+        &root,
+        "custom-policy.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    );
+
+    let output = command(&root)
+        .args(["check", "--config", "custom-policy.toml"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
 fn default_applies_committed_policy_to_changed_sources() {
     let root = repository();
     write(

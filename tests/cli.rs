@@ -151,6 +151,78 @@ fn rustdoc_policy_does_not_exempt_unattached_doc_syntax() {
 }
 
 #[test]
+fn rustdoc_policy_does_not_exempt_inner_doc_syntax_outside_module_bodies() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("nested.rs"),
+        concat!(
+            "mod internal {\n",
+            "    trait Contract {\n",
+            "        //! This is not a module-level inner doc.\n",
+            "        //! It must remain ordinary narrative.\n",
+            "        //! A third line is still not module documentation.\n",
+            "        //! A fourth line must stay within narrative policy.\n",
+            "        fn call();\n",
+            "    }\n",
+            "}\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("nested.rs:3: comment-policy/comment-block-budget"));
+}
+
+#[test]
+fn rustdoc_policy_recognizes_inner_docs_on_module_bodies() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("module.rs"),
+        concat!(
+            "mod internal {\n",
+            "    //! First line of module documentation.\n",
+            "    //! Second line of module documentation.\n",
+            "    //! Third line of module documentation.\n",
+            "    //! Fourth line of module documentation.\n",
+            "    pub(crate) fn helper() {}\n",
+            "}\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
 fn rustdoc_policy_recognizes_documented_tuple_fields() {
     let root = TempDir::new().expect("temporary directory should be created");
     fs::write(
@@ -218,6 +290,44 @@ fn all_enforces_a_configured_rustdoc_line_cap() {
     assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
     assert!(stdout.contains("2 rustdoc comment lines; configured allowance is 1"));
     assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
+fn configured_type_cap_can_raise_the_builtin_owner_ceiling() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 10\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("private.rs"),
+        concat!(
+            "/// Documentation line one.\n",
+            "/// Documentation line two.\n",
+            "/// Documentation line three.\n",
+            "/// Documentation line four.\n",
+            "/// Documentation line five.\n",
+            "/// Documentation line six.\n",
+            "/// Documentation line seven.\n",
+            "/// Documentation line eight.\n",
+            "/// Documentation line nine.\n",
+            "/// Documentation line ten.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    )
+    .expect("private Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
 }
 
 #[test]

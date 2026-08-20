@@ -35,8 +35,8 @@ struct RustContext {
 #[derive(Clone, Copy, Default)]
 struct RustNodeContext {
     direct_parent_is_source_file: bool,
+    direct_parent_is_module_body: bool,
     within_callable: bool,
-    has_module_ancestor: bool,
     public_module_ancestry: bool,
     nearest_impl: Option<usize>,
     nearest_container: Option<usize>,
@@ -64,6 +64,8 @@ struct RustImplDraft {
 struct RustContextFrame {
     node_id: usize,
     is_source_file: bool,
+    is_module_item: bool,
+    is_module_body: bool,
     is_declaration_list: bool,
     is_ordered_field_declaration_list: bool,
     namespace_before: Option<IdentityId>,
@@ -329,7 +331,7 @@ fn is_public_inner_doc(node: Node<'_>, file_role: RustFileRole, context: &RustCo
         return matches!(file_role, RustFileRole::CrateRoot);
     }
     !node_context.within_callable
-        && node_context.has_module_ancestor
+        && node_context.direct_parent_is_module_body
         && node_context.public_module_ancestry
 }
 
@@ -344,7 +346,8 @@ fn is_attached_rustdoc(node: Node<'_>, source: &str, context: &RustContext) -> b
         return false;
     }
     context.nodes.get(&node.id()).is_some_and(|node| {
-        node.direct_parent_is_source_file || (!node.within_callable && node.has_module_ancestor)
+        node.direct_parent_is_source_file
+            || (!node.within_callable && node.direct_parent_is_module_body)
     })
 }
 
@@ -385,7 +388,6 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
     let mut frames: Vec<RustContextFrame> = Vec::new();
     let mut namespace = None;
     let mut callable_depth = 0_usize;
-    let mut module_depth = 0_usize;
     let mut private_module_depth = 0_usize;
     let mut implementations = Vec::new();
     let mut containers = Vec::new();
@@ -420,8 +422,8 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     });
                 let node_context = RustNodeContext {
                     direct_parent_is_source_file: parent.is_some_and(|frame| frame.is_source_file),
+                    direct_parent_is_module_body: parent.is_some_and(|frame| frame.is_module_body),
                     within_callable: callable_depth > 0,
-                    has_module_ancestor: module_depth > 0,
                     public_module_ancestry: private_module_depth == 0,
                     nearest_impl: implementations.last().copied(),
                     nearest_container: containers.last().copied(),
@@ -481,7 +483,6 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                 let callable_pushed = matches!(node.kind(), "function_item" | "closure_expression");
                 callable_depth += usize::from(callable_pushed);
                 let module_is_private = node.kind() == "mod_item";
-                module_depth += usize::from(module_is_private);
                 private_module_depth += usize::from(module_is_private);
                 let implementation_pushed = node.kind() == "impl_item";
                 if implementation_pushed {
@@ -492,9 +493,13 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     containers.push(node.id());
                     true
                 });
+                let is_module_body = node.kind() == "declaration_list"
+                    && parent.is_some_and(|frame| frame.is_module_item);
                 frames.push(RustContextFrame {
                     node_id: node.id(),
                     is_source_file: node.kind() == "source_file",
+                    is_module_item: node.kind() == "mod_item",
+                    is_module_body,
                     is_declaration_list: node.kind() == "declaration_list",
                     is_ordered_field_declaration_list: node.kind()
                         == "ordered_field_declaration_list",
@@ -520,7 +525,6 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                 namespace = frame.namespace_before;
                 callable_depth -= usize::from(frame.callable_pushed);
                 if node.kind() == "mod_item" {
-                    module_depth -= 1;
                     private_module_depth -= usize::from(frame.module_is_private);
                 }
                 if frame.implementation_pushed {

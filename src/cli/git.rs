@@ -757,7 +757,9 @@ impl Repository {
                 .map(Path::to_owned);
             return Ok(LoadedPolicy {
                 analysis,
-                changed: false,
+                // An explicit config is read from the live filesystem rather than the
+                // selected Git authority, so it has no reliable before snapshot.
+                changed: true,
                 excluded_paths: std::iter::once(PathBuf::from(POLICY_CONFIG_PATH))
                     .chain(explicit_path)
                     .collect(),

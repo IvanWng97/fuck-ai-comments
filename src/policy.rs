@@ -182,8 +182,15 @@ impl CommentKind {
         }
     }
 
-    pub(crate) fn is_narrative_under(self, policy: &PolicyConfig) -> bool {
+    pub(crate) fn uses_relative_budget(self, policy: &PolicyConfig) -> bool {
         self.static_policy(policy) == StaticPolicy::Relative
+    }
+
+    fn uses_absolute_owner_cap(self, policy: &PolicyConfig) -> bool {
+        matches!(
+            self.static_policy(policy),
+            StaticPolicy::Relative | StaticPolicy::OwnerCapped
+        )
     }
 }
 
@@ -448,7 +455,7 @@ pub(crate) fn template_findings(
     ));
     let narrative: Vec<Comment> = comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative_under(policy))
+        .filter(|comment| comment.kind.uses_relative_budget(policy))
         .cloned()
         .collect();
     let lines = comment_lines(&narrative);
@@ -568,7 +575,7 @@ fn scoped_owner_findings(
     ));
     let narrative: Vec<Comment> = budget_comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative_under(policy))
+        .filter(|comment| comment.kind.uses_relative_budget(policy))
         .cloned()
         .collect();
     let narrative_lines = comment_lines(&narrative);
@@ -625,7 +632,7 @@ fn leaf_findings(
     for (leaf, owned_comments) in leaves.iter().zip(owned) {
         let narrative: Vec<Comment> = owned_comments
             .iter()
-            .filter(|comment| comment.kind.is_narrative_under(policy))
+            .filter(|comment| comment.kind.uses_relative_budget(policy))
             .cloned()
             .collect();
         let narrative_lines = comment_lines(&narrative);
@@ -723,7 +730,7 @@ fn file_findings_with_lines(
     ));
     let narrative: Vec<Comment> = comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative_under(policy))
+        .filter(|comment| comment.kind.uses_relative_budget(policy))
         .cloned()
         .collect();
     let narrative_lines = comment_lines(&narrative);
@@ -771,12 +778,12 @@ pub(crate) fn owner_comment_cap_finding_with_policy(
 ) -> Option<Finding> {
     let lines: BTreeSet<usize> = comments
         .iter()
-        .filter(|comment| comment.kind.static_policy(policy) != StaticPolicy::Unlimited)
+        .filter(|comment| comment.kind.uses_absolute_owner_cap(policy))
         .flat_map(|comment| comment.span.lines())
         .collect();
-    let narrative_lines: BTreeSet<usize> = comments
+    let relative_lines: BTreeSet<usize> = comments
         .iter()
-        .filter(|comment| comment.kind.is_narrative_under(policy))
+        .filter(|comment| comment.kind.uses_relative_budget(policy))
         .flat_map(|comment| comment.span.lines())
         .collect();
     let allowance = match owner_kind {
@@ -785,7 +792,7 @@ pub(crate) fn owner_comment_cap_finding_with_policy(
         OwnerKind::Leaf | OwnerKind::TomlKey => LEAF_COMMENT_MAX_LINES,
         OwnerKind::Template => TEMPLATE_COMMENT_MAX_LINES,
     };
-    (lines.len() > allowance && narrative_lines.len() <= allowance).then(|| Finding {
+    (lines.len() > allowance && relative_lines.len() <= allowance).then(|| Finding {
         path: path.display().to_string(),
         line: first_line(&lines),
         rule: OWNER_COMMENT_CAP_RULE,
