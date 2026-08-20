@@ -2,7 +2,8 @@
 
 #![warn(missing_docs, rustdoc::broken_intra_doc_links)]
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 
 mod change;
 mod identity;
@@ -10,11 +11,76 @@ mod languages;
 mod model;
 mod policy;
 
-pub use model::{
-    AnalysisContext, AnalysisContextError, AnalysisError, AnalysisProfile, Finding, SourceFile,
-};
+pub use model::{AnalysisError, AnalysisProfile, Finding, SourceFile};
+
+/// Repository-level facts used to classify source files during analysis.
+///
+/// The default context performs no repository discovery and recognizes only
+/// structural paths ending in `src/lib.rs` as Rust library roots. Use
+/// [`Self::from_rust_library_roots`] when an external authority such as Cargo
+/// has supplied the complete set of library target roots for a repository.
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisContext {
+    rust_targets: RustTargets,
+}
+
+#[derive(Debug, Clone, Default)]
+enum RustTargets {
+    #[default]
+    ConventionalPaths,
+    CargoLibraryRoots(BTreeSet<PathBuf>),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RustFileRole {
+    CrateRoot,
+    ModuleOrUnknown,
+}
+
+/// Repository facts supplied to [`AnalysisContext`] were malformed or unsafe.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid analysis context: {0}")]
+pub struct AnalysisContextError(String);
 
 impl AnalysisContext {
+    /// Build a context from Cargo-proven library roots.
+    ///
+    /// The supplied set is authoritative, including when it is empty. Paths
+    /// are normalized by removing `.` components. Relative and absolute paths
+    /// are accepted so callers can use the same coordinates as [`SourceFile`],
+    /// but paths containing `..` are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a root is empty or contains `..`.
+    pub fn from_rust_library_roots<I, P>(roots: I) -> Result<Self, AnalysisContextError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let roots = roots
+            .into_iter()
+            .map(|path| normalize_repository_path(path.as_ref()))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            rust_targets: RustTargets::CargoLibraryRoots(roots),
+        })
+    }
+
+    pub(crate) fn rust_file_role(&self, path: &Path) -> RustFileRole {
+        let crate_root = match &self.rust_targets {
+            RustTargets::ConventionalPaths => path.ends_with(Path::new("src/lib.rs")),
+            RustTargets::CargoLibraryRoots(roots) => {
+                normalize_repository_path(path).is_ok_and(|normalized| roots.contains(&normalized))
+            }
+        };
+        if crate_root {
+            RustFileRole::CrateRoot
+        } else {
+            RustFileRole::ModuleOrUnknown
+        }
+    }
+
     /// Analyze every owner in one source snapshot using this repository context.
     ///
     /// # Errors
@@ -77,6 +143,31 @@ impl AnalysisContext {
     ) -> Result<Vec<Finding>, AnalysisError> {
         change::analyze_with_context(self, before, after, profile)
     }
+}
+
+fn normalize_repository_path(path: &Path) -> Result<PathBuf, AnalysisContextError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(component) => normalized.push(component),
+            Component::RootDir | Component::Prefix(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::ParentDir => {
+                return Err(AnalysisContextError(format!(
+                    "Rust library root {} contains a parent traversal",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() || normalized.file_name().is_none() {
+        return Err(AnalysisContextError(
+            "Rust library root is empty".to_owned(),
+        ));
+    }
+    Ok(normalized)
 }
 
 /// Return whether a path has a registered language adapter.

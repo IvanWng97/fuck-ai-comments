@@ -3,6 +3,7 @@ use std::fs;
 use std::fs::File;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use assert_cmd::Command;
@@ -17,6 +18,13 @@ const STALE_AFTER: &str =
 const UNPAIRED_ADD_DELETE_ERROR: &str =
     "error: cannot prove ancestry between supported additions and deletions\n";
 const GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT: usize = 1_000;
+static RESOURCE_INTENSIVE_GIT_TEST: Mutex<()> = Mutex::new(());
+
+fn serialize_resource_intensive_git_test() -> MutexGuard<'static, ()> {
+    RESOURCE_INTENSIVE_GIT_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn repository() -> TempDir {
     let root = unborn_repository();
@@ -374,6 +382,66 @@ fn default_includes_untracked_files() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(stdout.contains("untracked.rs:1: comment-policy/leaf-comment-budget"));
+}
+
+#[test]
+fn default_rejects_an_untracked_manifest_hidden_by_ignore_rules() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(&root, ".ignore", "nested/Cargo.toml\n");
+    write(
+        &root,
+        "nested/custom/root.rs",
+        concat!(
+            "//! before detail one\n",
+            "//! before detail two\n",
+            "//! before detail three\n",
+            "//! before detail four\n",
+            "//! before detail five\n",
+            "//! before detail six\n",
+            "pub fn work() -> usize { 1 }\n",
+        ),
+    );
+    commit_all(&root, "add ordinary Rust source");
+    write(
+        &root,
+        "nested/Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"hidden-new-manifest\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "nested/custom/root.rs",
+        concat!(
+            "//! after detail one\n",
+            "//! after detail two\n",
+            "//! after detail three\n",
+            "//! after detail four\n",
+            "//! after detail five\n",
+            "//! after detail six\n",
+            "pub fn work() -> usize { 2 }\n",
+        ),
+    );
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(
+        stderr.contains("manifest nested/Cargo.toml is absent from HEAD"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -872,6 +940,7 @@ fn attestation_profile_keeps_the_addition_deletion_ancestry_guard() {
 
 #[test]
 fn staged_pairs_candidates_at_the_explicit_exhaustive_rename_limit() {
+    let _guard = serialize_resource_intensive_git_test();
     let root = repository();
     stage_inexact_renames(&root, GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT);
     git(&root, ["config", "diff.renameLimit", "1"]);
@@ -906,6 +975,7 @@ fn staged_pairs_candidates_at_the_explicit_exhaustive_rename_limit() {
 
 #[test]
 fn staged_fails_closed_above_the_explicit_exhaustive_rename_limit() {
+    let _guard = serialize_resource_intensive_git_test();
     let root = repository();
     let candidate_count = GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT + 1;
     stage_inexact_renames(&root, candidate_count);
@@ -1008,6 +1078,7 @@ fn base_and_head_read_committed_blobs() {
 
 #[test]
 fn base_uses_cargo_metadata_for_a_custom_library_root() {
+    let _guard = serialize_resource_intensive_git_test();
     let root = repository();
     write(
         &root,
@@ -1056,6 +1127,440 @@ fn base_uses_cargo_metadata_for_a_custom_library_root() {
         .assert()
         .code(0)
         .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn base_allows_an_ordinary_src_lib_addition_without_a_cargo_manifest() {
+    let root = repository();
+    let base = git(&root, ["rev-parse", "HEAD"]);
+    write(&root, "ordinary/src/lib.rs", CLEAN_RUST);
+    let head = commit_all(&root, "add ordinary src lib file");
+
+    command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn base_allows_an_ordinary_src_lib_addition_with_a_custom_library_root() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"custom-with-ordinary-src-lib\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(&root, "custom/root.rs", CLEAN_RUST);
+    let base = commit_all(&root, "add custom library root");
+    write(&root, "src/lib.rs", CLEAN_RUST);
+    let head = commit_all(&root, "add ordinary src lib file");
+
+    command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn base_discovers_a_nested_cargo_project_without_a_root_manifest() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "rust/Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"nested-custom-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "rust/custom/root.rs",
+        concat!(
+            "//! before detail one\n",
+            "//! before detail two\n",
+            "//! before detail three\n",
+            "//! before detail four\n",
+            "//! before detail five\n",
+            "//! before detail six\n",
+            "pub fn work() -> usize { 1 }\n",
+        ),
+    );
+    let base = commit_all(&root, "add nested custom library root");
+    write(
+        &root,
+        "rust/custom/root.rs",
+        concat!(
+            "//! after detail one\n",
+            "//! after detail two\n",
+            "//! after detail three\n",
+            "//! after detail four\n",
+            "//! after detail five\n",
+            "//! after detail six\n",
+            "pub fn work() -> usize { 2 }\n",
+        ),
+    );
+    let head = commit_all(&root, "change nested custom library root");
+
+    command(&root)
+        .args(["check", "--base", &base, "--head", &head, "rust"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn base_discovers_a_tracked_nested_manifest_hidden_by_dirty_ignore_rules() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "ignored/Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"ignored-custom-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "ignored/custom/root.rs",
+        concat!(
+            "//! before detail one\n",
+            "//! before detail two\n",
+            "//! before detail three\n",
+            "//! before detail four\n",
+            "//! before detail five\n",
+            "//! before detail six\n",
+            "pub fn work() -> usize { 1 }\n",
+        ),
+    );
+    let base = commit_all(&root, "add ignored nested Cargo project");
+    write(
+        &root,
+        "ignored/custom/root.rs",
+        concat!(
+            "//! after detail one\n",
+            "//! after detail two\n",
+            "//! after detail three\n",
+            "//! after detail four\n",
+            "//! after detail five\n",
+            "//! after detail six\n",
+            "pub fn work() -> usize { 2 }\n",
+        ),
+    );
+    let head = commit_all(&root, "change ignored nested library root");
+    write(&root, ".ignore", "ignored/\n");
+
+    command(&root)
+        .args(["check", "--base", &base, "--head", &head, "ignored"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn base_rejects_a_cargo_root_change_between_snapshots() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"moving-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"old/root.rs\"\n",
+        ),
+    );
+    write(&root, "old/root.rs", "pub fn work() -> usize { 1 }\n");
+    let base = commit_all(&root, "add old library root");
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"moving-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"new/root.rs\"\n",
+        ),
+    );
+    fs::remove_file(root.path().join("old/root.rs")).expect("old root should be removed");
+    write(&root, "new/root.rs", "pub fn work() -> usize { 2 }\n");
+    let head = commit_all(&root, "move library root");
+
+    let output = command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains(
+        "Cargo target roles cannot be proven because Cargo target inputs differ between the compared commits"
+    ));
+}
+
+#[test]
+fn base_rejects_a_nested_cargo_manifest_change() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "rust/Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"nested-change\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "rust/custom/root.rs",
+        "pub fn work() -> usize { 1 }\n",
+    );
+    let base = commit_all(&root, "add nested Cargo project");
+    write(
+        &root,
+        "rust/Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"nested-change\"\n",
+            "version = \"0.1.1\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "rust/custom/root.rs",
+        "pub fn work() -> usize { 2 }\n",
+    );
+    let head = commit_all(&root, "change nested Cargo project");
+
+    let output = command(&root)
+        .args(["check", "--base", &base, "--head", &head, "rust"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains(
+        "Cargo target roles cannot be proven because Cargo target inputs differ between the compared commits"
+    ));
+}
+
+#[test]
+fn base_rejects_metadata_from_a_worktree_newer_than_the_requested_head() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"historical-head\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"historical/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "historical/root.rs",
+        "pub fn work() -> usize { 1 }\n",
+    );
+    let base = commit_all(&root, "add historical library root");
+    write(
+        &root,
+        "historical/root.rs",
+        "pub fn work() -> usize { 2 }\n",
+    );
+    let historical_head = commit_all(&root, "change historical library root");
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"historical-head\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"current/root.rs\"\n",
+        ),
+    );
+    fs::remove_file(root.path().join("historical/root.rs"))
+        .expect("historical root should be removed");
+    write(&root, "current/root.rs", "pub fn work() -> usize { 3 }\n");
+    commit_all(&root, "move current library root");
+
+    let output = command(&root)
+        .args(["check", "--base", &base, "--head", &historical_head])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains(
+        "Cargo target roles cannot be proven because Cargo target inputs differ between the head commit and the worktree"
+    ));
+}
+
+#[test]
+fn staged_rejects_metadata_from_an_unstaged_manifest() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"staged-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(&root, "custom/root.rs", "pub fn work() -> usize { 1 }\n");
+    commit_all(&root, "add staged library root");
+    write(&root, "custom/root.rs", "pub fn work() -> usize { 2 }\n");
+    git(&root, ["add", "custom/root.rs"]);
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"staged-root\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"unstaged/root.rs\"\n",
+        ),
+    );
+    write(&root, "unstaged/root.rs", "pub fn work() -> usize { 3 }\n");
+
+    let output = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stderr.contains(
+        "Cargo target roles cannot be proven because Cargo target inputs differ between the index and the worktree"
+    ));
+}
+
+#[test]
+fn base_rejects_metadata_after_an_unstaged_implicit_library_deletion() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"implicit-library\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+        ),
+    );
+    write(&root, "src/main.rs", "fn main() {}\n");
+    write(&root, "src/lib.rs", "pub fn work() -> usize { 1 }\n");
+    let base = commit_all(&root, "add implicit library");
+    write(&root, "src/lib.rs", "pub fn work() -> usize { 2 }\n");
+    let head = commit_all(&root, "change implicit library");
+    fs::remove_file(root.path().join("src/lib.rs")).expect("library root should be removed");
+
+    let output = command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(
+        stderr.contains("Cargo target inputs differ between the head commit and the worktree"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn staged_rejects_metadata_after_an_unstaged_implicit_library_deletion() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"staged-implicit-library\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+        ),
+    );
+    write(&root, "src/main.rs", "fn main() {}\n");
+    write(&root, "src/lib.rs", "pub fn work() -> usize { 1 }\n");
+    commit_all(&root, "add implicit library");
+    write(&root, "src/lib.rs", "pub fn work() -> usize { 2 }\n");
+    git(&root, ["add", "src/lib.rs"]);
+    fs::remove_file(root.path().join("src/lib.rs")).expect("library root should be removed");
+
+    let output = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(
+        stderr.contains("Cargo target inputs differ between the index and the worktree"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -1471,6 +1976,7 @@ fn oversized_supported_index_blob_fails_after_batch_check() {
 fn staged_drains_cat_file_while_requesting_more_than_a_pipe_of_unique_blobs() {
     const UNIQUE_BLOB_COUNT: usize = 4_096;
 
+    let _guard = serialize_resource_intensive_git_test();
     let root = repository();
     for index in 0..UNIQUE_BLOB_COUNT {
         write(

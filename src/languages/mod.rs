@@ -15,7 +15,8 @@ mod walk;
 
 use std::path::Path;
 
-use crate::model::{AnalysisContext, AnalysisError, Finding, OwnerKind, Selection};
+use crate::AnalysisContext;
+use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::ParsedFile;
 
 #[derive(Clone, Copy, Eq, PartialEq)]

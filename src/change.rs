@@ -6,13 +6,12 @@ use std::cell::Cell;
 
 use imara_diff::{Algorithm, Diff, InternedInput, Interner, Token, sources};
 
+use crate::AnalysisContext;
 use crate::identity::{
     CanonicalIdentity, CanonicalIdentityId, CanonicalIdentityInterner, CanonicalIdentityMap,
 };
 use crate::languages;
-use crate::model::{
-    AnalysisContext, AnalysisError, AnalysisProfile, Finding, OwnerKind, Selection, SourceFile,
-};
+use crate::model::{AnalysisError, AnalysisProfile, Finding, OwnerKind, Selection, SourceFile};
 use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
 
 mod attestation_key;

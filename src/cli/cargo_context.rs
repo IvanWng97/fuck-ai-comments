@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use fuck_ai_comments::AnalysisContext;
+use ignore::WalkBuilder;
 use serde::Deserialize;
 
 #[cfg(test)]
@@ -31,6 +32,30 @@ pub(super) fn cargo_metadata_discoveries() -> usize {
     CARGO_METADATA_DISCOVERIES.with(std::cell::Cell::get)
 }
 
+pub(super) struct CargoContext {
+    analysis: AnalysisContext,
+    implicit_library_inputs: BTreeSet<PathBuf>,
+    manifests: BTreeSet<PathBuf>,
+}
+
+impl CargoContext {
+    pub(super) fn analysis(&self) -> &AnalysisContext {
+        &self.analysis
+    }
+
+    pub(super) fn manifests(&self) -> impl Iterator<Item = &Path> {
+        self.manifests.iter().map(PathBuf::as_path)
+    }
+
+    pub(super) fn implicit_library_inputs(&self) -> impl Iterator<Item = &Path> {
+        self.implicit_library_inputs.iter().map(PathBuf::as_path)
+    }
+}
+
+pub(super) fn discover(start: &Path, analysis_base: &Path) -> Result<CargoContext> {
+    discover_with_manifests(start, analysis_base, std::iter::empty::<PathBuf>())
+}
+
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<CargoPackage>,
@@ -40,6 +65,7 @@ struct CargoMetadata {
 
 #[derive(Deserialize)]
 struct CargoPackage {
+    manifest_path: PathBuf,
     targets: Vec<CargoTarget>,
 }
 
@@ -49,16 +75,121 @@ struct CargoTarget {
     src_path: PathBuf,
 }
 
-pub(super) fn discover(start: &Path, analysis_base: &Path) -> Result<AnalysisContext> {
-    let Some(manifest) = nearest_manifest(start)? else {
-        return Ok(AnalysisContext::default());
-    };
+pub(super) fn discover_with_manifests<I, P>(
+    start: &Path,
+    analysis_base: &Path,
+    required_manifests: I,
+) -> Result<CargoContext>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut candidates: BTreeSet<_> = manifest_candidates(start)?.into_iter().collect();
+    for manifest in required_manifests {
+        let manifest = validated_absolute_path(manifest.as_ref(), "required Cargo manifest")?;
+        validate_regular_manifest(&manifest)?;
+        candidates.insert(manifest);
+    }
+    if candidates.is_empty() {
+        return Ok(CargoContext {
+            analysis: AnalysisContext::from_rust_library_roots(std::iter::empty::<PathBuf>())?,
+            implicit_library_inputs: BTreeSet::new(),
+            manifests: BTreeSet::new(),
+        });
+    }
+
+    let analysis_base = normalized_absolute_path(analysis_base, "analysis base")?;
+    let mut discovered_manifests = BTreeSet::new();
+    let mut covered_manifests = BTreeSet::new();
+    let mut implicit_library_inputs = BTreeSet::new();
+    let mut roots = BTreeSet::new();
+    let mut candidates: Vec<_> = candidates.into_iter().collect();
+    sort_manifests(&mut candidates);
+    for manifest in candidates {
+        if covered_manifests.contains(&manifest) {
+            continue;
+        }
+        let metadata = cargo_metadata(&manifest)?;
+        if metadata.version != 1 {
+            bail!(
+                "Cargo returned unsupported metadata version {}",
+                metadata.version
+            );
+        }
+
+        let workspace_root = validated_absolute_path(&metadata.workspace_root, "workspace root")?;
+        let workspace_manifest = workspace_root.join("Cargo.toml");
+        discovered_manifests.insert(manifest);
+        discovered_manifests.insert(workspace_manifest.clone());
+        covered_manifests.insert(workspace_manifest);
+        for package in metadata.packages {
+            let package_manifest =
+                validated_absolute_path(&package.manifest_path, "package manifest")?;
+            let conventional_root = package_manifest
+                .parent()
+                .context("Cargo returned a package manifest without a parent directory")?
+                .join("src/lib.rs");
+            discovered_manifests.insert(package_manifest.clone());
+            covered_manifests.insert(package_manifest);
+            let mut has_library_target = false;
+            let mut conventional_root_is_a_target = false;
+            for target in package.targets.into_iter().filter(CargoTarget::is_library) {
+                let source = validated_absolute_path(&target.src_path, "library target")?;
+                has_library_target = true;
+                conventional_root_is_a_target |= source == conventional_root;
+                roots.insert(source.clone());
+                if let Ok(relative) = source.strip_prefix(&analysis_base) {
+                    roots.insert(relative.to_owned());
+                }
+            }
+            if !has_library_target || conventional_root_is_a_target {
+                implicit_library_inputs.insert(conventional_root);
+            }
+        }
+    }
+
+    let analysis = AnalysisContext::from_rust_library_roots(roots)?;
+    Ok(CargoContext {
+        analysis,
+        implicit_library_inputs,
+        manifests: discovered_manifests,
+    })
+}
+
+pub(super) fn manifests_on_rust_source_ancestors<I, P>(sources: I) -> Result<BTreeSet<PathBuf>>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut directories = BTreeSet::new();
+    for source in sources {
+        let source = source.as_ref();
+        if source.extension() != Some(OsStr::new("rs")) {
+            continue;
+        }
+        let source = normalized_absolute_path(source, "Rust source path")?;
+        let directory = source
+            .parent()
+            .with_context(|| format!("{} has no parent directory", source.display()))?;
+        directories.extend(directory.ancestors().map(Path::to_owned));
+    }
+
+    let mut manifests = BTreeSet::new();
+    for directory in directories {
+        if let Some(manifest) = manifest_in_directory(&directory)? {
+            manifests.insert(manifest);
+        }
+    }
+    Ok(manifests)
+}
+
+fn cargo_metadata(manifest: &Path) -> Result<CargoMetadata> {
     record_discovery();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .arg("--manifest-path")
-        .arg(&manifest)
+        .arg(manifest)
         .output()
         .with_context(|| {
             format!(
@@ -74,39 +205,8 @@ pub(super) fn discover(start: &Path, analysis_base: &Path) -> Result<AnalysisCon
             detail.trim()
         );
     }
-    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("Cargo returned invalid metadata for {}", manifest.display()))?;
-    if metadata.version != 1 {
-        bail!(
-            "Cargo returned unsupported metadata version {}",
-            metadata.version
-        );
-    }
-
-    let workspace_root = validated_absolute_path(&metadata.workspace_root, "workspace root")?;
-    let analysis_base = std::path::absolute(analysis_base).with_context(|| {
-        format!(
-            "could not resolve analysis base {}",
-            analysis_base.display()
-        )
-    })?;
-    let mut roots = BTreeSet::new();
-    for target in metadata
-        .packages
-        .into_iter()
-        .flat_map(|package| package.targets)
-        .filter(CargoTarget::is_library)
-    {
-        let source = validated_absolute_path(&target.src_path, "library target")?;
-        roots.insert(source.clone());
-        if let Ok(relative) = source.strip_prefix(&workspace_root) {
-            roots.insert(relative.to_owned());
-        }
-        if let Ok(relative) = source.strip_prefix(&analysis_base) {
-            roots.insert(relative.to_owned());
-        }
-    }
-    AnalysisContext::from_rust_library_roots(roots).map_err(Into::into)
+    serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("Cargo returned invalid metadata for {}", manifest.display()))
 }
 
 impl CargoTarget {
@@ -120,34 +220,131 @@ impl CargoTarget {
     }
 }
 
-fn nearest_manifest(start: &Path) -> Result<Option<PathBuf>> {
-    let absolute = std::path::absolute(start)
-        .with_context(|| format!("could not resolve {}", start.display()))?;
+fn manifest_candidates(start: &Path) -> Result<Vec<PathBuf>> {
+    let absolute = normalized_absolute_path(start, "Cargo discovery path")?;
     let metadata = fs::symlink_metadata(&absolute)
         .with_context(|| format!("could not inspect {}", start.display()))?;
-    let directory = if metadata.file_type().is_dir() {
-        absolute.as_path()
+    let (directory, scan_descendants) = if metadata.file_type().is_dir() {
+        (absolute.as_path(), true)
     } else {
-        absolute
-            .parent()
-            .with_context(|| format!("{} has no parent directory", start.display()))?
+        (
+            absolute
+                .parent()
+                .with_context(|| format!("{} has no parent directory", start.display()))?,
+            false,
+        )
     };
-    for ancestor in directory.ancestors() {
-        let manifest = ancestor.join("Cargo.toml");
-        match fs::symlink_metadata(&manifest) {
-            Ok(metadata) if metadata.file_type().is_file() => return Ok(Some(manifest)),
-            Ok(_) => bail!(
-                "detected Cargo manifest {} is not a regular file",
-                manifest.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("could not inspect {}", manifest.display()));
+
+    let mut manifests = BTreeSet::new();
+    if let Some(manifest) = nearest_manifest(directory)? {
+        manifests.insert(manifest);
+    }
+    if scan_descendants {
+        let mut builder = WalkBuilder::new(directory);
+        builder
+            .standard_filters(true)
+            .hidden(false)
+            .require_git(false)
+            .follow_links(false)
+            .filter_entry(|entry| entry.file_name() != ".git");
+        for entry in builder.build() {
+            let entry = entry.with_context(|| {
+                format!(
+                    "could not discover Cargo manifests below {}",
+                    directory.display()
+                )
+            })?;
+            if let Some(error) = entry.error() {
+                bail!(
+                    "could not discover Cargo manifests at {}: {error}",
+                    entry.path().display()
+                );
             }
+            if entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_dir())
+                && let Some(manifest) = manifest_in_directory(entry.path())?
+            {
+                manifests.insert(manifest);
+            }
+            if entry.file_name() != "Cargo.toml" {
+                continue;
+            }
+            validate_regular_manifest(entry.path())?;
+            manifests.insert(entry.into_path());
+        }
+    }
+
+    let mut manifests: Vec<_> = manifests.into_iter().collect();
+    sort_manifests(&mut manifests);
+    Ok(manifests)
+}
+
+fn sort_manifests(manifests: &mut [PathBuf]) {
+    manifests.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+}
+
+fn nearest_manifest(directory: &Path) -> Result<Option<PathBuf>> {
+    for ancestor in directory.ancestors() {
+        if let Some(manifest) = manifest_in_directory(ancestor)? {
+            return Ok(Some(manifest));
         }
     }
     Ok(None)
+}
+
+fn manifest_in_directory(directory: &Path) -> Result<Option<PathBuf>> {
+    let manifest = directory.join("Cargo.toml");
+    match fs::symlink_metadata(&manifest) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(manifest)),
+        Ok(_) => bail!(
+            "detected Cargo manifest {} is not a regular file",
+            manifest.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("could not inspect {}", manifest.display()))
+        }
+    }
+}
+
+fn validate_regular_manifest(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("could not inspect detected manifest {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!(
+            "detected Cargo manifest {} is not a regular file",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn normalized_absolute_path(path: &Path, label: &str) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)
+        .with_context(|| format!("could not resolve {label} {}", path.display()))?;
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(component) => normalized.push(component),
+            Component::RootDir | Component::Prefix(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::ParentDir if normalized.file_name().is_some() => {
+                normalized.pop();
+            }
+            Component::ParentDir => {
+                bail!("could not normalize {label} {}", path.display());
+            }
+        }
+    }
+    validated_absolute_path(&normalized, label)
 }
 
 fn validated_absolute_path(path: &Path, label: &str) -> Result<PathBuf> {

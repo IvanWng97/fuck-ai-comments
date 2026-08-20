@@ -50,13 +50,42 @@ pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result
     if !changes.scope_exists {
         bail!("scope {} does not exist", scope.display());
     }
-    let context = cargo_context::discover(&repository.root, &repository.root)?;
-    analyze_changes(&repository, &context, changes.files, profile)
+    let mut required_manifests: BTreeSet<_> = repository
+        .cargo_manifests_for_authority(&changes.cargo_authority)?
+        .into_iter()
+        .map(|manifest| repository.root.join(manifest))
+        .collect();
+    required_manifests.extend(cargo_context::manifests_on_rust_source_ancestors(
+        changes
+            .files
+            .iter()
+            .flat_map(|change| change.before.iter().chain(change.after.iter()))
+            .map(|snapshot| repository.root.join(&snapshot.path)),
+    )?);
+    let cargo_context = cargo_context::discover_with_manifests(
+        &repository.root,
+        &repository.root,
+        required_manifests,
+    )?;
+    repository.validate_cargo_context(&cargo_context, &changes.cargo_authority)?;
+    analyze_changes(
+        &repository,
+        cargo_context.analysis(),
+        changes.files,
+        profile,
+    )
 }
 
 struct ScopeChanges {
     files: Vec<FileChange>,
     scope_exists: bool,
+    cargo_authority: CargoAuthority,
+}
+
+enum CargoAuthority {
+    Worktree { before: Option<ObjectId> },
+    Index { before: Option<ObjectId> },
+    Commits { before: ObjectId, after: ObjectId },
 }
 
 struct Repository {
@@ -118,6 +147,7 @@ impl Repository {
                     Ok(ScopeChanges {
                         files: self.worktree_changes(&head)?,
                         scope_exists: in_head || in_worktree,
+                        cargo_authority: CargoAuthority::Worktree { before: Some(head) },
                     })
                 }
                 HeadState::Unborn => {
@@ -126,6 +156,7 @@ impl Repository {
                     Ok(ScopeChanges {
                         files: self.unborn_worktree_changes()?,
                         scope_exists: in_index || in_worktree,
+                        cargo_authority: CargoAuthority::Worktree { before: None },
                     })
                 }
             },
@@ -136,6 +167,7 @@ impl Repository {
                     Ok(ScopeChanges {
                         files: self.diff_changes(DiffRequest::Index { head: Some(&head) })?,
                         scope_exists: in_head || in_index,
+                        cargo_authority: CargoAuthority::Index { before: Some(head) },
                     })
                 }
                 HeadState::Unborn => {
@@ -143,6 +175,7 @@ impl Repository {
                     Ok(ScopeChanges {
                         files: self.diff_changes(DiffRequest::Index { head: None })?,
                         scope_exists: in_index,
+                        cargo_authority: CargoAuthority::Index { before: None },
                     })
                 }
             },
@@ -159,9 +192,190 @@ impl Repository {
                         head: &head_id,
                     })?,
                     scope_exists: in_merge_base || in_head,
+                    cargo_authority: CargoAuthority::Commits {
+                        before: merge_base,
+                        after: head_id,
+                    },
                 })
             }
         }
+    }
+
+    fn validate_cargo_context(
+        &self,
+        context: &cargo_context::CargoContext,
+        authority: &CargoAuthority,
+    ) -> Result<()> {
+        match authority {
+            CargoAuthority::Worktree { before: None } => Ok(()),
+            CargoAuthority::Worktree {
+                before: Some(before),
+            } => {
+                self.require_unchanged_cargo_inputs(
+                    context,
+                    &[before.as_str()],
+                    "HEAD and the worktree",
+                )?;
+                let tracked = self.cargo_manifests_in_tree(before)?;
+                self.require_matching_cargo_manifests(context, &tracked, "HEAD")
+            }
+            CargoAuthority::Index { before } => {
+                self.require_unchanged_cargo_inputs(context, &[], "the index and the worktree")?;
+                let tracked = self.cargo_manifests_in_index()?;
+                self.require_matching_cargo_manifests(context, &tracked, "the index")?;
+                if let Some(before) = before {
+                    self.require_unchanged_cargo_inputs(
+                        context,
+                        &["--cached", before.as_str()],
+                        "HEAD and the index",
+                    )?;
+                }
+                Ok(())
+            }
+            CargoAuthority::Commits { before, after } => {
+                self.require_unchanged_cargo_inputs(
+                    context,
+                    &[before.as_str(), after.as_str()],
+                    "the compared commits",
+                )?;
+                self.require_unchanged_cargo_inputs(
+                    context,
+                    &[after.as_str()],
+                    "the head commit and the worktree",
+                )?;
+                let tracked = self.cargo_manifests_in_tree(after)?;
+                self.require_matching_cargo_manifests(context, &tracked, "the head commit")
+            }
+        }
+    }
+
+    fn cargo_manifests_for_authority(
+        &self,
+        authority: &CargoAuthority,
+    ) -> Result<BTreeSet<PathBuf>> {
+        match authority {
+            CargoAuthority::Worktree {
+                before: Some(before),
+            } => self.cargo_manifests_in_tree(before),
+            CargoAuthority::Worktree { before: None } | CargoAuthority::Index { .. } => {
+                self.cargo_manifests_in_index()
+            }
+            CargoAuthority::Commits { after, .. } => self.cargo_manifests_in_tree(after),
+        }
+    }
+
+    fn require_unchanged_cargo_inputs(
+        &self,
+        context: &cargo_context::CargoContext,
+        arguments: &[&str],
+        snapshots: &str,
+    ) -> Result<()> {
+        let manifest_diff = self.cargo_diff(
+            "--glob-pathspecs",
+            arguments,
+            &[],
+            ["Cargo.toml", "**/Cargo.toml"],
+        )?;
+        require_clean_cargo_diff(&manifest_diff, snapshots)?;
+
+        let implicit_inputs = context
+            .implicit_library_inputs()
+            .map(|path| {
+                path.strip_prefix(&self.root).with_context(|| {
+                    format!(
+                        "Cargo target roles cannot be proven because implicit library input {} is outside Git repository {}",
+                        path.display(),
+                        self.root.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if implicit_inputs.is_empty() {
+            return Ok(());
+        }
+        let implicit_diff = self.cargo_diff(
+            "--literal-pathspecs",
+            arguments,
+            &["--diff-filter=ADRTUXB"],
+            implicit_inputs,
+        )?;
+        require_clean_cargo_diff(&implicit_diff, snapshots)
+    }
+
+    fn cargo_diff<I, S>(
+        &self,
+        pathspec_mode: &str,
+        arguments: &[&str],
+        options: &[&str],
+        paths: I,
+    ) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Command::new("git")
+            .current_dir(&self.root)
+            .arg(pathspec_mode)
+            .args(["diff", "--quiet", "--no-ext-diff", "--no-textconv"])
+            .args(options)
+            .args(arguments)
+            .arg("--")
+            .args(paths)
+            .output()
+            .context("could not compare Cargo target inputs")
+    }
+
+    fn cargo_manifests_in_tree(&self, tree: &ObjectId) -> Result<BTreeSet<PathBuf>> {
+        let output = self.git([
+            OsStr::new("ls-tree"),
+            OsStr::new("-r"),
+            OsStr::new("-z"),
+            OsStr::new("--name-only"),
+            OsStr::new(tree.as_str()),
+        ])?;
+        cargo_manifest_paths(&output)
+    }
+
+    fn cargo_manifests_in_index(&self) -> Result<BTreeSet<PathBuf>> {
+        let output = self.git([
+            OsStr::new("ls-files"),
+            OsStr::new("--cached"),
+            OsStr::new("--full-name"),
+            OsStr::new("-z"),
+        ])?;
+        cargo_manifest_paths(&output)
+    }
+
+    fn require_matching_cargo_manifests(
+        &self,
+        context: &cargo_context::CargoContext,
+        tracked: &BTreeSet<PathBuf>,
+        snapshot: &str,
+    ) -> Result<()> {
+        let mut discovered = BTreeSet::new();
+        for manifest in context.manifests() {
+            let relative = manifest.strip_prefix(&self.root).with_context(|| {
+                format!(
+                    "Cargo target roles cannot be proven because manifest {} is outside Git repository {}",
+                    manifest.display(),
+                    self.root.display()
+                )
+            })?;
+            discovered.insert(relative.to_owned());
+        }
+        if let Some(manifest) = discovered.difference(tracked).next() {
+            bail!(
+                "Cargo target roles cannot be proven because manifest {} is absent from {snapshot}",
+                manifest.display()
+            );
+        }
+        if let Some(manifest) = tracked.difference(&discovered).next() {
+            bail!(
+                "Cargo target roles cannot be proven because manifest {} from {snapshot} was not discovered",
+                manifest.display()
+            );
+        }
+        Ok(())
     }
 
     fn scope_exists_in_worktree(&self) -> Result<bool> {
@@ -763,6 +977,13 @@ fn parse_nul_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn cargo_manifest_paths(output: &[u8]) -> Result<BTreeSet<PathBuf>> {
+    Ok(parse_nul_paths(output)?
+        .into_iter()
+        .filter(|path| path.file_name() == Some(OsStr::new("Cargo.toml")))
+        .collect())
+}
+
 fn take_nul<'output>(
     output: &'output [u8],
     cursor: &mut usize,
@@ -1130,6 +1351,19 @@ fn one_line<'output>(output: &'output [u8], label: &str) -> Result<&'output str>
         bail!("{label} was not one line");
     }
     Ok(line)
+}
+
+fn require_clean_cargo_diff(output: &Output, snapshots: &str) -> Result<()> {
+    match output.status.code() {
+        Some(0) => Ok(()),
+        Some(1) => bail!(
+            "Cargo target roles cannot be proven because Cargo target inputs differ between {snapshots}"
+        ),
+        _ => bail!(
+            "could not compare Cargo target inputs between {snapshots}: {}",
+            stderr_message(output)
+        ),
+    }
 }
 
 fn stderr_message(output: &Output) -> String {

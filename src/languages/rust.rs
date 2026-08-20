@@ -8,8 +8,9 @@ use super::tree::{
     document, function_name, has_direct_child, node_text,
 };
 use super::walk::{WalkEvent, events};
+use crate::RustFileRole;
 use crate::identity::{IdentityArena, IdentityId};
-use crate::model::{AnalysisError, Finding, RustFileRole, Selection};
+use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{CommentKind, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
