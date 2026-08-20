@@ -6,7 +6,7 @@ inputs:
   version:
     description: Exact fuck-ai-comments CLI version to install
     required: false
-    default: "0.1.0"
+    default: "0.1.1"
   mode:
     description: Check mode; base is the fail-closed default
     required: false
