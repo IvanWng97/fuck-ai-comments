@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use tree_sitter::Node;
@@ -18,6 +18,7 @@ const OWNER_COMMENT_CAP_RULE: &str = "comment-policy/owner-comment-cap";
 #[cfg(test)]
 thread_local! {
     static LINE_START_STORAGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHYSICAL_LINE_SCAN_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -26,17 +27,27 @@ pub(crate) fn reset_line_start_storage() {
 }
 
 #[cfg(test)]
+fn reset_physical_line_scan_work() {
+    PHYSICAL_LINE_SCAN_WORK.with(|work| work.set(0));
+}
+
+#[cfg(test)]
 pub(crate) fn line_start_storage() -> usize {
     LINE_START_STORAGE.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
-fn record_line_start_storage(entries: usize) {
-    LINE_START_STORAGE.with(|total| total.set(total.get() + entries));
+fn physical_line_scan_work() -> usize {
+    PHYSICAL_LINE_SCAN_WORK.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_physical_line_scan_work(bytes: usize) {
+    PHYSICAL_LINE_SCAN_WORK.with(|work| work.set(work.get() + bytes));
 }
 
 #[cfg(not(test))]
-fn record_line_start_storage(_entries: usize) {}
+fn record_physical_line_scan_work(_bytes: usize) {}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct Span {
@@ -344,19 +355,17 @@ pub(crate) fn tree_findings(
     input: TreeInput<'_>,
     language: &str,
 ) -> Vec<Finding> {
-    let line_starts = LineStarts::new(source);
+    let positions = PhysicalCommentPositions::new(source, input.comments);
     let mut findings = function_findings(
         path,
-        source,
-        &line_starts,
+        &positions,
         selection,
         input.functions,
         &input.ownership.function_budget,
     );
     findings.extend(type_findings(
         path,
-        source,
-        &line_starts,
+        &positions,
         selection,
         input.types,
         &input.ownership.type_budget,
@@ -371,7 +380,7 @@ pub(crate) fn tree_findings(
     findings.extend(file_findings_with_lines(
         path,
         source,
-        &line_starts,
+        &positions,
         selection,
         &input.ownership.file,
         input.comments,
@@ -416,8 +425,7 @@ pub(crate) fn template_findings(
 
 fn function_findings(
     path: &Path,
-    source: &str,
-    line_starts: &LineStarts,
+    positions: &PhysicalCommentPositions,
     selection: &Selection,
     functions: &[Function],
     budget: &[Vec<Comment>],
@@ -426,8 +434,7 @@ fn function_findings(
     for (function, budget_comments) in functions.iter().zip(budget) {
         findings.extend(scoped_owner_findings(
             path,
-            source,
-            line_starts,
+            positions,
             selection,
             ScopedOwner {
                 kind: OwnerKind::Function,
@@ -445,8 +452,7 @@ fn function_findings(
 
 fn type_findings(
     path: &Path,
-    source: &str,
-    line_starts: &LineStarts,
+    positions: &PhysicalCommentPositions,
     selection: &Selection,
     types: &[TypeOwner],
     budget: &[Vec<Comment>],
@@ -455,8 +461,7 @@ fn type_findings(
     for (type_owner, budget_comments) in types.iter().zip(budget) {
         findings.extend(scoped_owner_findings(
             path,
-            source,
-            line_starts,
+            positions,
             selection,
             ScopedOwner {
                 kind: OwnerKind::Type,
@@ -483,8 +488,7 @@ struct ScopedOwner<'owner> {
 
 fn scoped_owner_findings(
     path: &Path,
-    source: &str,
-    line_starts: &LineStarts,
+    positions: &PhysicalCommentPositions,
     selection: &Selection,
     owner: ScopedOwner<'_>,
     budget_comments: &[Comment],
@@ -510,7 +514,7 @@ fn scoped_owner_findings(
     if narrative_lines.is_empty() {
         return findings;
     }
-    for block in comment_blocks(source, line_starts, &narrative) {
+    for block in comment_blocks(positions, &narrative) {
         let lines = comment_lines(&block);
         if lines.len() >= COMMENT_BLOCK_MIN_LINES {
             findings.push(Finding {
@@ -600,21 +604,14 @@ pub(crate) fn file_findings(
     if comments.is_empty() {
         return Vec::new();
     }
-    let line_starts = LineStarts::new(source);
-    file_findings_with_lines(
-        path,
-        source,
-        &line_starts,
-        selection,
-        comments,
-        all_comments,
-    )
+    let positions = PhysicalCommentPositions::new(source, all_comments);
+    file_findings_with_lines(path, source, &positions, selection, comments, all_comments)
 }
 
 fn file_findings_with_lines(
     path: &Path,
     source: &str,
-    line_starts: &LineStarts,
+    positions: &PhysicalCommentPositions,
     selection: &Selection,
     comments: &[Comment],
     all_comments: &[Comment],
@@ -643,7 +640,7 @@ fn file_findings_with_lines(
         return findings;
     }
 
-    for block in comment_blocks(source, line_starts, &narrative) {
+    for block in comment_blocks(positions, &narrative) {
         let lines = comment_lines(&block);
         if lines.len() >= COMMENT_BLOCK_MIN_LINES {
             findings.push(Finding {
@@ -707,60 +704,95 @@ pub(crate) fn owner_comment_cap_finding(
     })
 }
 
-struct LineStarts(Vec<usize>);
+struct PhysicalCommentPositions(HashMap<usize, PhysicalLinePosition>);
 
-impl LineStarts {
-    fn new(source: &str) -> Self {
-        let starts = Self(
-            std::iter::once(0)
-                .chain(
-                    source
-                        .bytes()
-                        .enumerate()
-                        .filter(|(_, byte)| *byte == b'\n')
-                        .map(|(index, _)| index + 1),
+impl PhysicalCommentPositions {
+    fn new(source: &str, comments: &[Comment]) -> Self {
+        let mut cursor = PhysicalLineCursor::new(source);
+        let positions = comments
+            .iter()
+            .map(|comment| {
+                (
+                    comment.span.start_byte,
+                    cursor.advance_to(comment.span.start_byte),
                 )
-                .collect(),
-        );
-        record_line_start_storage(starts.0.capacity());
-        starts
+            })
+            .collect::<HashMap<_, _>>();
+        debug_assert_eq!(positions.len(), comments.len());
+        Self(positions)
     }
 
-    fn for_line(&self, one_based_line: usize) -> usize {
-        self.0
-            .get(one_based_line.saturating_sub(1))
-            .copied()
-            .unwrap_or_default()
+    fn get(&self, comment: &Comment) -> PhysicalLinePosition {
+        self.0[&comment.span.start_byte]
     }
 }
 
-fn comment_blocks(
-    source: &str,
-    line_starts: &LineStarts,
-    comments: &[Comment],
-) -> Vec<Vec<Comment>> {
+struct PhysicalLineCursor<'source> {
+    source: &'source [u8],
+    offset: usize,
+    line_start: usize,
+    line_number: usize,
+    last_non_whitespace: Option<usize>,
+}
+
+impl<'source> PhysicalLineCursor<'source> {
+    fn new(source: &'source str) -> Self {
+        Self {
+            source: source.as_bytes(),
+            offset: 0,
+            line_start: 0,
+            line_number: 1,
+            last_non_whitespace: None,
+        }
+    }
+
+    fn advance_to(&mut self, offset: usize) -> PhysicalLinePosition {
+        debug_assert!(self.offset <= offset);
+        record_physical_line_scan_work(offset - self.offset);
+        for (relative, byte) in self.source[self.offset..offset].iter().enumerate() {
+            let absolute = self.offset + relative;
+            if *byte == b'\n' {
+                self.line_start = absolute + 1;
+                self.line_number += 1;
+            } else if !byte.is_ascii_whitespace() {
+                self.last_non_whitespace = Some(absolute);
+            }
+        }
+        self.offset = offset;
+        PhysicalLinePosition {
+            number: self.line_number,
+            starts_line: self
+                .last_non_whitespace
+                .is_none_or(|byte| byte < self.line_start),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalLinePosition {
+    number: usize,
+    starts_line: bool,
+}
+
+fn comment_blocks(positions: &PhysicalCommentPositions, comments: &[Comment]) -> Vec<Vec<Comment>> {
     let mut blocks: Vec<Vec<Comment>> = Vec::new();
+    let mut previous_position: Option<PhysicalLinePosition> = None;
     for comment in comments {
+        let position = positions.get(comment);
         if let Some(block) = blocks.last_mut()
             && block.last().is_some_and(|previous| {
-                comment.span.start_line == previous.span.end_line + 1
-                    && starts_physical_line(source, line_starts, previous)
-                    && starts_physical_line(source, line_starts, comment)
+                position.number == previous.span.end_line + 1
+                    && previous_position.is_some_and(|previous| previous.starts_line)
+                    && position.starts_line
             })
         {
             block.push(comment.clone());
         } else {
             blocks.push(vec![comment.clone()]);
         }
+        previous_position = Some(position);
     }
     blocks
-}
-
-fn starts_physical_line(source: &str, line_starts: &LineStarts, comment: &Comment) -> bool {
-    let line_start = line_starts.for_line(comment.span.start_line);
-    source.as_bytes()[line_start..comment.span.start_byte]
-        .iter()
-        .all(u8::is_ascii_whitespace)
 }
 
 fn comment_lines(comments: &[Comment]) -> BTreeSet<usize> {
@@ -805,4 +837,153 @@ fn code_line_count(source: &str, owner: &Span, comments: &[Comment]) -> usize {
 
 fn first_line(lines: &BTreeSet<usize>) -> usize {
     lines.first().copied().unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+    use std::path::Path;
+
+    use crate::{Finding, SourceFile, analyze_all};
+
+    use super::{
+        Comment, CommentKind, PhysicalCommentPositions, Span, comment_blocks, line_start_storage,
+        physical_line_scan_work, reset_line_start_storage, reset_physical_line_scan_work,
+    };
+
+    #[test]
+    fn sixteen_mib_newline_dense_rust_keeps_exact_findings_without_line_storage() {
+        const SOURCE_BYTES: usize = 16 * 1_024 * 1_024;
+        const TAIL: &str = concat!(
+            "fn operation() {\n",
+            "    // The first invariant governs startup.\n",
+            "    // The second invariant governs recovery.\n",
+            "    // The third invariant governs shutdown.\n",
+            "    run();\n",
+            "}\n",
+        );
+        let prefix_lines = SOURCE_BYTES - TAIL.len();
+        let mut source = "\n".repeat(prefix_lines);
+        source.push_str(TAIL);
+        assert_eq!(
+            source.len(),
+            SOURCE_BYTES,
+            "fixture must stay exactly 16 MiB"
+        );
+        reset_line_start_storage();
+
+        let findings = analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &source,
+        })
+        .expect("newline-dense Rust source must parse");
+
+        assert_eq!(
+            findings,
+            [
+                Finding {
+                    path: "src/lib.rs".to_owned(),
+                    line: prefix_lines + 2,
+                    rule: "comment-policy/comment-block-budget",
+                    message: "3+-comment run inside function `operation`; split the code or keep the local rationale below 3 lines".to_owned(),
+                },
+                Finding {
+                    path: "src/lib.rs".to_owned(),
+                    line: prefix_lines + 2,
+                    rule: "comment-policy/function-comment-budget",
+                    message: "function `operation` owns 3 comment lines for 3 code lines; allowance is 1".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(
+            line_start_storage(),
+            0,
+            "physical comment grouping must retain no per-line index"
+        );
+    }
+
+    #[test]
+    fn physical_comment_grouping_scans_source_once() {
+        const COMMENT_COUNT: usize = 256;
+        let mut source = String::from("fn operation() {\n");
+        for comment in 0..COMMENT_COUNT {
+            writeln!(source, "    // Invariant {comment}.")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("    run();\n}\n");
+        reset_physical_line_scan_work();
+
+        let findings = analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &source,
+        })
+        .expect("comment-dense Rust source must parse");
+
+        assert!(
+            !findings.is_empty(),
+            "the fixture must exercise comment policy"
+        );
+        assert!(
+            physical_line_scan_work() <= source.len(),
+            "physical-line work must be one monotonic source pass"
+        );
+    }
+
+    #[test]
+    fn physical_comment_grouping_shares_one_scan_across_owners() {
+        const OWNER_COUNT: usize = 256;
+        let mut source = String::new();
+        for owner in 0..OWNER_COUNT {
+            writeln!(
+                source,
+                "fn operation_{owner}() {{\n    // Coupled to operation {owner}.\n    run();\n}}"
+            )
+            .expect("writing to a String cannot fail");
+        }
+        reset_physical_line_scan_work();
+
+        let findings = analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &source,
+        })
+        .expect("many-owner Rust source must parse");
+
+        assert!(findings.is_empty(), "one comment stays within each budget");
+        assert!(
+            physical_line_scan_work() <= source.len(),
+            "all owners must share one monotonic source pass"
+        );
+    }
+
+    #[test]
+    fn physical_comment_grouping_preserves_line_ending_semantics() {
+        let block_counts = [("\n", [1, 2, 3]), ("\r\n", [1, 2, 3]), ("\r", [1, 1, 1])].map(
+            |(separator, lines)| {
+                let mut source = String::new();
+                let mut comments = Vec::new();
+                for (index, line) in lines.into_iter().enumerate() {
+                    let text = format!("// Invariant {index}.");
+                    let start_byte = source.len();
+                    source.push_str(&text);
+                    comments.push(Comment {
+                        span: Span {
+                            start_byte,
+                            end_byte: source.len(),
+                            start_line: line,
+                            end_line: line,
+                        },
+                        kind: CommentKind::Narrative,
+                        text,
+                    });
+                    if index + 1 < lines.len() {
+                        source.push_str(separator);
+                    }
+                }
+                let positions = PhysicalCommentPositions::new(&source, &comments);
+                comment_blocks(&positions, &comments).len()
+            },
+        );
+
+        assert_eq!(block_counts, [1, 1, 3]);
+    }
 }

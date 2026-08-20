@@ -53,8 +53,8 @@ pub fn analyze_all_with_profile(
 ///
 /// # Errors
 ///
-/// Returns an error when either snapshot cannot be parsed or ownership cannot
-/// be paired without guessing.
+/// Returns an error when either snapshot cannot be parsed, exceeds the diff
+/// engine's token capacity, or ownership cannot be paired without guessing.
 pub fn analyze_change(
     before: SourceFile<'_>,
     after: SourceFile<'_>,
@@ -70,9 +70,9 @@ pub fn analyze_change(
 ///
 /// # Errors
 ///
-/// Returns an error when either snapshot cannot be parsed, when the snapshots
-/// use different language adapters, or when ownership cannot be paired without
-/// guessing.
+/// Returns an error when either snapshot cannot be parsed or exceeds the diff
+/// engine's token capacity, when the snapshots use different language
+/// adapters, or when ownership cannot be paired without guessing.
 pub fn analyze_change_with_profile(
     before: SourceFile<'_>,
     after: SourceFile<'_>,

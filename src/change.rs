@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::ops::Range;
 
 #[cfg(test)]
 use std::cell::Cell;
 
-use similar::{Algorithm, ChangeTag, DiffTag, TextDiff, capture_diff_slices};
+use imara_diff::{Algorithm, Diff, InternedInput, Interner, Token, sources};
 
 use crate::identity::{
     CanonicalIdentity, CanonicalIdentityId, CanonicalIdentityInterner, CanonicalIdentityMap,
@@ -18,9 +19,96 @@ use attestation_key::AttestationKey;
 
 const STALE_RULE: &str = "comment-policy/comment-owner-changed";
 const REPARENTED_RULE: &str = "comment-policy/comment-reparented";
+const CHANGE_DIFF_ALGORITHM: Algorithm = Algorithm::Myers;
+const MAX_DIFF_TOKENS: usize = i32::MAX as usize - 1;
+
+struct ChangeDiff<'source> {
+    input: InternedInput<&'source str>,
+    diff: Diff,
+}
+
+fn compute_change_diff<'source>(
+    before: impl Iterator<Item = &'source str>,
+    after: impl Iterator<Item = &'source str>,
+) -> Result<ChangeDiff<'source>, AnalysisError> {
+    #[cfg(test)]
+    CHANGE_DIFF_COMPUTATIONS.with(|computations| computations.set(computations.get() + 1));
+    let mut input = InternedInput::default();
+    input.update_before(before);
+    check_diff_capacity("before", input.before.len())?;
+    input.update_after(after);
+    check_diff_capacity("after", input.after.len())?;
+    let diff = Diff::compute(CHANGE_DIFF_ALGORITHM, &input);
+    Ok(ChangeDiff { input, diff })
+}
+
+fn check_diff_capacity(snapshot: &'static str, tokens: usize) -> Result<(), AnalysisError> {
+    if tokens > MAX_DIFF_TOKENS {
+        return Err(AnalysisError::DiffCapacity {
+            snapshot,
+            tokens,
+            maximum: MAX_DIFF_TOKENS,
+        });
+    }
+    Ok(())
+}
+
+fn visit_equal_ranges(
+    diff: &Diff,
+    before_len: usize,
+    after_len: usize,
+    mut visit: impl FnMut(Range<usize>, Range<usize>) -> Result<(), AnalysisError>,
+) -> Result<(), AnalysisError> {
+    let mut before_position = 0;
+    let mut after_position = 0;
+    for hunk in diff.hunks() {
+        let before_start = hunk.before.start as usize;
+        let before_end = hunk.before.end as usize;
+        let after_start = hunk.after.start as usize;
+        let after_end = hunk.after.end as usize;
+        if before_start < before_position
+            || after_start < after_position
+            || before_end > before_len
+            || after_end > after_len
+        {
+            return Err(AnalysisError::Invariant(
+                "diff engine returned an invalid hunk range".to_owned(),
+            ));
+        }
+        visit_equal_range(
+            before_position..before_start,
+            after_position..after_start,
+            &mut visit,
+        )?;
+        before_position = before_end;
+        after_position = after_end;
+    }
+    visit_equal_range(
+        before_position..before_len,
+        after_position..after_len,
+        &mut visit,
+    )
+}
+
+fn visit_equal_range(
+    before: Range<usize>,
+    after: Range<usize>,
+    visit: &mut impl FnMut(Range<usize>, Range<usize>) -> Result<(), AnalysisError>,
+) -> Result<(), AnalysisError> {
+    if before.len() != after.len() {
+        return Err(AnalysisError::Invariant(
+            "diff engine returned unequal unchanged ranges".to_owned(),
+        ));
+    }
+    if !before.is_empty() {
+        visit(before, after)?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 thread_local! {
+    static CHANGE_DIFF_COMPUTATIONS: Cell<usize> = const { Cell::new(0) };
     static OWNER_FRONTIER_VISITS: Cell<usize> = const { Cell::new(0) };
     static OWNER_ANCHOR_CANDIDATE_EVALUATIONS: Cell<usize> = const { Cell::new(0) };
     static OWNER_EXACT_SPAN_COMPARISONS: Cell<usize> = const { Cell::new(0) };
@@ -53,7 +141,7 @@ pub(crate) fn analyze_with_profile(
     let after_document = languages::parse_validated_file(after.path, after.text)?;
     let identities = CanonicalOwnerIdentities::new(&before_document, &after_document)?;
 
-    let anchors = LineAnchors::new(before.text, after.text, &before_document, &after_document);
+    let anchors = LineAnchors::new(before.text, after.text, &before_document, &after_document)?;
     let owners = pair_owners(&before_document, &after_document, &anchors, &identities)?;
     let owner_changes =
         OwnerChangeIndex::new(&before_document, &after_document, &owners, &identities);
@@ -897,7 +985,7 @@ fn align_comment_group(
         .collect();
 
     for (old, new) in
-        exact_comment_sequence_pairs(&old_remaining, &new_remaining, old_comments, new_comments)
+        exact_comment_sequence_pairs(&old_remaining, &new_remaining, old_comments, new_comments)?
     {
         paired_old.insert(old);
         paired_new.insert(new);
@@ -963,25 +1051,28 @@ fn exact_comment_sequence_pairs(
     new_indexes: &[usize],
     old_comments: &[CommentSnapshot],
     new_comments: &[CommentSnapshot],
-) -> Vec<(usize, usize)> {
-    let old_text: Vec<_> = old_indexes
-        .iter()
-        .map(|index| old_comments[*index].text.as_str())
-        .collect();
-    let new_text: Vec<_> = new_indexes
-        .iter()
-        .map(|index| new_comments[*index].text.as_str())
-        .collect();
+) -> Result<Vec<(usize, usize)>, AnalysisError> {
+    let computed = compute_change_diff(
+        old_indexes
+            .iter()
+            .map(|index| old_comments[*index].text.as_str()),
+        new_indexes
+            .iter()
+            .map(|index| new_comments[*index].text.as_str()),
+    )?;
     let mut pairs = Vec::new();
-    for operation in capture_diff_slices(Algorithm::Myers, &old_text, &new_text) {
-        if operation.tag() != DiffTag::Equal {
-            continue;
-        }
-        for (old_position, new_position) in operation.old_range().zip(operation.new_range()) {
-            pairs.push((old_indexes[old_position], new_indexes[new_position]));
-        }
-    }
-    pairs
+    visit_equal_ranges(
+        &computed.diff,
+        computed.input.before.len(),
+        computed.input.after.len(),
+        |old_range, new_range| {
+            for (old_position, new_position) in old_range.zip(new_range) {
+                pairs.push((old_indexes[old_position], new_indexes[new_position]));
+            }
+            Ok(())
+        },
+    )?;
+    Ok(pairs)
 }
 
 fn semantic_selection(
@@ -1138,8 +1229,14 @@ fn owner_label(owner: &OwnerSnapshot) -> String {
 }
 
 struct LineAnchors {
-    exact: BTreeMap<usize, usize>,
+    exact: Vec<ExactLineAnchor>,
     owner: Vec<OwnerLineAnchor>,
+}
+
+#[derive(Clone, Copy)]
+struct ExactLineAnchor {
+    before: usize,
+    after: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1162,55 +1259,76 @@ struct PhysicalLine {
 }
 
 impl LineAnchors {
-    fn new(before: &str, after: &str, old: &ParsedFile, new: &ParsedFile) -> Self {
-        let mut config = TextDiff::configure();
-        config.algorithm(Algorithm::Myers);
-        let diff = config.diff_lines(before, after);
+    fn new(
+        before: &str,
+        after: &str,
+        old: &ParsedFile,
+        new: &ParsedFile,
+    ) -> Result<Self, AnalysisError> {
+        let ChangeDiff { input, diff } =
+            compute_change_diff(sources::lines(before), sources::lines(after))?;
         let mut old_comments = CommentSpanSweep::new(&old.comments);
         let mut new_comments = CommentSpanSweep::new(&new.comments);
-        let mut exact = BTreeMap::new();
+        let mut exact_targets: Vec<_> = old
+            .comments
+            .iter()
+            .map(|comment| comment.span.start_line.saturating_sub(1))
+            .collect();
+        exact_targets.sort_unstable();
+        exact_targets.dedup();
+        let mut next_exact_target = 0;
+        let mut exact = Vec::with_capacity(exact_targets.len());
         let mut owner = Vec::new();
-        let mut before_start_byte = 0;
-        let mut after_start_byte = 0;
-        for change in diff.iter_all_changes() {
-            let line = change.value();
-            match change.tag() {
-                ChangeTag::Equal => {
-                    let before_line = change.old_index().map(|index| LineCoordinate {
-                        index,
-                        start_byte: before_start_byte,
-                    });
-                    let after_line = change.new_index().map(|index| LineCoordinate {
-                        index,
-                        start_byte: after_start_byte,
-                    });
-                    debug_assert!(before_line.is_some() && after_line.is_some());
-                    if let (Some(before_line), Some(after_line)) = (before_line, after_line) {
-                        exact.insert(before_line.index, after_line.index);
-                        let content = line_content(line);
-                        if old_comments
-                            .has_non_comment_alphanumeric(before_line.start_byte, content)
-                            && new_comments
-                                .has_non_comment_alphanumeric(after_line.start_byte, content)
-                        {
-                            owner.push(OwnerLineAnchor {
-                                before: before_line,
-                                after: after_line,
-                                content_len: content.len(),
-                            });
-                        }
+        let mut before_lines = DiffLineCursor::new(&input.before, &input.interner);
+        let mut after_lines = DiffLineCursor::new(&input.after, &input.interner);
+        visit_equal_ranges(
+            &diff,
+            input.before.len(),
+            input.after.len(),
+            |before_range, after_range| {
+                before_lines.advance_to(before_range.start)?;
+                after_lines.advance_to(after_range.start)?;
+                for _ in 0..before_range.len() {
+                    let (before_line, before_text) = before_lines.next_line()?;
+                    let (after_line, after_text) = after_lines.next_line()?;
+                    if before_text != after_text {
+                        return Err(AnalysisError::Invariant(
+                            "diff engine marked unequal lines as unchanged".to_owned(),
+                        ));
                     }
-                    before_start_byte += line.len();
-                    after_start_byte += line.len();
+
+                    while exact_targets
+                        .get(next_exact_target)
+                        .is_some_and(|target| *target < before_line.index)
+                    {
+                        next_exact_target += 1;
+                    }
+                    if exact_targets.get(next_exact_target) == Some(&before_line.index) {
+                        exact.push(ExactLineAnchor {
+                            before: before_line.index,
+                            after: after_line.index,
+                        });
+                        next_exact_target += 1;
+                    }
+
+                    let content = line_content(before_text);
+                    if old_comments.has_non_comment_alphanumeric(before_line.start_byte, content)
+                        && new_comments.has_non_comment_alphanumeric(after_line.start_byte, content)
+                    {
+                        owner.push(OwnerLineAnchor {
+                            before: before_line,
+                            after: after_line,
+                            content_len: content.len(),
+                        });
+                    }
                 }
-                ChangeTag::Delete => before_start_byte += line.len(),
-                ChangeTag::Insert => after_start_byte += line.len(),
-            }
-        }
+                Ok(())
+            },
+        )?;
         debug_assert!(owner.windows(2).all(|pair| {
             pair[0].before.index < pair[1].before.index && pair[0].after.index < pair[1].after.index
         }));
-        Self { exact, owner }
+        Ok(Self { exact, owner })
     }
 
     fn before_owner_ranks(&self, owner: &OwnerSnapshot) -> std::ops::Range<usize> {
@@ -1235,8 +1353,57 @@ impl LineAnchors {
 
     fn after_line(&self, one_based_old_line: usize) -> Option<usize> {
         self.exact
-            .get(&one_based_old_line.saturating_sub(1))
-            .map(|line| line + 1)
+            .binary_search_by_key(&one_based_old_line.saturating_sub(1), |anchor| {
+                anchor.before
+            })
+            .ok()
+            .map(|index| self.exact[index].after + 1)
+    }
+}
+
+struct DiffLineCursor<'input, 'source> {
+    tokens: &'input [Token],
+    interner: &'input Interner<&'source str>,
+    position: usize,
+    start_byte: usize,
+}
+
+impl<'input, 'source> DiffLineCursor<'input, 'source> {
+    fn new(tokens: &'input [Token], interner: &'input Interner<&'source str>) -> Self {
+        Self {
+            tokens,
+            interner,
+            position: 0,
+            start_byte: 0,
+        }
+    }
+
+    fn advance_to(&mut self, target: usize) -> Result<(), AnalysisError> {
+        if target < self.position || target > self.tokens.len() {
+            return Err(AnalysisError::Invariant(
+                "diff engine line ranges were not monotonic".to_owned(),
+            ));
+        }
+        while self.position < target {
+            self.next_line()?;
+        }
+        Ok(())
+    }
+
+    fn next_line(&mut self) -> Result<(LineCoordinate, &'source str), AnalysisError> {
+        let token = self.tokens.get(self.position).copied().ok_or_else(|| {
+            AnalysisError::Invariant("diff engine line range exceeded its input".to_owned())
+        })?;
+        let line = self.interner[token];
+        let coordinate = LineCoordinate {
+            index: self.position,
+            start_byte: self.start_byte,
+        };
+        self.start_byte = self.start_byte.checked_add(line.len()).ok_or_else(|| {
+            AnalysisError::Invariant("diff line byte offset exceeded the platform limit".to_owned())
+        })?;
+        self.position += 1;
+        Ok((coordinate, line))
     }
 }
 
@@ -1481,7 +1648,8 @@ mod tests {
         let after = before.clone();
         OWNER_COMMENT_SPAN_VISITS.with(|visits| visits.set(0));
 
-        let _anchors = LineAnchors::new(&source, &source, &before, &after);
+        let _anchors = LineAnchors::new(&source, &source, &before, &after)
+            .expect("the identical comment-line fixture must diff");
 
         OWNER_COMMENT_SPAN_VISITS.with(Cell::get)
     }
@@ -1557,6 +1725,68 @@ mod tests {
             std::mem::size_of::<OwnerLineAnchor>(),
             5 * std::mem::size_of::<usize>()
         );
+    }
+
+    #[test]
+    fn exact_line_anchors_retain_only_before_comment_lines() {
+        let mut source = String::from("fn work() {\n");
+        for statement in 0..256 {
+            if statement == 128 {
+                source.push_str("    // Coupled to the following operation.\n");
+            }
+            writeln!(source, "    operation_{statement:03}();")
+                .expect("writing to a String cannot fail");
+        }
+        source.push_str("}\n");
+        let before = languages::parse_file(Path::new("src/lib.rs"), &source)
+            .expect("the sparse-anchor fixture is valid Rust");
+        let after = before.clone();
+
+        let anchors = LineAnchors::new(&source, &source, &before, &after)
+            .expect("identical source must diff");
+
+        assert_eq!(anchors.exact.len(), before.comments.len());
+    }
+
+    #[test]
+    fn diff_capacity_returns_a_typed_error_before_compute() {
+        let error = check_diff_capacity("after", i32::MAX as usize)
+            .expect_err("the upstream token boundary must be rejected without panicking");
+
+        assert!(matches!(
+            error,
+            AnalysisError::DiffCapacity {
+                snapshot: "after",
+                tokens,
+                maximum: MAX_DIFF_TOKENS,
+            } if tokens == i32::MAX as usize
+        ));
+    }
+
+    #[test]
+    fn change_diff_algorithm_is_myers() {
+        assert_eq!(CHANGE_DIFF_ALGORITHM, Algorithm::Myers);
+    }
+
+    #[test]
+    fn line_and_comment_alignment_share_one_diff_engine() {
+        const SOURCE: &str = concat!(
+            "fn work() {\n",
+            "    // Coupled to the operation.\n",
+            "    operation();\n",
+            "}\n",
+        );
+        let before = languages::parse_file(Path::new("src/lib.rs"), SOURCE)
+            .expect("the shared-engine fixture is valid Rust");
+        let after = before.clone();
+        CHANGE_DIFF_COMPUTATIONS.with(|computations| computations.set(0));
+
+        LineAnchors::new(SOURCE, SOURCE, &before, &after)
+            .expect("line alignment must use the shared engine");
+        exact_comment_sequence_pairs(&[0], &[0], &before.comments, &after.comments)
+            .expect("comment alignment must use the shared engine");
+
+        assert_eq!(CHANGE_DIFF_COMPUTATIONS.with(Cell::get), 2);
     }
 
     #[test]
