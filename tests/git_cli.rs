@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
-use std::path::Path;
+use std::path::{MAIN_SEPARATOR, Path};
 use std::process::Command as ProcessCommand;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -74,6 +74,14 @@ fn command(root: &TempDir) -> Command {
     let mut command = assert_cmd::cargo::cargo_bin_cmd!("fuck-ai-comments");
     command.current_dir(root.path());
     command
+}
+
+fn rendered_path(path: &str) -> String {
+    if MAIN_SEPARATOR == '\\' {
+        path.replace('/', "\\\\")
+    } else {
+        path.to_owned()
+    }
 }
 
 fn write(root: &TempDir, path: impl AsRef<Path>, source: impl AsRef<[u8]>) {
@@ -438,8 +446,9 @@ fn default_rejects_an_untracked_manifest_hidden_by_ignore_rules() {
         .clone();
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
+    let manifest = rendered_path("nested/Cargo.toml");
     assert!(
-        stderr.contains("manifest nested/Cargo.toml is absent from HEAD"),
+        stderr.contains(&format!("manifest {manifest} is absent from HEAD")),
         "unexpected stderr: {stderr}"
     );
 }
@@ -473,8 +482,9 @@ fn default_rejects_a_hidden_untracked_manifest_without_a_rust_change() {
         .clone();
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
+    let manifest = rendered_path("nested/Cargo.toml");
     assert!(
-        stderr.contains("manifest nested/Cargo.toml is absent from HEAD"),
+        stderr.contains(&format!("manifest {manifest} is absent from HEAD")),
         "unexpected stderr: {stderr}"
     );
 }
@@ -509,8 +519,9 @@ fn default_rejects_a_gitignored_manifest_above_tracked_rust() {
         .clone();
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
+    let manifest = rendered_path("nested/Cargo.toml");
     assert!(
-        stderr.contains("manifest nested/Cargo.toml is absent from HEAD"),
+        stderr.contains(&format!("manifest {manifest} is absent from HEAD")),
         "unexpected stderr: {stderr}"
     );
 }
