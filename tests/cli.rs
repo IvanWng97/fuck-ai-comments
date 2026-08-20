@@ -14,6 +14,14 @@ fn command(root: &TempDir) -> Command {
     command
 }
 
+fn rendered_path(path: &str) -> String {
+    if MAIN_SEPARATOR == '\\' {
+        path.replace('/', "\\\\")
+    } else {
+        path.to_owned()
+    }
+}
+
 #[test]
 fn check_help_describes_the_empty_baseline_for_unborn_branches() {
     let root = TempDir::new().expect("temporary directory should be created");
@@ -66,8 +74,7 @@ fn all_reports_findings_in_stable_path_order() {
     let a = stdout
         .find("a.rs:1:")
         .expect("a.rs finding should be printed");
-    let separator = if MAIN_SEPARATOR == '\\' { "\\\\" } else { "/" };
-    let nested_finding = format!("nested{separator}z.rs:1:");
+    let nested_finding = format!("{}:1:", rendered_path("nested/z.rs"));
     let z = stdout
         .find(&nested_finding)
         .expect("nested z.rs finding should be printed");
@@ -140,7 +147,11 @@ fn all_does_not_infer_a_library_root_without_cargo_metadata() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("src/lib.rs:1: comment-policy/comment-block-budget"));
+    let finding = format!(
+        "{}:1: comment-policy/comment-block-budget",
+        rendered_path("src/lib.rs")
+    );
+    assert!(stdout.contains(&finding), "unexpected stdout:\n{stdout}");
 }
 
 #[test]
@@ -265,8 +276,13 @@ fn all_keeps_nested_workspace_roots_in_repository_coordinates() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("custom/root.rs:1:"));
-    assert!(!stdout.contains("rust/custom/root.rs:1:"));
+    let ordinary_finding = format!("{}:1:", rendered_path("custom/root.rs"));
+    let library_finding = format!("{}:1:", rendered_path("rust/custom/root.rs"));
+    assert!(
+        stdout.contains(&ordinary_finding),
+        "unexpected stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains(&library_finding));
 }
 
 #[test]
