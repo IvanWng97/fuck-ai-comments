@@ -180,21 +180,29 @@ not need an exact Action commit SHA.
 
 ## Install
 
-Until the first tagged release is published, install directly from the public
-repository:
+Install the current crates.io release:
+
+```console
+cargo install fuck-ai-comments --locked
+```
+
+To install the current `main` branch directly from the public repository:
 
 ```console
 cargo install --git https://github.com/IvanWng97/fuck-ai-comments --locked
 ```
 
-Releases are manual workflow dispatches from `main`; the workflow creates the
-tag only after authorization, artifact builds, and hosting succeed:
+After updating the package version, releases are manual workflow dispatches from
+`main`; the workflow publishes the crate and creates the tag only after
+authorization, artifact builds, and hosting succeed:
 
 ```console
-gh workflow run release.yml --ref main -f tag=v0.1.0
+version=$(cargo metadata --locked --no-deps --format-version 1 |
+  jq -er '.packages[] | select(.name == "fuck-ai-comments") | .version')
+gh workflow run release.yml --ref main -f "tag=v${version}"
 ```
 
-Before the first dispatch, protect `main` and create a `release-authorization`
+Before an automated dispatch, protect `main` and create a `release-authorization`
 environment. The `release-authorization` environment only permits protected
 branches and carries no secrets. Activate a repository tag ruleset for all tag
 refs (`~ALL`). The ruleset requires a successful `release-authorization`
@@ -205,6 +213,16 @@ shapes; the current workflow authorizes only `v<package-version>`. It also requi
 that the dispatched commit is the current `main` HEAD and has a successful `ci.yml`
 push run for that exact SHA. A `tag=dry-run` dispatch may build and test without
 repository write permission.
+
+crates.io requires a crate to exist before its Trusted Publisher can be
+configured. Version `0.1.0` was bootstrapped from a trusted workstation with a
+local owner token. For a new crate name, first run `cargo publish --dry-run
+--locked`, publish once with `cargo publish --locked`, and never copy that token
+into GitHub. Then configure a crates.io Trusted Publisher for repository owner
+`IvanWng97`, repository `fuck-ai-comments`, workflow filename `release.yml`, and
+environment `release-authorization`. Subsequent publish jobs use that protected
+environment and an OIDC-issued short-lived token; they do not require a stored
+crates.io API token.
 
 Published releases provide native archives for x86-64 Linux, x86-64 Windows,
 x86-64 macOS, and Apple Silicon macOS. Each release includes `sha256.sum`, a

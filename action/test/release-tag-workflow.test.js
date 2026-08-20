@@ -11,6 +11,7 @@ import { parse as parseYaml } from "yaml";
 const workflowPath = ".github/workflows/update-major-tag.yml";
 const authorizationWorkflowPath = ".github/workflows/authorize-release.yml";
 const actionE2eWorkflowPath = ".github/workflows/action-e2e.yml";
+const publishCrateWorkflowPath = ".github/workflows/publish-crate.yml";
 const localCommandPath = `.${delimiter}${process.env.PATH ?? ""}`;
 
 test("cargo-dist dispatches releases from main without a tag-push trigger", async () => {
@@ -44,12 +45,10 @@ test("release runbook requires trusted main and an all-tag ruleset", async () =>
   const cargo = parseToml(await readFile("Cargo.toml", "utf8"));
   const readme = await readFile("README.md", "utf8");
 
+  assert.match(readme, /cargo metadata --locked --no-deps/u);
   assert.match(
     readme,
-    new RegExp(
-      `gh workflow run release\\.yml --ref main -f tag=v${cargo.package.version.replaceAll(".", "\\.")}`,
-      "u",
-    ),
+    /gh workflow run release\.yml --ref main -f "tag=v\$\{version\}"/u,
   );
   assert.match(readme, /all tag\s+refs\s+\(`~ALL`\)/u);
   assert.match(
@@ -65,6 +64,17 @@ test("release runbook requires trusted main and an all-tag ruleset", async () =>
   assert.match(readme, /no owner or administrator bypass/u);
   assert.doesNotMatch(readme, /GitHub Actions App ID `15368`/u);
   assert.match(readme, /protect `main`/u);
+  assert.match(readme, /cargo install fuck-ai-comments --locked/u);
+  assert.match(readme, /crates\.io Trusted Publisher/u);
+  assert.match(readme, /workflow filename `release\.yml`/u);
+  assert.match(readme, /environment `release-authorization`/u);
+  assert.match(
+    readme,
+    /requires a crate to exist before its Trusted Publisher/u,
+  );
+  assert.match(readme, /Version `0\.1\.0` was bootstrapped/u);
+  assert.match(readme, /never copy that token\s+into GitHub/u);
+  assert.deepEqual(cargo.package.publish, ["crates-io"]);
   assert.doesNotMatch(readme, /push(?:ing)? (?:a |the )?tag/u);
 });
 
@@ -219,6 +229,37 @@ esac
   }
 }
 
+async function runPublishPlanValidation(plan) {
+  const workflow = parseYaml(await readFile(publishCrateWorkflowPath, "utf8"));
+  const step = workflow.jobs["publish-crate"].steps.find(
+    (candidate) => candidate.name === "Validate the crate publish plan",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "publish-crate-plan-"));
+  const output = join(temporary, "output");
+  try {
+    const result = spawnSync("bash", ["-c", step.run], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: output,
+        PACKAGE_NAME: "fuck-ai-comments",
+        PLAN: JSON.stringify(plan),
+      },
+    });
+    let publishedOutput = "";
+    try {
+      publishedOutput = await readFile(output, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    return { output: publishedOutput, result };
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+}
+
 test("release tags remain argv data at every shell sink", async () => {
   const release = parseYaml(
     await readFile(".github/workflows/release.yml", "utf8"),
@@ -303,6 +344,117 @@ test("cargo-dist owns the post-release compatibility tag job", async () => {
   assert.equal(generatedJob.with.plan, "${{ needs.plan.outputs.val }}");
   assert.deepEqual(generatedJob.permissions, { contents: "write" });
   assert.equal("secrets" in generatedJob, false);
+});
+
+test("cargo-dist publishes the crate through OIDC before announcing", async () => {
+  const config = parseToml(await readFile("dist-workspace.toml", "utf8"));
+  const release = parseYaml(
+    await readFile(".github/workflows/release.yml", "utf8"),
+  );
+
+  assert.deepEqual(config.dist["publish-jobs"], ["./publish-crate"]);
+  assert.deepEqual(
+    config.dist["github-custom-job-permissions"]["publish-crate"],
+    { contents: "read", "id-token": "write" },
+  );
+
+  const generatedJob = release.jobs["custom-publish-crate"];
+  assert.ok(generatedJob.needs.includes("plan"));
+  assert.ok(generatedJob.needs.includes("host"));
+  assert.equal(generatedJob.uses, "./.github/workflows/publish-crate.yml");
+  assert.equal(generatedJob.with.plan, "${{ needs.plan.outputs.val }}");
+  assert.deepEqual(generatedJob.permissions, {
+    contents: "read",
+    "id-token": "write",
+  });
+  assert.equal("secrets" in generatedJob, false);
+  assert.ok(release.jobs.announce.needs.includes("custom-publish-crate"));
+
+  const source = await readFile(publishCrateWorkflowPath, "utf8");
+  const workflow = parseYaml(source);
+  assert.deepEqual(workflow.permissions, {});
+  assert.deepEqual(workflow.on.workflow_call.inputs.plan, {
+    required: true,
+    type: "string",
+  });
+  assert.deepEqual(Object.keys(workflow.jobs), ["publish-crate"]);
+
+  const job = workflow.jobs["publish-crate"];
+  assert.equal(job["runs-on"], "ubuntu-24.04");
+  assert.equal(job["timeout-minutes"], 15);
+  assert.equal(job.environment, "release-authorization");
+  assert.deepEqual(job.permissions, {
+    contents: "read",
+    "id-token": "write",
+  });
+
+  const checkout = job.steps.find((step) =>
+    step.uses?.startsWith("actions/checkout@"),
+  );
+  assert.equal(
+    checkout.uses,
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+  );
+  assert.deepEqual(checkout.with, {
+    "persist-credentials": false,
+    ref: "${{ github.sha }}",
+  });
+
+  const dryRunIndex = job.steps.findIndex((step) =>
+    step.run?.includes("cargo publish --dry-run"),
+  );
+  const authIndex = job.steps.findIndex((step) => step.id === "crates_io_auth");
+  const publishIndex = job.steps.findIndex(
+    (step) =>
+      step.run?.includes("cargo publish") &&
+      !step.run.includes("cargo publish --dry-run"),
+  );
+  const installIndex = job.steps.findIndex((step) =>
+    step.run?.includes("cargo install"),
+  );
+  assert.ok(dryRunIndex >= 0);
+  assert.ok(authIndex > dryRunIndex);
+  assert.ok(publishIndex > authIndex);
+  assert.ok(installIndex > publishIndex);
+  assert.equal(
+    job.steps[authIndex].uses,
+    "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18",
+  );
+  assert.equal(
+    job.steps[publishIndex].env.CARGO_REGISTRY_TOKEN,
+    "${{ steps.crates_io_auth.outputs.token }}",
+  );
+  assert.match(job.steps[installIndex].run, /--registry crates-io/u);
+  assert.match(source, /cargo metadata --locked --no-deps/u);
+  assert.match(source, /cargo publish --dry-run --locked --package/u);
+  assert.match(source, /cargo publish --locked --package/u);
+  assert.doesNotMatch(source, /secrets\.|persist-credentials:\s*true/u);
+});
+
+test("crate publishing accepts only the planned Cargo package version", async () => {
+  const cargo = parseToml(await readFile("Cargo.toml", "utf8"));
+  const validRelease = {
+    app_name: cargo.package.name,
+    app_version: cargo.package.version,
+  };
+
+  const accepted = await runPublishPlanValidation({
+    releases: [validRelease],
+  });
+  assert.equal(accepted.result.status, 0, accepted.result.stderr);
+  assert.equal(accepted.output, `version=${cargo.package.version}\n`);
+
+  const rejectedPlans = [
+    { releases: [] },
+    { releases: [validRelease, validRelease] },
+    { releases: [{ ...validRelease, app_name: "another-crate" }] },
+    { releases: [{ ...validRelease, app_version: "999.0.0" }] },
+  ];
+  for (const plan of rejectedPlans) {
+    const rejected = await runPublishPlanValidation(plan);
+    assert.notEqual(rejected.result.status, 0);
+    assert.equal(rejected.output, "");
+  }
 });
 
 test("cargo-dist gates the compatibility tag on released Action E2E", async () => {
@@ -459,6 +611,7 @@ test("cargo-dist gates hosting on the native release authorization job", async (
   assert.deepEqual(config.dist["github-custom-job-permissions"], {
     "action-e2e": { contents: "read" },
     "authorize-release": { actions: "read", contents: "read" },
+    "publish-crate": { contents: "read", "id-token": "write" },
     "update-major-tag": { contents: "write" },
   });
 

@@ -194,6 +194,26 @@ export function hardenReleaseWorkflow(generated) {
   );
   hardened = transformJob(
     hardened,
+    "custom-publish-crate",
+    "announce",
+    (job) => {
+      let next = replaceOnce(
+        job,
+        "    secrets: inherit\n",
+        "",
+        "inherited secrets line",
+      );
+      next = replaceOnce(
+        next,
+        '      "id-token": "write"\n',
+        '      "id-token": "write" # crates.io exchanges the OIDC identity for a short-lived token.\n',
+        "crates.io OIDC permission",
+      );
+      return next;
+    },
+  );
+  hardened = transformJob(
+    hardened,
     "custom-action-e2e",
     "custom-update-major-tag",
     (job) =>
