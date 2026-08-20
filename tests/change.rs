@@ -180,6 +180,24 @@ fn attestation_profile_rejects_a_cross_adapter_change() {
 }
 
 #[test]
+fn full_profile_rejects_a_cross_adapter_change() {
+    let error = analyze_change_with_profile(
+        SourceFile {
+            path: Path::new("config.toml"),
+            text: "value = 1\n",
+        },
+        SourceFile {
+            path: Path::new("config.py"),
+            text: "value = 1\n",
+        },
+        AnalysisProfile::Full,
+    )
+    .expect_err("cross-adapter ownership cannot be paired");
+
+    assert!(matches!(error, AnalysisError::AmbiguousChange(_)));
+}
+
+#[test]
 fn full_profile_preserves_the_existing_snapshot_entry_point() {
     let file = SourceFile {
         path: Path::new("src/lib.rs"),
@@ -334,6 +352,111 @@ fn punctuation_only_comment_edit_is_not_attestation() {
 }
 
 #[test]
+fn default_ignorable_comment_edit_is_not_attestation() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream window.\nconst RETRY_LIMIT: usize = 3;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream\u{200b} window.\nconst RETRY_LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust change");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-owner-changed" && finding.line == 1
+        }),
+        "invisible formatting cannot masquerade as semantic review: {findings:#?}"
+    );
+}
+
+#[test]
+fn attestation_profile_ignores_all_default_ignorable_comment_edits() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled to the upstream window.\nconst RETRY_LIMIT: usize = 3;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// Coupled\u{fe0f} to the upstream\u{2060} window.\nconst RETRY_LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change_with_profile(before, after, AnalysisProfile::Attestation)
+        .expect("valid Rust change");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/comment-owner-changed"),
+        "Unicode default-ignorables cannot attest an owner change: {findings:#?}"
+    );
+}
+
+#[test]
+fn default_ignorables_cannot_hide_before_block_comment_decoration() {
+    let cases = [
+        (
+            "src/lib.rs",
+            concat!(
+                "/*\n",
+                " * Coupled to the upstream window. */\n",
+                "const RETRY_LIMIT: usize = 3;\n",
+            ),
+            concat!(
+                "/*\n",
+                " \u{200b}* Coupled to the upstream window. */\n",
+                "const RETRY_LIMIT: usize = 4;\n",
+            ),
+        ),
+        (
+            "worker.js",
+            concat!(
+                "function retry() {\n",
+                "    /*\n",
+                "     * Coupled to the upstream window.\n",
+                "     */\n",
+                "    return 3;\n",
+                "}\n",
+            ),
+            concat!(
+                "function retry() {\n",
+                "    /*\n",
+                "     \u{e0100}* Coupled to the upstream window.\n",
+                "     */\n",
+                "    return 4;\n",
+                "}\n",
+            ),
+        ),
+    ];
+
+    for profile in [AnalysisProfile::Full, AnalysisProfile::Attestation] {
+        for (path, before, after) in cases {
+            let findings = analyze_change_with_profile(
+                SourceFile {
+                    path: Path::new(path),
+                    text: before,
+                },
+                SourceFile {
+                    path: Path::new(path),
+                    text: after,
+                },
+                profile,
+            )
+            .expect("valid block-comment change");
+
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == "comment-policy/comment-owner-changed"),
+                "default-ignorables cannot hide before block decoration under {profile:?}: {findings:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn punctuation_only_comment_edit_does_not_change_the_owner_fingerprint() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),
@@ -426,6 +549,49 @@ fn added_empty_comments_still_activate_static_budget() {
             .iter()
             .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
         "normalized-empty comments still consume the static budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn added_default_ignorable_comments_still_activate_static_budget() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "const LIMIT: usize = 4;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// \u{200b}\n// \u{2060}\n// \u{fe0f}\n// \u{200b}\nconst LIMIT: usize = 4;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust comment addition");
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/leaf-comment-budget"),
+        "default-ignorable comments still consume the static budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn default_ignorable_only_separator_has_no_attestation_identity() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "// \u{200b}\nconst FIRST: usize = 1;\nconst SECOND: usize = 2;\n",
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: "const FIRST: usize = 1;\n// \u{200b}\nconst SECOND: usize = 2;\n",
+    };
+
+    let findings = analyze_change(before, after).expect("valid Rust comment move");
+
+    assert!(
+        findings.iter().all(|finding| {
+            finding.rule != "comment-policy/comment-owner-changed"
+                && finding.rule != "comment-policy/comment-reparented"
+        }),
+        "default-ignorable separators carry no cross-revision identity: {findings:#?}"
     );
 }
 

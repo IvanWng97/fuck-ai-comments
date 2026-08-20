@@ -1071,9 +1071,9 @@ fn base_compares_the_merge_base_to_head() {
 }
 
 #[test]
-fn cross_language_rename_analyzes_the_new_file_as_added() {
+fn full_profile_rejects_a_cross_language_rename() {
     let root = repository();
-    let shared_source = "# First explanation.\n# Second explanation.\n# Third explanation.\n# Fourth explanation.\nvalue = 1\n";
+    let shared_source = "value = 1\n";
     write(&root, "config.toml", shared_source);
     commit_all(&root, "add config");
     git(&root, ["mv", "--", "config.toml", "config.py"]);
@@ -1081,15 +1081,12 @@ fn cross_language_rename_analyzes_the_new_file_as_added() {
     let output = command(&root)
         .arg("check")
         .assert()
-        .code(1)
+        .code(2)
         .get_output()
         .clone();
-    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
-    assert!(
-        stdout.contains("config.py:1: comment-policy/file-comment-budget"),
-        "unexpected output: {stdout:?}"
-    );
+    assert!(stderr.contains("cannot attest a change across language adapters"));
 }
 
 #[test]

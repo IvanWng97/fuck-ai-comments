@@ -12,6 +12,10 @@ use crate::languages;
 use crate::model::{AnalysisError, AnalysisProfile, Finding, OwnerKind, Selection, SourceFile};
 use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
 
+mod attestation_key;
+
+use attestation_key::AttestationKey;
+
 const STALE_RULE: &str = "comment-policy/comment-owner-changed";
 const REPARENTED_RULE: &str = "comment-policy/comment-reparented";
 
@@ -38,9 +42,6 @@ pub(crate) fn analyze_with_profile(
     profile: AnalysisProfile,
 ) -> Result<Vec<Finding>, AnalysisError> {
     if !languages::same_adapter(before.path, after.path)? {
-        if profile.runs_static_policy() {
-            return languages::analyze_file(after.path, after.text, &Selection::all());
-        }
         return Err(AnalysisError::AmbiguousChange(format!(
             "cannot attest a change across language adapters: {} -> {}",
             before.path.display(),
@@ -864,43 +865,8 @@ fn group_comments<K: Ord>(
     groups
 }
 
-fn attestation_key(comment: &str) -> Option<String> {
-    let body = strip_comment_delimiters(comment.trim());
-    let collapsed = body
-        .lines()
-        .map(|line| line.trim().strip_prefix('*').unwrap_or(line.trim()).trim())
-        .filter(|line| !line.is_empty())
-        .flat_map(str::split_whitespace)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let key = collapsed
-        .trim_end_matches(['.', '!', '?', '。', '！', '？'])
-        .trim_end()
-        .to_owned();
-    (!key.is_empty()).then_some(key)
-}
-
-fn strip_comment_delimiters(comment: &str) -> &str {
-    [
-        ("<!--", "-->"),
-        ("/**", "*/"),
-        ("/*!", "*/"),
-        ("/*", "*/"),
-        ("\"\"\"", "\"\"\""),
-        ("'''", "'''"),
-    ]
-    .into_iter()
-    .find_map(|(prefix, suffix)| {
-        comment
-            .strip_prefix(prefix)
-            .and_then(|body| body.strip_suffix(suffix))
-    })
-    .or_else(|| {
-        ["///", "//!", "//", "#"]
-            .into_iter()
-            .find_map(|prefix| comment.strip_prefix(prefix))
-    })
-    .unwrap_or(comment)
+fn attestation_key(comment: &str) -> Option<AttestationKey> {
+    AttestationKey::from_comment(comment)
 }
 
 fn align_comment_group(
