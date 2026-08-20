@@ -142,7 +142,9 @@ where
                     roots.insert(relative.to_owned());
                 }
             }
-            if !has_library_target || conventional_root_is_a_target {
+            if conventional_root_is_a_target
+                || (!has_library_target && !path_exists(&conventional_root)?)
+            {
                 implicit_library_inputs.insert(conventional_root);
             }
         }
@@ -156,12 +158,16 @@ where
     })
 }
 
-pub(super) fn manifests_on_rust_source_ancestors<I, P>(sources: I) -> Result<BTreeSet<PathBuf>>
+pub(super) fn nearest_manifests_for_rust_sources<I, P>(
+    sources: I,
+    boundary: &Path,
+) -> Result<BTreeSet<PathBuf>>
 where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    let mut directories = BTreeSet::new();
+    let boundary = normalized_absolute_path(boundary, "Cargo manifest search boundary")?;
+    let mut manifests = BTreeSet::new();
     for source in sources {
         let source = source.as_ref();
         if source.extension() != Some(OsStr::new("rs")) {
@@ -171,16 +177,25 @@ where
         let directory = source
             .parent()
             .with_context(|| format!("{} has no parent directory", source.display()))?;
-        directories.extend(directory.ancestors().map(Path::to_owned));
-    }
-
-    let mut manifests = BTreeSet::new();
-    for directory in directories {
-        if let Some(manifest) = manifest_in_directory(&directory)? {
-            manifests.insert(manifest);
+        for ancestor in directory.ancestors() {
+            if !ancestor.starts_with(&boundary) {
+                break;
+            }
+            if let Some(manifest) = manifest_in_directory(ancestor)? {
+                manifests.insert(manifest);
+                break;
+            }
         }
     }
     Ok(manifests)
+}
+
+fn path_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("could not inspect {}", path.display())),
+    }
 }
 
 fn cargo_metadata(manifest: &Path) -> Result<CargoMetadata> {

@@ -1173,6 +1173,33 @@ fn base_allows_an_ordinary_src_lib_addition_with_a_custom_library_root() {
 }
 
 #[test]
+fn base_allows_an_ordinary_src_lib_addition_when_autolib_is_disabled() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"autolib-disabled\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "autolib = false\n",
+        ),
+    );
+    write(&root, "src/main.rs", "fn main() {}\n");
+    let base = commit_all(&root, "add binary package");
+    write(&root, "src/lib.rs", CLEAN_RUST);
+    let head = commit_all(&root, "add ordinary src lib file");
+
+    command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
 fn base_discovers_a_nested_cargo_project_without_a_root_manifest() {
     let _guard = serialize_resource_intensive_git_test();
     let root = repository();
@@ -1220,6 +1247,79 @@ fn base_discovers_a_nested_cargo_project_without_a_root_manifest() {
 
     command(&root)
         .args(["check", "--base", &base, "--head", &head, "rust"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn base_ignores_an_unrelated_cargo_project_outside_the_repository() {
+    let _guard = serialize_resource_intensive_git_test();
+    let outer = TempDir::new().expect("outer Cargo project should be created");
+    write(
+        &outer,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"outer-project\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+        ),
+    );
+    write(&outer, "src/lib.rs", CLEAN_RUST);
+    let root = tempfile::Builder::new()
+        .prefix("nested-repository-")
+        .tempdir_in(outer.path())
+        .expect("nested repository should be created");
+    git(&root, ["init", "--quiet"]);
+    git(&root, ["config", "user.email", "tests@example.com"]);
+    git(&root, ["config", "user.name", "Test User"]);
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"nested-repository\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[workspace]\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+    write(
+        &root,
+        "custom/root.rs",
+        concat!(
+            "//! before detail one\n",
+            "//! before detail two\n",
+            "//! before detail three\n",
+            "//! before detail four\n",
+            "//! before detail five\n",
+            "//! before detail six\n",
+            "pub fn work() -> usize { 1 }\n",
+        ),
+    );
+    let base = commit_all(&root, "add nested repository");
+    write(
+        &root,
+        "custom/root.rs",
+        concat!(
+            "//! after detail one\n",
+            "//! after detail two\n",
+            "//! after detail three\n",
+            "//! after detail four\n",
+            "//! after detail five\n",
+            "//! after detail six\n",
+            "pub fn work() -> usize { 2 }\n",
+        ),
+    );
+    let head = commit_all(&root, "change nested repository");
+
+    command(&root)
+        .args(["check", "--base", &base, "--head", &head])
         .assert()
         .code(0)
         .stdout("clean: 1 file scanned\n");

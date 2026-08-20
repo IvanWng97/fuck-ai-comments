@@ -55,12 +55,13 @@ pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result
         .into_iter()
         .map(|manifest| repository.root.join(manifest))
         .collect();
-    required_manifests.extend(cargo_context::manifests_on_rust_source_ancestors(
+    required_manifests.extend(cargo_context::nearest_manifests_for_rust_sources(
         changes
             .files
             .iter()
             .flat_map(|change| change.before.iter().chain(change.after.iter()))
             .map(|snapshot| repository.root.join(&snapshot.path)),
+        &repository.root,
     )?);
     let cargo_context = cargo_context::discover_with_manifests(
         &repository.root,
