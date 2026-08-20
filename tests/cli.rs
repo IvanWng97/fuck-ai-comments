@@ -485,8 +485,12 @@ fn all_rejects_invalid_repository_policy() {
             .clone();
         let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
+        let config_error = format!(
+            "could not load {}",
+            rendered_path("./fuck-ai-comments.toml")
+        );
         assert!(
-            stderr.contains("could not load ./fuck-ai-comments.toml"),
+            stderr.contains(&config_error),
             "{label}: unexpected stderr:\n{stderr}"
         );
         assert!(
