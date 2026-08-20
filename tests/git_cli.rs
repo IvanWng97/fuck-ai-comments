@@ -480,6 +480,75 @@ fn default_rejects_a_hidden_untracked_manifest_without_a_rust_change() {
 }
 
 #[test]
+fn default_rejects_a_gitignored_manifest_above_tracked_rust() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(&root, "nested/custom/root.rs", CLEAN_RUST);
+    commit_all(&root, "add ordinary tracked Rust source");
+    write(&root, ".gitignore", "nested/\n");
+    commit_all(&root, "ignore the nested directory");
+    write(
+        &root,
+        "nested/Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"gitignored-new-manifest\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+            "\n",
+            "[lib]\n",
+            "path = \"custom/root.rs\"\n",
+        ),
+    );
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(
+        stderr.contains("manifest nested/Cargo.toml is absent from HEAD"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn default_rejects_a_gitignored_implicit_library_addition() {
+    let _guard = serialize_resource_intensive_git_test();
+    let root = repository();
+    write(
+        &root,
+        "Cargo.toml",
+        concat!(
+            "[package]\n",
+            "name = \"gitignored-implicit-library\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+        ),
+    );
+    write(&root, "src/main.rs", "fn main() {}\n");
+    write(&root, ".gitignore", "src/lib.rs\n");
+    commit_all(&root, "add binary package");
+    write(&root, "src/lib.rs", CLEAN_RUST);
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(
+        stderr.contains("Cargo target inputs differ between HEAD and the worktree"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 fn attestation_profile_validates_a_clean_added_file() {
     let root = repository();
     write(&root, "untracked.rs", SLOPPY_RUST);

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +12,7 @@ use serde::Deserialize;
 #[cfg(test)]
 thread_local! {
     static CARGO_METADATA_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CARGO_MANIFEST_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -23,6 +24,14 @@ fn record_discovery() {
 fn record_discovery() {}
 
 #[cfg(test)]
+fn record_manifest_probe() {
+    CARGO_MANIFEST_PROBES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_manifest_probe() {}
+
+#[cfg(test)]
 pub(super) fn reset_discovery_count() {
     CARGO_METADATA_DISCOVERIES.with(|count| count.set(0));
 }
@@ -30,6 +39,16 @@ pub(super) fn reset_discovery_count() {
 #[cfg(test)]
 pub(super) fn cargo_metadata_discoveries() -> usize {
     CARGO_METADATA_DISCOVERIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_manifest_probe_count() {
+    CARGO_MANIFEST_PROBES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn manifest_probe_count() -> usize {
+    CARGO_MANIFEST_PROBES.with(std::cell::Cell::get)
 }
 
 pub(super) struct CargoContext {
@@ -168,6 +187,7 @@ where
 {
     let boundary = normalized_absolute_path(boundary, "Cargo manifest search boundary")?;
     let mut manifests = BTreeSet::new();
+    let mut nearest_by_directory = BTreeMap::new();
     for source in sources {
         let source = source.as_ref();
         if source.extension() != Some(OsStr::new("rs")) {
@@ -177,17 +197,40 @@ where
         let directory = source
             .parent()
             .with_context(|| format!("{} has no parent directory", source.display()))?;
-        for ancestor in directory.ancestors() {
-            if !ancestor.starts_with(&boundary) {
-                break;
-            }
-            if let Some(manifest) = manifest_in_directory(ancestor)? {
-                manifests.insert(manifest);
-                break;
-            }
+        if let Some(manifest) =
+            nearest_manifest_within(directory, &boundary, &mut nearest_by_directory)?
+        {
+            manifests.insert(manifest);
         }
     }
     Ok(manifests)
+}
+
+fn nearest_manifest_within(
+    directory: &Path,
+    boundary: &Path,
+    nearest_by_directory: &mut BTreeMap<PathBuf, Option<PathBuf>>,
+) -> Result<Option<PathBuf>> {
+    let mut uncached = Vec::new();
+    let mut nearest = None;
+    for ancestor in directory.ancestors() {
+        if !ancestor.starts_with(boundary) {
+            break;
+        }
+        if let Some(cached) = nearest_by_directory.get(ancestor) {
+            nearest = cached.clone();
+            break;
+        }
+        uncached.push(ancestor.to_owned());
+        if let Some(manifest) = manifest_in_directory(ancestor)? {
+            nearest = Some(manifest);
+            break;
+        }
+    }
+    for directory in uncached {
+        nearest_by_directory.insert(directory, nearest.clone());
+    }
+    Ok(nearest)
 }
 
 fn path_exists(path: &Path) -> Result<bool> {
@@ -314,6 +357,7 @@ fn nearest_manifest(directory: &Path) -> Result<Option<PathBuf>> {
 }
 
 fn manifest_in_directory(directory: &Path) -> Result<Option<PathBuf>> {
+    record_manifest_probe();
     let manifest = directory.join("Cargo.toml");
     match fs::symlink_metadata(&manifest) {
         Ok(metadata) if metadata.file_type().is_file() => Ok(Some(manifest)),
@@ -371,4 +415,32 @@ fn validated_absolute_path(path: &Path, label: &str) -> Result<PathBuf> {
         bail!("Cargo returned invalid {label} path {}", path.display());
     }
     Ok(path.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::{
+        manifest_probe_count, nearest_manifests_for_rust_sources, reset_manifest_probe_count,
+    };
+
+    #[test]
+    fn nearest_manifest_lookup_reuses_ancestor_probes_for_many_sources() {
+        let root = TempDir::new().expect("temporary directory should be created");
+        fs::write(root.path().join("Cargo.toml"), "[workspace]\n")
+            .expect("Cargo manifest should be written");
+        let source_directory = root.path().join("nested/src");
+        fs::create_dir_all(&source_directory).expect("source directory should be created");
+        let sources = (0..64).map(|index| source_directory.join(format!("module_{index}.rs")));
+        reset_manifest_probe_count();
+
+        let manifests = nearest_manifests_for_rust_sources(sources, root.path())
+            .expect("nearest manifests should be discovered");
+
+        assert_eq!(manifests, [root.path().join("Cargo.toml")].into());
+        assert_eq!(manifest_probe_count(), 3);
+    }
 }

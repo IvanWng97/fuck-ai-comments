@@ -50,8 +50,11 @@ pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result
     if !changes.scope_exists {
         bail!("scope {} does not exist", scope.display());
     }
-    let mut required_manifests: BTreeSet<_> = repository
-        .cargo_manifests_for_authority(&changes.cargo_authority)?
+    let CargoDiscoverySeeds {
+        manifests,
+        rust_sources,
+    } = repository.cargo_discovery_seeds_for_authority(&changes.cargo_authority)?;
+    let mut required_manifests: BTreeSet<_> = manifests
         .into_iter()
         .map(|manifest| repository.root.join(manifest))
         .collect();
@@ -63,12 +66,16 @@ pub(super) fn scan(scope: &Path, mode: Mode, profile: AnalysisProfile) -> Result
             .filter(|snapshot| is_cargo_manifest_path(&snapshot.path))
             .map(|snapshot| repository.root.join(&snapshot.path)),
     );
+    let authoritative_sources = rust_sources
+        .into_iter()
+        .map(|source| repository.root.join(source));
+    let changed_sources = changes
+        .files
+        .iter()
+        .flat_map(|change| change.before.iter().chain(change.after.iter()))
+        .map(|snapshot| repository.root.join(&snapshot.path));
     required_manifests.extend(cargo_context::nearest_manifests_for_rust_sources(
-        changes
-            .files
-            .iter()
-            .flat_map(|change| change.before.iter().chain(change.after.iter()))
-            .map(|snapshot| repository.root.join(&snapshot.path)),
+        authoritative_sources.chain(changed_sources),
         &repository.root,
     )?);
     let cargo_context = cargo_context::discover_with_manifests(
@@ -89,6 +96,11 @@ struct ScopeChanges {
     files: Vec<FileChange>,
     scope_exists: bool,
     cargo_authority: CargoAuthority,
+}
+
+struct CargoDiscoverySeeds {
+    manifests: BTreeSet<PathBuf>,
+    rust_sources: BTreeSet<PathBuf>,
 }
 
 enum CargoAuthority {
@@ -225,12 +237,24 @@ impl Repository {
                     &[before.as_str()],
                     "HEAD and the worktree",
                 )?;
-                let tracked = self.cargo_manifests_in_tree(before)?;
+                let tracked_paths = self.tracked_paths_in_tree(before)?;
+                self.require_worktree_implicit_inputs_match(
+                    context,
+                    &tracked_paths,
+                    "HEAD and the worktree",
+                )?;
+                let tracked = cargo_manifest_paths(&tracked_paths)?;
                 self.require_matching_cargo_manifests(context, &tracked, "HEAD")
             }
             CargoAuthority::Index { before } => {
                 self.require_unchanged_cargo_inputs(context, &[], "the index and the worktree")?;
-                let tracked = self.cargo_manifests_in_index()?;
+                let tracked_paths = self.tracked_paths_in_index()?;
+                self.require_worktree_implicit_inputs_match(
+                    context,
+                    &tracked_paths,
+                    "the index and the worktree",
+                )?;
+                let tracked = cargo_manifest_paths(&tracked_paths)?;
                 self.require_matching_cargo_manifests(context, &tracked, "the index")?;
                 if let Some(before) = before {
                     self.require_unchanged_cargo_inputs(
@@ -252,25 +276,32 @@ impl Repository {
                     &[after.as_str()],
                     "the head commit and the worktree",
                 )?;
-                let tracked = self.cargo_manifests_in_tree(after)?;
+                let tracked_paths = self.tracked_paths_in_tree(after)?;
+                self.require_worktree_implicit_inputs_match(
+                    context,
+                    &tracked_paths,
+                    "the head commit and the worktree",
+                )?;
+                let tracked = cargo_manifest_paths(&tracked_paths)?;
                 self.require_matching_cargo_manifests(context, &tracked, "the head commit")
             }
         }
     }
 
-    fn cargo_manifests_for_authority(
+    fn cargo_discovery_seeds_for_authority(
         &self,
         authority: &CargoAuthority,
-    ) -> Result<BTreeSet<PathBuf>> {
-        match authority {
+    ) -> Result<CargoDiscoverySeeds> {
+        let paths = match authority {
             CargoAuthority::Worktree {
                 before: Some(before),
-            } => self.cargo_manifests_in_tree(before),
+            } => self.tracked_paths_in_tree(before),
             CargoAuthority::Worktree { before: None } | CargoAuthority::Index { .. } => {
-                self.cargo_manifests_in_index()
+                self.tracked_paths_in_index()
             }
-            CargoAuthority::Commits { after, .. } => self.cargo_manifests_in_tree(after),
-        }
+            CargoAuthority::Commits { after, .. } => self.tracked_paths_in_tree(after),
+        }?;
+        cargo_discovery_seeds(&paths)
     }
 
     fn require_unchanged_cargo_inputs(
@@ -287,18 +318,7 @@ impl Repository {
         )?;
         require_clean_cargo_diff(&manifest_diff, snapshots)?;
 
-        let implicit_inputs = context
-            .implicit_library_inputs()
-            .map(|path| {
-                path.strip_prefix(&self.root).with_context(|| {
-                    format!(
-                        "Cargo target roles cannot be proven because implicit library input {} is outside Git repository {}",
-                        path.display(),
-                        self.root.display()
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let implicit_inputs = self.relative_implicit_inputs(context)?;
         if implicit_inputs.is_empty() {
             return Ok(());
         }
@@ -309,6 +329,59 @@ impl Repository {
             implicit_inputs,
         )?;
         require_clean_cargo_diff(&implicit_diff, snapshots)
+    }
+
+    fn require_worktree_implicit_inputs_match(
+        &self,
+        context: &cargo_context::CargoContext,
+        tracked_paths: &[u8],
+        snapshots: &str,
+    ) -> Result<()> {
+        let implicit_inputs = self.relative_implicit_inputs(context)?;
+        if implicit_inputs.is_empty() {
+            return Ok(());
+        }
+        let tracked: BTreeSet<_> = parse_nul_paths(tracked_paths)?.into_iter().collect();
+        for input in implicit_inputs {
+            let live = match fs::symlink_metadata(self.root.join(&input)) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "could not inspect implicit library input {}",
+                            input.display()
+                        )
+                    });
+                }
+            };
+            if live != tracked.contains(&input) {
+                bail!(
+                    "Cargo target roles cannot be proven because Cargo target inputs differ between {snapshots}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn relative_implicit_inputs(
+        &self,
+        context: &cargo_context::CargoContext,
+    ) -> Result<Vec<PathBuf>> {
+        context
+            .implicit_library_inputs()
+            .map(|path| {
+                path.strip_prefix(&self.root)
+                    .map(Path::to_owned)
+                    .with_context(|| {
+                        format!(
+                            "Cargo target roles cannot be proven because implicit library input {} is outside Git repository {}",
+                            path.display(),
+                            self.root.display()
+                        )
+                    })
+            })
+            .collect()
     }
 
     fn cargo_diff<I, S>(
@@ -334,25 +407,23 @@ impl Repository {
             .context("could not compare Cargo target inputs")
     }
 
-    fn cargo_manifests_in_tree(&self, tree: &ObjectId) -> Result<BTreeSet<PathBuf>> {
-        let output = self.git([
+    fn tracked_paths_in_tree(&self, tree: &ObjectId) -> Result<Vec<u8>> {
+        self.git([
             OsStr::new("ls-tree"),
             OsStr::new("-r"),
             OsStr::new("-z"),
             OsStr::new("--name-only"),
             OsStr::new(tree.as_str()),
-        ])?;
-        cargo_manifest_paths(&output)
+        ])
     }
 
-    fn cargo_manifests_in_index(&self) -> Result<BTreeSet<PathBuf>> {
-        let output = self.git([
+    fn tracked_paths_in_index(&self) -> Result<Vec<u8>> {
+        self.git([
             OsStr::new("ls-files"),
             OsStr::new("--cached"),
             OsStr::new("--full-name"),
             OsStr::new("-z"),
-        ])?;
-        cargo_manifest_paths(&output)
+        ])
     }
 
     fn require_matching_cargo_manifests(
@@ -991,6 +1062,23 @@ fn cargo_manifest_paths(output: &[u8]) -> Result<BTreeSet<PathBuf>> {
         .into_iter()
         .filter(|path| is_cargo_manifest_path(path))
         .collect())
+}
+
+fn cargo_discovery_seeds(output: &[u8]) -> Result<CargoDiscoverySeeds> {
+    let mut manifests = BTreeSet::new();
+    let mut rust_sources = BTreeSet::new();
+    for path in parse_nul_paths(output)? {
+        if is_cargo_manifest_path(&path) {
+            manifests.insert(path.clone());
+        }
+        if path.extension() == Some(OsStr::new("rs")) {
+            rust_sources.insert(path);
+        }
+    }
+    Ok(CargoDiscoverySeeds {
+        manifests,
+        rust_sources,
+    })
 }
 
 fn is_cargo_manifest_path(path: &Path) -> bool {
