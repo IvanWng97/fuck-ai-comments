@@ -205,6 +205,7 @@ fn rustdoc_policy_recognizes_inner_docs_on_module_bodies() {
         root.path().join("module.rs"),
         concat!(
             "mod internal {\n",
+            "    #![allow(dead_code)]\n",
             "    //! First line of module documentation.\n",
             "    //! Second line of module documentation.\n",
             "    //! Third line of module documentation.\n",
@@ -220,6 +221,55 @@ fn rustdoc_policy_recognizes_inner_docs_on_module_bodies() {
         .assert()
         .code(0)
         .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn rustdoc_policy_does_not_exempt_inner_docs_after_items() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("late-file.rs"),
+        concat!(
+            "fn before() {}\n",
+            "//! Late inner doc line one.\n",
+            "//! Late inner doc line two.\n",
+            "//! Late inner doc line three.\n",
+            "//! Late inner doc line four.\n",
+        ),
+    )
+    .expect("late file docs should be written");
+    fs::write(
+        root.path().join("late-module.rs"),
+        concat!(
+            "mod internal {\n",
+            "    fn before() {}\n",
+            "    //! Late module doc line one.\n",
+            "    //! Late module doc line two.\n",
+            "    //! Late module doc line three.\n",
+            "    //! Late module doc line four.\n",
+            "}\n",
+        ),
+    )
+    .expect("late module docs should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("late-file.rs:2: comment-policy/comment-block-budget"));
+    assert!(stdout.contains("late-module.rs:3: comment-policy/comment-block-budget"));
 }
 
 #[test]
