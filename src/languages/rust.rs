@@ -12,7 +12,7 @@ use crate::RustFileRole;
 use crate::config::PolicyConfig;
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, ParsedFile, Span};
+use crate::policy::{CommentAttachmentScope, CommentClassification, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Rust {
@@ -273,28 +273,30 @@ impl LanguageSpec for Rust {
         node: Node<'_>,
         source: &str,
         context: &Self::Context,
-    ) -> Option<CommentKind> {
+    ) -> Option<CommentClassification> {
         if !is_comment(node) {
             return None;
         }
         if is_public_rustdoc(node, source, self.file_role, context) {
-            return Some(if is_inner_rustdoc(node, source) {
-                CommentKind::FilePublicDocs
+            let attachment = if is_inner_rustdoc(node, source) {
+                CommentAttachmentScope::File
             } else {
-                CommentKind::PublicDocs
-            });
+                CommentAttachmentScope::Inferred
+            };
+            return Some(CommentClassification::public_documentation(attachment));
         }
         if is_attached_rustdoc(node, source, context) {
-            return Some(if is_inner_rustdoc(node, source) {
-                CommentKind::FileRustDocs
+            let attachment = if is_inner_rustdoc(node, source) {
+                CommentAttachmentScope::File
             } else {
-                CommentKind::RustDocs
-            });
+                CommentAttachmentScope::Inferred
+            };
+            return Some(CommentClassification::documentation(attachment));
         }
         if context.safety_proof_comments.contains(&node.id()) {
-            return Some(CommentKind::SafetyProof);
+            return Some(CommentClassification::safety_proof());
         }
-        Some(CommentKind::Narrative)
+        Some(CommentClassification::narrative())
     }
 }
 

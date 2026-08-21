@@ -10,8 +10,8 @@ use crate::config::PolicyConfig;
 use crate::identity::IdentityArena;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::{
-    CodeToken, Comment, CommentKind, CommentSnapshot, LEAF_COMMENT_MAX_LINES, OwnerSnapshot,
-    ParsedFile, Span, configured_comment_cap_findings, file_findings,
+    CodeToken, Comment, CommentClassification, CommentSnapshot, LEAF_COMMENT_MAX_LINES,
+    OwnerSnapshot, ParsedFile, Span, configured_category_cap_findings, file_findings,
     owner_comment_cap_finding_with_policy,
 };
 
@@ -262,7 +262,7 @@ pub(crate) fn analyze_file(
         .iter()
         .map(|comment| Comment {
             span: comment.span.clone(),
-            kind: comment.kind,
+            classification: comment.classification,
             text: comment.text.clone(),
         })
         .collect();
@@ -296,7 +296,7 @@ pub(crate) fn analyze_file(
             &owned_comments,
             policy,
         ));
-        findings.extend(configured_comment_cap_findings(
+        findings.extend(configured_category_cap_findings(
             path,
             &owner_label,
             &owned_comments,
@@ -305,7 +305,7 @@ pub(crate) fn analyze_file(
         let lines: BTreeSet<_> = owned
             .iter()
             .map(|comment_index| &document.comments[*comment_index])
-            .filter(|comment| comment.kind.uses_relative_budget(policy))
+            .filter(|comment| comment.classification.uses_relative_budget(policy))
             .flat_map(|comment| comment.span.lines())
             .collect();
         if lines.len() > LEAF_COMMENT_MAX_LINES {
@@ -387,7 +387,7 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
             let parser_span = comment.token.span();
             let text = source_slice(path, source, parser_span.start(), parser_span.end())?;
             Ok(CommentSnapshot {
-                kind: CommentKind::Narrative,
+                classification: CommentClassification::narrative(),
                 text: text.to_owned(),
                 span: Span {
                     start_byte: parser_span.start(),

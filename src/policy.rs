@@ -15,7 +15,7 @@ const FILE_CODE_LINES_PER_COMMENT: usize = 16;
 pub(crate) const LEAF_COMMENT_MAX_LINES: usize = 3;
 const TEMPLATE_COMMENT_MAX_LINES: usize = 3;
 const OWNER_COMMENT_CAP_RULE: &str = "comment-policy/owner-comment-cap";
-const COMMENT_TYPE_CAP_RULE: &str = "comment-policy/comment-type-cap";
+const COMMENT_CATEGORY_CAP_RULE: &str = "comment-policy/comment-category-cap";
 
 #[cfg(test)]
 thread_local! {
@@ -137,22 +137,28 @@ impl IdentitySource {
 #[derive(Debug, Clone)]
 pub(crate) struct Comment {
     pub(crate) span: Span,
-    pub(crate) kind: CommentKind,
+    pub(crate) classification: CommentClassification,
     pub(crate) text: String,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CommentClassification {
+    role: CommentRole,
+    attachment: CommentAttachmentScope,
+}
+
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum CommentKind {
+enum CommentRole {
     Narrative,
-    Docstring,
-    FileDocstring,
-    TypeDocstring,
-    RustDocs,
-    FileRustDocs,
-    ToolDirective,
+    Documentation(DocumentationAudience),
     SafetyProof,
-    PublicDocs,
-    FilePublicDocs,
+    ToolDirective,
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum DocumentationAudience {
+    General,
+    Public,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -162,54 +168,60 @@ pub(crate) enum CommentAttachmentScope {
     Inferred,
 }
 
-#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-enum CommentCategory {
-    Narrative,
-    Docstring,
-    Rustdoc,
-    SafetyProof,
-    ToolDirective,
-}
-
-impl CommentKind {
-    pub(crate) const fn attachment(self) -> CommentAttachmentScope {
-        match self {
-            Self::FileDocstring | Self::FileRustDocs | Self::FilePublicDocs => {
-                CommentAttachmentScope::File
-            }
-            Self::TypeDocstring => CommentAttachmentScope::Type,
-            Self::Narrative
-            | Self::Docstring
-            | Self::RustDocs
-            | Self::ToolDirective
-            | Self::SafetyProof
-            | Self::PublicDocs => CommentAttachmentScope::Inferred,
+impl CommentClassification {
+    pub(crate) const fn narrative() -> Self {
+        Self {
+            role: CommentRole::Narrative,
+            attachment: CommentAttachmentScope::Inferred,
         }
+    }
+
+    pub(crate) const fn documentation(attachment: CommentAttachmentScope) -> Self {
+        Self {
+            role: CommentRole::Documentation(DocumentationAudience::General),
+            attachment,
+        }
+    }
+
+    pub(crate) const fn public_documentation(attachment: CommentAttachmentScope) -> Self {
+        Self {
+            role: CommentRole::Documentation(DocumentationAudience::Public),
+            attachment,
+        }
+    }
+
+    pub(crate) const fn safety_proof() -> Self {
+        Self {
+            role: CommentRole::SafetyProof,
+            attachment: CommentAttachmentScope::Inferred,
+        }
+    }
+
+    pub(crate) const fn tool_directive() -> Self {
+        Self {
+            role: CommentRole::ToolDirective,
+            attachment: CommentAttachmentScope::Inferred,
+        }
+    }
+
+    pub(crate) const fn attachment(self) -> CommentAttachmentScope {
+        self.attachment
     }
 
     fn static_policy(self, policy: &PolicyConfig) -> StaticPolicy {
-        match self {
-            Self::Narrative => policy.narrative(),
-            Self::Docstring | Self::FileDocstring | Self::TypeDocstring => policy.docstring(),
-            Self::RustDocs | Self::FileRustDocs => policy.rustdoc(false),
-            Self::PublicDocs | Self::FilePublicDocs => policy.rustdoc(true),
-            Self::SafetyProof => policy.safety_proof(),
-            Self::ToolDirective => policy.tool_directive(),
+        match self.role {
+            CommentRole::Narrative => policy.narrative(),
+            CommentRole::Documentation(DocumentationAudience::General) => policy.documentation(),
+            CommentRole::Documentation(DocumentationAudience::Public) => {
+                policy.public_documentation()
+            }
+            CommentRole::SafetyProof => policy.safety_proof(),
+            CommentRole::ToolDirective => policy.tool_directive(),
         }
     }
 
-    fn category(self) -> CommentCategory {
-        match self {
-            Self::Narrative => CommentCategory::Narrative,
-            Self::Docstring | Self::FileDocstring | Self::TypeDocstring => {
-                CommentCategory::Docstring
-            }
-            Self::RustDocs | Self::FileRustDocs | Self::PublicDocs | Self::FilePublicDocs => {
-                CommentCategory::Rustdoc
-            }
-            Self::SafetyProof => CommentCategory::SafetyProof,
-            Self::ToolDirective => CommentCategory::ToolDirective,
-        }
+    const fn role(self) -> CommentRole {
+        self.role
     }
 
     pub(crate) fn uses_relative_budget(self, policy: &PolicyConfig) -> bool {
@@ -306,7 +318,7 @@ pub(crate) struct OwnerSnapshot {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommentSnapshot {
-    pub(crate) kind: CommentKind,
+    pub(crate) classification: CommentClassification,
     pub(crate) text: String,
     pub(crate) span: Span,
     pub(crate) owner: usize,
@@ -391,7 +403,7 @@ pub(crate) fn tree_document(
         .iter()
         .zip(&input.ownership.comment_owners)
         .map(|(comment, owner)| CommentSnapshot {
-            kind: comment.kind,
+            classification: comment.classification,
             text: comment.text.clone(),
             span: comment.span.clone(),
             owner: owner.map_or(0, |owner| {
@@ -480,12 +492,12 @@ pub(crate) fn template_findings(
     )
     .into_iter()
     .collect::<Vec<_>>();
-    findings.extend(configured_comment_cap_findings(
+    findings.extend(configured_category_cap_findings(
         path, "template", comments, policy,
     ));
     let narrative: Vec<Comment> = comments
         .iter()
-        .filter(|comment| comment.kind.uses_relative_budget(policy))
+        .filter(|comment| comment.classification.uses_relative_budget(policy))
         .cloned()
         .collect();
     let lines = comment_lines(&narrative);
@@ -597,7 +609,7 @@ fn scoped_owner_findings(
     )
     .into_iter()
     .collect::<Vec<_>>();
-    findings.extend(configured_comment_cap_findings(
+    findings.extend(configured_category_cap_findings(
         path,
         &owner_label,
         &budget_comments,
@@ -605,7 +617,7 @@ fn scoped_owner_findings(
     ));
     let narrative: Vec<Comment> = budget_comments
         .iter()
-        .filter(|comment| comment.kind.uses_relative_budget(policy))
+        .filter(|comment| comment.classification.uses_relative_budget(policy))
         .cloned()
         .collect();
     let narrative_lines = comment_lines(&narrative);
@@ -662,7 +674,7 @@ fn leaf_findings(
     for (leaf, owned_comments) in leaves.iter().zip(owned) {
         let narrative: Vec<Comment> = owned_comments
             .iter()
-            .filter(|comment| comment.kind.uses_relative_budget(policy))
+            .filter(|comment| comment.classification.uses_relative_budget(policy))
             .cloned()
             .collect();
         let narrative_lines = comment_lines(&narrative);
@@ -678,7 +690,7 @@ fn leaf_findings(
             owned_comments,
             policy,
         ));
-        findings.extend(configured_comment_cap_findings(
+        findings.extend(configured_category_cap_findings(
             path,
             &format!("{language} leaf `{}`", leaf.name),
             owned_comments,
@@ -752,7 +764,7 @@ fn file_findings_with_lines(
     )
     .into_iter()
     .collect::<Vec<_>>();
-    findings.extend(configured_comment_cap_findings(
+    findings.extend(configured_category_cap_findings(
         path,
         "file scope",
         comments,
@@ -760,7 +772,7 @@ fn file_findings_with_lines(
     ));
     let narrative: Vec<Comment> = comments
         .iter()
-        .filter(|comment| comment.kind.uses_relative_budget(policy))
+        .filter(|comment| comment.classification.uses_relative_budget(policy))
         .cloned()
         .collect();
     let narrative_lines = comment_lines(&narrative);
@@ -808,12 +820,12 @@ pub(crate) fn owner_comment_cap_finding_with_policy(
 ) -> Option<Finding> {
     let lines: BTreeSet<usize> = comments
         .iter()
-        .filter(|comment| comment.kind.uses_absolute_owner_cap(policy))
+        .filter(|comment| comment.classification.uses_absolute_owner_cap(policy))
         .flat_map(|comment| comment.span.lines())
         .collect();
     let relative_lines: BTreeSet<usize> = comments
         .iter()
-        .filter(|comment| comment.kind.uses_relative_budget(policy))
+        .filter(|comment| comment.classification.uses_relative_budget(policy))
         .flat_map(|comment| comment.span.lines())
         .collect();
     let allowance = match owner_kind {
@@ -833,19 +845,19 @@ pub(crate) fn owner_comment_cap_finding_with_policy(
     })
 }
 
-pub(crate) fn configured_comment_cap_findings(
+pub(crate) fn configured_category_cap_findings(
     path: &Path,
     owner: &str,
     comments: &[Comment],
     policy: &PolicyConfig,
 ) -> Vec<Finding> {
-    let mut capped_lines: BTreeMap<(CommentCategory, usize), BTreeSet<usize>> = BTreeMap::new();
+    let mut capped_lines: BTreeMap<(CommentRole, usize), BTreeSet<usize>> = BTreeMap::new();
     for comment in comments {
-        let StaticPolicy::Capped(allowance) = comment.kind.static_policy(policy) else {
+        let StaticPolicy::Capped(allowance) = comment.classification.static_policy(policy) else {
             continue;
         };
         capped_lines
-            .entry((comment.kind.category(), allowance))
+            .entry((comment.classification.role(), allowance))
             .or_default()
             .extend(comment.span.lines());
     }
@@ -855,7 +867,7 @@ pub(crate) fn configured_comment_cap_findings(
             (lines.len() > allowance).then(|| Finding {
                 path: path.display().to_string(),
                 line: first_line(&lines),
-                rule: COMMENT_TYPE_CAP_RULE,
+                rule: COMMENT_CATEGORY_CAP_RULE,
                 message: format!(
                     "{owner} owns {} {} comment lines; configured allowance is {allowance}",
                     lines.len(),
@@ -866,12 +878,12 @@ pub(crate) fn configured_comment_cap_findings(
         .collect()
 }
 
-impl CommentCategory {
+impl CommentRole {
     const fn label(self) -> &'static str {
         match self {
             Self::Narrative => "narrative",
-            Self::Docstring => "docstring",
-            Self::Rustdoc => "rustdoc",
+            Self::Documentation(DocumentationAudience::General) => "documentation",
+            Self::Documentation(DocumentationAudience::Public) => "public-documentation",
             Self::SafetyProof => "safety-proof",
             Self::ToolDirective => "tool-directive",
         }
@@ -1021,8 +1033,9 @@ mod tests {
     use crate::{Finding, SourceFile, analyze_all};
 
     use super::{
-        Comment, CommentKind, PhysicalCommentPositions, Span, comment_blocks, line_start_storage,
-        physical_line_scan_work, reset_line_start_storage, reset_physical_line_scan_work,
+        Comment, CommentClassification, PhysicalCommentPositions, Span, comment_blocks,
+        line_start_storage, physical_line_scan_work, reset_line_start_storage,
+        reset_physical_line_scan_work,
     };
 
     #[test]
@@ -1146,7 +1159,7 @@ mod tests {
                             start_line: line,
                             end_line: line,
                         },
-                        kind: CommentKind::Narrative,
+                        classification: CommentClassification::narrative(),
                         text,
                     });
                     if index + 1 < lines.len() {

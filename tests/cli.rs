@@ -143,10 +143,10 @@ fn all_honors_an_unlimited_rustdoc_policy_from_the_repository_config() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -180,10 +180,10 @@ fn all_discovers_the_repository_config_for_a_nested_scope() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
             "[comments.narrative]\n",
-            "policy = \"unlimited\"\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -235,9 +235,9 @@ fn all_rejects_a_git_root_that_does_not_contain_the_scope() {
     fs::write(
         redirected.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "[comments.narrative]\n",
-            "policy = \"unlimited\"\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("redirected policy configuration should be written");
@@ -264,10 +264,10 @@ fn rustdoc_policy_does_not_exempt_unattached_doc_syntax() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -301,9 +301,9 @@ fn rustdoc_policy_does_not_exempt_inner_doc_syntax_outside_module_bodies() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -340,9 +340,9 @@ fn rustdoc_policy_recognizes_inner_docs_on_module_bodies() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -374,9 +374,9 @@ fn rustdoc_policy_does_not_exempt_inner_docs_after_items() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -423,9 +423,9 @@ fn rustdoc_policy_recognizes_documented_tuple_fields() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -456,10 +456,10 @@ fn all_enforces_a_configured_rustdoc_line_cap() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     )
@@ -482,8 +482,8 @@ fn all_enforces_a_configured_rustdoc_line_cap() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
-    assert!(stdout.contains("2 rustdoc comment lines; configured allowance is 1"));
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-category-cap"));
+    assert!(stdout.contains("2 documentation comment lines; configured allowance is 1"));
     assert!(stdout.contains("1 violation in 1 file"));
 }
 
@@ -493,9 +493,9 @@ fn capped_rustdoc_is_budgeted_per_rust_type() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     )
@@ -567,9 +567,9 @@ fn capped_rustdoc_recognizes_every_rust_type_owner() {
         fs::write(
             root.path().join("fuck-ai-comments.toml"),
             concat!(
-                "schema-version = 1\n",
-                "[comments.rustdoc]\n",
-                "policy = \"capped\"\n",
+                "schema-version = 2\n",
+                "[comments.documentation]\n",
+                "mode = \"capped\"\n",
                 "max-lines = 1\n",
             ),
         )
@@ -597,9 +597,9 @@ fn capped_rustdoc_reports_the_type_even_with_an_attribute_prefix() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     )
@@ -624,7 +624,8 @@ fn capped_rustdoc_reports_the_type_even_with_an_attribute_prefix() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(
-        stdout.contains("type `First` owns 2 rustdoc comment lines; configured allowance is 1")
+        stdout
+            .contains("type `First` owns 2 documentation comment lines; configured allowance is 1")
     );
     assert!(
         !stdout.contains("file scope owns"),
@@ -638,9 +639,9 @@ fn capped_rustdoc_reports_a_readable_impl_owner() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     )
@@ -668,13 +669,12 @@ fn capped_rustdoc_reports_a_readable_impl_owner() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(
-        stdout
-            .contains("type `impl Record` owns 2 rustdoc comment lines; configured allowance is 1")
-    );
+    assert!(stdout.contains(
+        "type `impl Record` owns 2 documentation comment lines; configured allowance is 1"
+    ));
     assert!(
         stdout.contains(
-            "type `impl !Service <u8> for Record` owns 2 rustdoc comment lines; configured allowance is 1"
+            "type `impl !Service <u8> for Record` owns 2 documentation comment lines; configured allowance is 1"
         ),
         "unexpected stdout:\n{stdout}"
     );
@@ -701,9 +701,12 @@ fn capped_inner_rustdoc_remains_at_file_scope_before_a_type() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 1\n",
+            "[comments.public-documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     )
@@ -724,10 +727,13 @@ fn capped_inner_rustdoc_remains_at_file_scope_before_a_type() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    for path in ["src/lib.rs", "src/model.rs"] {
+    for (path, category) in [
+        ("src/lib.rs", "public-documentation"),
+        ("src/model.rs", "documentation"),
+    ] {
         let finding = format!(
-            "{}:1: comment-policy/comment-type-cap: file scope owns 2 rustdoc comment lines; configured allowance is 1",
-            rendered_path(path)
+            "{}:1: comment-policy/comment-category-cap: file scope owns 2 {category} comment lines; configured allowance is 1",
+            rendered_path(path),
         );
         assert!(stdout.contains(&finding), "unexpected stdout:\n{stdout}");
     }
@@ -744,9 +750,9 @@ fn configured_type_cap_can_raise_the_builtin_owner_ceiling() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 10\n",
         ),
     )
@@ -793,9 +799,9 @@ fn rustdoc_relative_policy_can_tighten_public_documentation() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"relative\"\n",
+            "schema-version = 2\n",
+            "[comments.public-documentation]\n",
+            "mode = \"relative\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -829,47 +835,46 @@ fn all_rejects_invalid_repository_policy() {
     let cases = [
         (
             "unknown field",
-            "schema-version = 1\nunknown = true\n",
+            "schema-version = 2\nunknown = true\n",
             "unknown field `unknown`",
         ),
         (
             "unsupported schema",
-            "schema-version = 2\n",
-            "unsupported schema-version 2; expected 1",
+            "schema-version = 1\n",
+            "unsupported schema-version 1; expected 2",
         ),
         (
             "invalid exclusion",
-            "schema-version = 1\nexclude = [\"src/{generated,vendor\"]\n",
+            "schema-version = 2\nexclude = [\"src/{generated,vendor\"]\n",
             "invalid exclude pattern 1",
         ),
         (
             "missing cap",
             concat!(
-                "schema-version = 1\n",
-                "[comments.rustdoc]\n",
-                "policy = \"capped\"\n",
+                "schema-version = 2\n",
+                "[comments.documentation]\n",
+                "mode = \"capped\"\n",
             ),
-            "comments.rustdoc.max-lines is required",
+            "comments.documentation.max-lines is required",
         ),
         (
-            "zero cap",
+            "legacy policy field",
             concat!(
-                "schema-version = 1\n",
-                "[comments.rustdoc]\n",
-                "policy = \"capped\"\n",
-                "max-lines = 0\n",
+                "schema-version = 2\n",
+                "[comments.documentation]\n",
+                "policy = \"unlimited\"\n",
             ),
-            "comments.rustdoc.max-lines must be greater than zero",
+            "unknown field `policy`",
         ),
         (
             "unused cap",
             concat!(
-                "schema-version = 1\n",
-                "[comments.rustdoc]\n",
-                "policy = \"unlimited\"\n",
+                "schema-version = 2\n",
+                "[comments.documentation]\n",
+                "mode = \"unlimited\"\n",
                 "max-lines = 2\n",
             ),
-            "comments.rustdoc.max-lines is only valid when policy = \"capped\"",
+            "comments.documentation.max-lines is only valid when mode = \"capped\"",
         ),
     ];
 
@@ -912,10 +917,10 @@ fn all_uses_an_explicit_policy_configuration() {
     fs::write(
         root.path().join("custom-policy.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -945,9 +950,9 @@ fn all_explicit_config_skips_repository_discovery() {
     fs::write(
         root.path().join("custom-policy.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "[comments.narrative]\n",
-            "policy = \"unlimited\"\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("explicit policy configuration should be written");
@@ -976,10 +981,10 @@ fn all_applies_narrative_policy_to_non_rust_languages() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
             "[comments.narrative]\n",
-            "policy = \"unlimited\"\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -1008,11 +1013,11 @@ fn all_applies_a_docstring_cap_independently_from_narrative() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "[comments.narrative]\n",
-            "policy = \"unlimited\"\n",
-            "[comments.docstring]\n",
-            "policy = \"capped\"\n",
+            "mode = \"unlimited\"\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     )
@@ -1036,10 +1041,11 @@ fn all_applies_a_docstring_cap_independently_from_narrative() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("comment-policy/comment-type-cap"));
+    assert!(stdout.contains("comment-policy/comment-category-cap"));
     assert!(
-        stdout
-            .contains("function `work` owns 2 docstring comment lines; configured allowance is 1")
+        stdout.contains(
+            "function `work` owns 2 documentation comment lines; configured allowance is 1"
+        )
     );
 }
 
@@ -1049,9 +1055,9 @@ fn all_can_make_docstrings_unlimited_without_exempting_narrative() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
-            "[comments.docstring]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -1083,7 +1089,7 @@ fn all_can_make_docstrings_unlimited_without_exempting_narrative() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(stdout.contains("comment-policy/comment-block-budget"));
-    assert!(!stdout.contains("docstring comment lines"));
+    assert!(!stdout.contains("documentation comment lines"));
 }
 
 #[test]
@@ -1099,7 +1105,7 @@ fn all_applies_repository_relative_exclusions_to_a_nested_scope() {
         .expect("source directories should be created");
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
-        concat!("schema-version = 1\n", "exclude = [\"src/generated/**\"]\n",),
+        concat!("schema-version = 2\n", "exclude = [\"src/generated/**\"]\n",),
     )
     .expect("policy configuration should be written");
     fs::write(root.path().join("src/keep.py"), "VALUE = 1\n")
@@ -1137,7 +1143,7 @@ fn all_keeps_exclusion_coordinates_through_a_symlinked_scan_root() {
         .expect("source directories should be created");
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
-        "schema-version = 1\nexclude = [\"src/generated/**\"]\n",
+        "schema-version = 2\nexclude = [\"src/generated/**\"]\n",
     )
     .expect("policy configuration should be written");
     fs::write(root.path().join("src/keep.py"), "VALUE = 1\n")
@@ -1160,9 +1166,9 @@ fn all_applies_narrative_policy_to_container_and_toml_owners() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "[comments.narrative]\n",
-            "policy = \"unlimited\"\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -1202,10 +1208,10 @@ fn all_applies_unlimited_policy_to_structural_safety_proofs() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
             "[comments.safety-proof]\n",
-            "policy = \"unlimited\"\n",
+            "mode = \"unlimited\"\n",
         ),
     )
     .expect("policy configuration should be written");
@@ -1241,10 +1247,10 @@ fn all_applies_a_line_cap_to_structural_tool_directives() {
     fs::write(
         root.path().join("fuck-ai-comments.toml"),
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "\n",
             "[comments.tool-directive]\n",
-            "policy = \"capped\"\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     )
@@ -1270,7 +1276,7 @@ fn all_applies_a_line_cap_to_structural_tool_directives() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("directives.js:2: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("directives.js:2: comment-policy/comment-category-cap"));
     assert!(stdout.contains("2 tool-directive comment lines; configured allowance is 1"));
 }
 

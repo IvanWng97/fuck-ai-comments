@@ -1124,7 +1124,9 @@ fn semantic_selection(
             Some(after_index) => {
                 let old_comment = &before.comments[before_index];
                 let new_comment = &after.comments[*after_index];
-                if old_comment.kind != new_comment.kind || old_comment.text != new_comment.text {
+                if old_comment.classification != new_comment.classification
+                    || old_comment.text != new_comment.text
+                {
                     affected.insert(after.comments[*after_index].owner);
                 }
                 let old_owner = old_comment.owner;
@@ -1213,7 +1215,7 @@ fn change_findings(
         };
         let new_owner = &after.owners[after_owner_index];
         if owner_changes.changed(before, after, old_comment.owner, after_owner_index)
-            || old_comment.kind != new_comment.kind
+            || old_comment.classification != new_comment.classification
         {
             findings.push(Finding {
                 path: after_file.path.display().to_string(),
@@ -1511,7 +1513,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::policy::CommentKind;
+    use crate::policy::CommentClassification;
 
     fn nested_kotlin(depth: usize, value: usize) -> String {
         let mut source = String::new();
@@ -1932,7 +1934,7 @@ mod tests {
     fn comment_span_sweep_unions_out_of_order_container_coverage() {
         let comments =
             [(4, 8), (0, 6), (13, 17), (9, 15)].map(|(start_byte, end_byte)| CommentSnapshot {
-                kind: CommentKind::Narrative,
+                classification: CommentClassification::narrative(),
                 text: "container comment".to_owned(),
                 span: Span {
                     start_byte,

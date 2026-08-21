@@ -9,7 +9,7 @@ use super::tree::{
 };
 use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, ParsedFile, Span};
+use crate::policy::{CommentAttachmentScope, CommentClassification, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Swift;
@@ -45,7 +45,9 @@ impl LanguageSpec for Swift {
         Ok(AttachmentIndex::with_syntax(
             root,
             source,
-            AttachmentSyntax::default().with_physical_lines(),
+            AttachmentSyntax::default()
+                .with_documentation_comments(is_swift_documentation)
+                .with_physical_lines(),
         ))
     }
 
@@ -70,18 +72,51 @@ impl LanguageSpec for Swift {
         node: Node<'_>,
         source: &str,
         context: &Self::Context,
-    ) -> Option<CommentKind> {
+    ) -> Option<CommentClassification> {
         match node.kind() {
             "comment" | "multiline_comment"
                 if swift_directive(node_text(node, source))
                     .is_some_and(|placement| context.is_attached(node, placement)) =>
             {
-                Some(CommentKind::ToolDirective)
+                Some(CommentClassification::tool_directive())
             }
-            "comment" | "multiline_comment" => Some(CommentKind::Narrative),
+            "comment" | "multiline_comment"
+                if context.is_leading_documentation(node, is_documentable_declaration) =>
+            {
+                Some(CommentClassification::documentation(
+                    CommentAttachmentScope::Inferred,
+                ))
+            }
+            "comment" | "multiline_comment" => Some(CommentClassification::narrative()),
             _ => None,
         }
     }
+}
+
+fn is_swift_documentation(comment: &str) -> bool {
+    let comment = comment.trim_start();
+    comment.starts_with("/**") || comment.starts_with("///")
+}
+
+fn is_documentable_declaration(kind: &str) -> bool {
+    matches!(
+        kind,
+        "class_declaration"
+            | "protocol_declaration"
+            | "function_declaration"
+            | "protocol_function_declaration"
+            | "init_declaration"
+            | "deinit_declaration"
+            | "subscript_declaration"
+            | "property_declaration"
+            | "protocol_property_declaration"
+            | "typealias_declaration"
+            | "associatedtype_declaration"
+            | "macro_declaration"
+            | "operator_declaration"
+            | "precedence_group_declaration"
+            | "enum_entry"
+    )
 }
 
 fn owner_from_node(

@@ -27,9 +27,9 @@ fuck-ai-comments check --all
 ```
 
 Commit an optional `fuck-ai-comments.toml` when a repository needs explicit
-semantic-type caps or generated-source exclusions. For pull requests, use the
-[`@v0` GitHub Action](#github-action) to enforce both the static baseline and
-changed-owner attestation.
+semantic-category caps or generated-source exclusions. For pull requests, use
+the [`@v0` GitHub Action](#github-action) to enforce both the static baseline
+and changed-owner attestation.
 
 ## Rules
 
@@ -52,16 +52,23 @@ Rust structs, enums, unions, traits, type aliases, and implementation blocks are
 type owners. Module headers and documentation on module declarations remain at
 file scope.
 
-Rust public API docs do not consume a length budget. In one repository discovery
-pass, the CLI asks each detected Cargo workspace once for authoritative library
-target roots, including custom `[lib].path` and workspace members. Pure library
-calls retain the conservative `src/lib.rs` default unless the caller supplies an
-`AnalysisContext` with proven roots.
+Documentation is classified from syntax and attachment, not from a marker alone.
+The adapters recognize Python docstrings; attached Rust docs; attached JSDoc and
+TSDoc; KDoc; Swift `///` and `/** ... */` prefixes (including compiler-recognized
+repeated delimiters); and leading Objective-C Doxygen comments or its same-line
+trailing member forms. Detached documentation-looking comments remain narrative.
+General documentation uses the relative budget by default.
+
+Proven Rust public API docs do not consume a length budget. In one repository
+discovery pass, the CLI asks each detected Cargo workspace once for authoritative
+library target roots, including custom `[lib].path` and workspace members. Pure
+library calls retain the conservative `src/lib.rs` default unless the caller
+supplies an `AnalysisContext` with proven roots.
 Structurally valid safety proofs and tool directives do not consume the relative
 narrative budget, but by default they count toward the absolute owner cap. All three
 remain subject to drift checks when they have meaningful normalized text. Python
-function and class docstrings consume their owner budget; module docstrings
-consume the file budget.
+function and class docstrings attach to their owner; module docstrings attach to
+the file.
 
 Normalization strips comment delimiters, collapses whitespace, ignores terminal
 punctuation, and removes Unicode `Default_Ignorable_Code_Point` characters.
@@ -102,45 +109,55 @@ Place an optional `fuck-ai-comments.toml` at the Git repository root. `--all`
 uses that repository authority even when its final path narrows the scan to one
 file or subdirectory. Outside a Git worktree, `--all` discovers the file at its
 scan root. The schema is versioned and strict: unknown fields, unsupported
-versions, non-positive caps, and `max-lines` without a `capped` policy fail with
-exit code `2`. Invalid exclusion patterns also fail closed.
+versions, and `max-lines` on any mode other than `capped` fail with exit code
+`2`. Invalid exclusion patterns also fail closed.
 
 ```toml
-schema-version = 1
+schema-version = 2
 exclude = ["generated/**", "vendor/**", "!vendor/maintained.py"]
 
-[comments.docstring]
-policy = "capped"
+[comments.documentation]
+mode = "capped"
 max-lines = 6
 
-[comments.rustdoc]
-policy = "unlimited"
+[comments.public-documentation]
+mode = "unlimited"
 
 [comments.safety-proof]
-policy = "capped"
-max-lines = 8
+mode = "owner-capped"
+
+[comments.tool-directive]
+mode = "owner-capped"
 ```
 
-The configurable semantic types are `narrative`, `docstring`, `rustdoc`,
-`safety-proof`, and `tool-directive`. Each accepts one policy:
+The configurable semantic categories are `narrative`, `documentation`,
+`public-documentation`, `safety-proof`, and `tool-directive`. They are
+language-independent: `documentation`, for example, covers Python docstrings,
+internal Rust docs, JSDoc/TSDoc, KDoc, Swift docs, and Objective-C docs. Each
+category accepts one mode:
 
 - `relative`: use the existing owner-relative and comment-block budgets;
+- `owner-capped`: skip relative budgets but retain the built-in absolute cap
+  for the owning function, type, file, leaf, template, or TOML key;
 - `capped`: replace the relative and aggregate owner budgets for that semantic
-  type with the positive `max-lines` limit per owner; or
-- `unlimited`: skip static length budgets for that semantic type.
+  category with `max-lines` per owner; or
+- `unlimited`: skip static length budgets for that semantic category.
 
-Omitted entries preserve the built-in policy. Narrative comments, Python
-docstrings, and internal Rust docs default to `relative`; public Rust API docs
-default to `unlimited`; structural safety proofs and tool directives skip
-relative budgets but remain subject to the aggregate absolute owner cap. A
-configured `capped` policy is enforced independently, so it can raise or lower
-the built-in ceiling for that semantic type without making it unlimited.
+`max-lines` is a nonnegative integer; `0` bans that category. Omitted entries
+preserve the built-in modes: `narrative` and `documentation` are `relative`,
+`public-documentation` is `unlimited`, and structural `safety-proof` and
+`tool-directive` comments are `owner-capped`. A configured `capped` mode is
+enforced independently, so it can raise or lower the built-in ceiling for one
+category without making it unlimited.
 
-Classification stays structural. The `rustdoc` setting covers valid inner docs
-and outer docs attached to a Rust item; a detached `///` sequence remains
-narrative. Safety proofs and tool directives must satisfy their existing marker,
-syntax, and attachment rules. Configuration does not create arbitrary prefix
-classifiers, and `unlimited` never disables stale-comment or reparenting checks.
+Classification stays structural. Valid inner Rust docs and outer docs attached
+to a Rust item are documentation; a detached `///` sequence remains narrative.
+Rustdoc syntax outranks markers in its prose, so `/// SAFETY: ...` remains
+documentation while a structurally attached non-doc `// SAFETY: ...` is a safety
+proof. Safety proofs and tool directives must satisfy their existing marker,
+syntax, and attachment rules. Configuration changes budgets only: it does not
+create arbitrary prefix classifiers, and `unlimited` never disables stale-comment
+or reparenting checks.
 
 Top-level `exclude` entries use gitignore syntax, including `!` re-inclusions,
 and apply to repository-relative source paths. Automatic discovery and every

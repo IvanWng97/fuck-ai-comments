@@ -7,8 +7,9 @@ use crate::config::PolicyConfig;
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{
-    CodeToken, Comment, CommentAttachmentScope, CommentKind, Function, IdentitySource, Leaf,
-    ParsedFile, Span, TreeInput, TreeOwner, TreeOwnership, TypeOwner, tree_document, tree_findings,
+    CodeToken, Comment, CommentAttachmentScope, CommentClassification, Function, IdentitySource,
+    Leaf, ParsedFile, Span, TreeInput, TreeOwner, TreeOwnership, TypeOwner, tree_document,
+    tree_findings,
 };
 
 use super::walk::{WalkEvent, events};
@@ -181,6 +182,7 @@ pub(crate) struct AttachmentIndex {
 #[derive(Clone, Copy)]
 pub(crate) struct AttachmentSyntax {
     transparent_comment_wrapper: fn(&str) -> bool,
+    documentation_comment: fn(&str) -> bool,
     physical_lines: bool,
     preamble_trivia: fn(&str) -> bool,
 }
@@ -192,9 +194,18 @@ impl AttachmentSyntax {
     ) -> Self {
         Self {
             transparent_comment_wrapper,
+            documentation_comment: |_| false,
             physical_lines: false,
             preamble_trivia,
         }
+    }
+
+    pub(crate) const fn with_documentation_comments(
+        mut self,
+        documentation_comment: fn(&str) -> bool,
+    ) -> Self {
+        self.documentation_comment = documentation_comment;
+        self
     }
 
     pub(crate) const fn with_physical_lines(mut self) -> Self {
@@ -258,6 +269,28 @@ impl AttachmentIndex {
             DirectivePlacement::FreeStanding => true,
         }
     }
+
+    pub(crate) fn is_leading_documentation(
+        &self,
+        node: Node<'_>,
+        is_documentable: fn(&str) -> bool,
+    ) -> bool {
+        self.comments
+            .get(&node.id())
+            .and_then(|attachment| attachment.adjacent_node_kind)
+            .is_some_and(is_documentable)
+    }
+
+    pub(crate) fn is_immediately_after(
+        &self,
+        node: Node<'_>,
+        is_documentable: fn(&str) -> bool,
+    ) -> bool {
+        self.comments
+            .get(&node.id())
+            .and_then(|attachment| attachment.previous_node_kind)
+            .is_some_and(is_documentable)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -268,6 +301,9 @@ struct CommentAttachment {
     next_node: bool,
     same_line: bool,
     file_preamble: bool,
+    documentation_syntax: bool,
+    adjacent_node_kind: Option<&'static str>,
+    previous_node_kind: Option<&'static str>,
 }
 
 struct AttachmentIndexBuilder<'source> {
@@ -295,7 +331,7 @@ impl<'source> AttachmentIndexBuilder<'source> {
         let starts_line = self.source_position.starts_line_at(node.start_byte());
         let is_root = self.frames.is_empty();
         if let Some(physical) = self.physical.as_mut() {
-            physical.enter(node, self.source_position.source);
+            physical.enter(node, self.source_position.source.as_bytes());
         }
         self.frames.push(AttachmentFrame::new(
             node,
@@ -324,6 +360,11 @@ impl<'source> AttachmentIndexBuilder<'source> {
                 frame.starts_line,
                 frame.is_preamble_trivia,
                 transparent_comments,
+                is_comment_kind(node.kind())
+                    && (self.syntax.documentation_comment)(node_text(
+                        node,
+                        self.source_position.source,
+                    )),
                 &mut self.comments,
             );
         }
@@ -356,6 +397,7 @@ struct AttachmentFrame {
     preamble_open: bool,
     last_named_child: Option<NamedChild>,
     pending_next_node_comments: Vec<PendingNextNodeComment>,
+    pending_adjacent_comments: Vec<usize>,
     transparent_comments: Vec<usize>,
 }
 
@@ -377,6 +419,7 @@ impl AttachmentFrame {
             preamble_open: true,
             last_named_child: None,
             pending_next_node_comments: Vec::new(),
+            pending_adjacent_comments: Vec::new(),
             transparent_comments: Vec::new(),
         }
     }
@@ -387,6 +430,7 @@ impl AttachmentFrame {
         starts_line: bool,
         is_preamble_trivia: bool,
         transparent_comments: Vec<usize>,
+        is_documentation_comment: bool,
         comments: &mut HashMap<usize, CommentAttachment>,
     ) {
         if !node.is_named() {
@@ -400,9 +444,13 @@ impl AttachmentFrame {
             let attachment = comments.entry(child.node_id).or_default();
             attachment.starts_line = starts_line;
             attachment.end_row = child.end_row;
+            attachment.documentation_syntax = is_documentation_comment;
             if let Some(previous) = self.last_named_child.as_ref() {
                 attachment.same_line =
                     !previous.is_comment_boundary() && previous.end_row == child.start_row;
+                if attachment.same_line {
+                    attachment.previous_node_kind = Some(previous.kind);
+                }
             }
             if self.is_root && self.preamble_open {
                 attachment.file_preamble = true;
@@ -412,8 +460,19 @@ impl AttachmentFrame {
             previous.record_immediate_next(&child, comments);
         }
         if child.is_comment_boundary() {
+            if self.last_named_child.as_ref().is_none_or(|previous| {
+                !previous.is_comment_boundary()
+                    || child.start_row > previous.end_row.saturating_add(1)
+            }) {
+                self.pending_adjacent_comments.clear();
+            }
             for comment in child.comment_ids() {
                 let attachment = comments.entry(comment).or_default();
+                if attachment.documentation_syntax {
+                    self.pending_adjacent_comments.push(comment);
+                } else {
+                    self.pending_adjacent_comments.clear();
+                }
                 self.pending_next_node_comments
                     .push(PendingNextNodeComment {
                         node_id: comment,
@@ -422,6 +481,15 @@ impl AttachmentFrame {
                     });
             }
         } else {
+            if self.last_named_child.as_ref().is_some_and(|previous| {
+                previous.is_comment_boundary()
+                    && child.start_row == previous.end_row.saturating_add(1)
+            }) {
+                for comment in &self.pending_adjacent_comments {
+                    comments.entry(*comment).or_default().adjacent_node_kind = Some(child.kind);
+                }
+            }
+            self.pending_adjacent_comments.clear();
             for pending in self.pending_next_node_comments.drain(..) {
                 comments.entry(pending.node_id).or_default().next_node =
                     pending.starts_line || pending.end_row == child.start_row;
@@ -554,6 +622,7 @@ struct NamedChild {
     starts_line: bool,
     is_comment: bool,
     transparent_comments: Vec<usize>,
+    kind: &'static str,
 }
 
 impl NamedChild {
@@ -565,6 +634,7 @@ impl NamedChild {
             starts_line,
             is_comment: is_comment_kind(node.kind()),
             transparent_comments,
+            kind: node.kind(),
         }
     }
 
@@ -595,7 +665,7 @@ impl NamedChild {
 }
 
 struct SourcePosition<'source> {
-    source: &'source [u8],
+    source: &'source str,
     offset: usize,
     line_prefix_is_whitespace: bool,
 }
@@ -603,7 +673,7 @@ struct SourcePosition<'source> {
 impl<'source> SourcePosition<'source> {
     fn new(source: &'source str) -> Self {
         Self {
-            source: source.as_bytes(),
+            source,
             offset: 0,
             line_prefix_is_whitespace: true,
         }
@@ -611,7 +681,7 @@ impl<'source> SourcePosition<'source> {
 
     fn starts_line_at(&mut self, offset: usize) -> bool {
         debug_assert!(self.offset <= offset);
-        for byte in &self.source[self.offset..offset] {
+        for byte in &self.source.as_bytes()[self.offset..offset] {
             if *byte == b'\n' {
                 self.line_prefix_is_whitespace = true;
             } else if !byte.is_ascii_whitespace() {
@@ -832,7 +902,7 @@ pub(crate) trait LanguageSpec: Copy {
         node: Node<'_>,
         source: &str,
         context: &Self::Context,
-    ) -> Option<CommentKind>;
+    ) -> Option<CommentClassification>;
 }
 
 pub(crate) fn analyze_with_policy<S: LanguageSpec>(
@@ -1032,10 +1102,10 @@ impl<'source> FactCollector<'source> {
             return Ok(());
         }
         self.open_callable_frontiers(node);
-        if let Some(kind) = spec.classify_comment(node, self.source, context) {
+        if let Some(classification) = spec.classify_comment(node, self.source, context) {
             self.push_comment(Comment {
                 span: Span::from_comment_node(node, self.source),
-                kind,
+                classification,
                 text: node_text(node, self.source).to_owned(),
             });
             self.comment_node = Some(node.id());
@@ -1314,7 +1384,7 @@ impl<'source> FactCollector<'source> {
 
     fn push_comment(&mut self, comment: Comment) {
         let mut choice = CommentChoice::default();
-        match comment.kind.attachment() {
+        match comment.classification.attachment() {
             CommentAttachmentScope::File => {}
             CommentAttachmentScope::Type => {
                 if let Some(owner) = self
@@ -1391,7 +1461,7 @@ impl<'source> FactCollector<'source> {
             }
             if comment.span.end_byte <= node_start
                 && candidate.start_byte <= comment.span.start_byte
-                && uses_inferred_attachment(comment.kind)
+                && uses_inferred_attachment(comment.classification)
             {
                 choice.direct = Some(candidate);
                 if is_budget_owner(owner) {
@@ -1519,7 +1589,7 @@ fn assign_leading(
     }
     for index in (0..comments.len()).rev() {
         let seed = seeds[index];
-        if uses_inferred_attachment(comments[index].kind) {
+        if uses_inferred_attachment(comments[index].classification) {
             merge_choice(&mut choices[index], seed);
         }
         if let Some(previous) = previous[index] {
@@ -1577,8 +1647,8 @@ fn is_budget_owner(owner: TreeOwner) -> bool {
     matches!(owner, TreeOwner::Function(_) | TreeOwner::Type(_))
 }
 
-fn uses_inferred_attachment(kind: CommentKind) -> bool {
-    kind.attachment() == CommentAttachmentScope::Inferred
+fn uses_inferred_attachment(classification: CommentClassification) -> bool {
+    classification.attachment() == CommentAttachmentScope::Inferred
 }
 
 fn materialize_comments(
@@ -1852,6 +1922,13 @@ fn is_comment_kind(kind: &str) -> bool {
     )
 }
 
+pub(crate) fn is_exact_slash_star_documentation(comment: &str) -> bool {
+    comment
+        .trim_start()
+        .strip_prefix("/**")
+        .is_some_and(|body| !body.starts_with('*'))
+}
+
 fn push_length_prefixed(output: &mut String, value: &str) {
     output.push_str(&value.len().to_string());
     output.push(':');
@@ -1959,7 +2036,7 @@ mod tests {
                     start_line: index + 1,
                     end_line: index + 1,
                 },
-                kind: CommentKind::Narrative,
+                classification: CommentClassification::narrative(),
                 text: COMMENT.trim_end().to_owned(),
             })
             .collect();

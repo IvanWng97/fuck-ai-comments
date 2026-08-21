@@ -159,7 +159,7 @@ test("Codecov uploads one explicit Rust coverage report", async () => {
   );
 
   const job = workflow.jobs.coverage;
-  assert.equal(job["runs-on"], "ubuntu-24.04");
+  assert.equal(job["runs-on"], "ubuntu-latest");
   assert.equal(job["timeout-minutes"], 30);
   assert.equal(job["continue-on-error"], undefined);
   assert.deepEqual(job.permissions, {
@@ -267,7 +267,7 @@ test("CodSpeed runs the 10K-LOC analysis benchmarks", async () => {
   assert.equal(ci.jobs["ci-gate"].needs.includes("benchmarks"), false);
 
   const job = workflow.jobs.benchmarks;
-  assert.equal(job["runs-on"], "ubuntu-24.04");
+  assert.equal(job["runs-on"], "ubuntu-latest");
   assert.equal(job["timeout-minutes"], 30);
   assert.equal(job["continue-on-error"], undefined);
   assert.deepEqual(job.permissions, {

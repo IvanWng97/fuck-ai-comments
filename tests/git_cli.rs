@@ -173,9 +173,9 @@ fn default_rescans_unchanged_sources_when_worktree_policy_changes() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     );
@@ -188,7 +188,7 @@ fn default_rescans_unchanged_sources_when_worktree_policy_changes() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-category-cap"));
     assert!(stdout.contains("1 violation in 1 file"));
 }
 
@@ -199,9 +199,9 @@ fn staged_preserves_rust_type_ownership_for_capped_rustdoc() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     );
@@ -234,7 +234,9 @@ fn staged_preserves_rust_type_ownership_for_capped_rustdoc() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
     assert!(
-        stdout.contains("type `Record` owns 2 rustdoc comment lines; configured allowance is 1")
+        stdout.contains(
+            "type `Record` owns 2 documentation comment lines; configured allowance is 1"
+        )
     );
     assert!(
         !stdout.contains("file scope owns"),
@@ -259,9 +261,9 @@ fn staged_reads_policy_from_the_index_and_rescans_unchanged_sources() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     );
@@ -270,9 +272,9 @@ fn staged_reads_policy_from_the_index_and_rescans_unchanged_sources() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     );
 
@@ -284,7 +286,7 @@ fn staged_reads_policy_from_the_index_and_rescans_unchanged_sources() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-category-cap"));
     assert!(stdout.contains("1 violation in 1 file"));
 }
 
@@ -305,9 +307,9 @@ fn commit_range_reads_policy_from_the_head_snapshot() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     );
@@ -316,9 +318,9 @@ fn commit_range_reads_policy_from_the_head_snapshot() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     );
 
@@ -330,7 +332,7 @@ fn commit_range_reads_policy_from_the_head_snapshot() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-category-cap"));
     assert!(stdout.contains("1 violation in 1 file"));
 }
 
@@ -346,9 +348,9 @@ fn default_uses_an_explicit_worktree_policy_file() {
         &root,
         "custom-policy.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     );
     write(
@@ -385,9 +387,9 @@ fn explicit_policy_rescans_unchanged_sources() {
         &root,
         "custom-policy.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"capped\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
             "max-lines = 1\n",
         ),
     );
@@ -400,7 +402,7 @@ fn explicit_policy_rescans_unchanged_sources() {
         .clone();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
 
-    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-category-cap"));
     assert!(stdout.contains("1 violation in 1 file"));
 }
 
@@ -411,9 +413,9 @@ fn default_applies_committed_policy_to_changed_sources() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
-            "[comments.rustdoc]\n",
-            "policy = \"unlimited\"\n",
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
         ),
     );
     commit_all(&root, "configure comment policy");
@@ -444,9 +446,9 @@ fn policy_changes_do_not_disable_comment_attestation() {
         &root,
         "fuck-ai-comments.toml",
         concat!(
-            "schema-version = 1\n",
+            "schema-version = 2\n",
             "[comments.narrative]\n",
-            "policy = \"unlimited\"\n",
+            "mode = \"unlimited\"\n",
         ),
     );
 
@@ -467,7 +469,7 @@ fn default_filters_changed_sources_with_worktree_exclusions() {
     write(
         &root,
         "fuck-ai-comments.toml",
-        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+        "schema-version = 2\nexclude = [\"generated/**\"]\n",
     );
     write(&root, "generated/source.rs", CLEAN_RUST);
     commit_all(&root, "add excluded source");
@@ -486,11 +488,11 @@ fn removing_a_worktree_exclusion_rescans_unchanged_sources() {
     write(
         &root,
         "fuck-ai-comments.toml",
-        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+        "schema-version = 2\nexclude = [\"generated/**\"]\n",
     );
     write(&root, "generated/source.rs", SLOPPY_RUST);
     commit_all(&root, "add excluded source");
-    write(&root, "fuck-ai-comments.toml", "schema-version = 1\n");
+    write(&root, "fuck-ai-comments.toml", "schema-version = 2\n");
 
     let output = command(&root)
         .arg("check")
@@ -510,16 +512,16 @@ fn staged_uses_exclusions_from_the_index() {
     write(
         &root,
         "fuck-ai-comments.toml",
-        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+        "schema-version = 2\nexclude = [\"generated/**\"]\n",
     );
     write(&root, "generated/source.rs", SLOPPY_RUST);
     commit_all(&root, "add excluded source");
-    write(&root, "fuck-ai-comments.toml", "schema-version = 1\n");
+    write(&root, "fuck-ai-comments.toml", "schema-version = 2\n");
     git(&root, ["add", "fuck-ai-comments.toml"]);
     write(
         &root,
         "fuck-ai-comments.toml",
-        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+        "schema-version = 2\nexclude = [\"generated/**\"]\n",
     );
 
     let output = command(&root)
@@ -539,16 +541,16 @@ fn commit_range_uses_exclusions_from_the_head_snapshot() {
     write(
         &root,
         "fuck-ai-comments.toml",
-        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+        "schema-version = 2\nexclude = [\"generated/**\"]\n",
     );
     write(&root, "generated/source.rs", SLOPPY_RUST);
     let base = commit_all(&root, "add excluded source");
-    write(&root, "fuck-ai-comments.toml", "schema-version = 1\n");
+    write(&root, "fuck-ai-comments.toml", "schema-version = 2\n");
     let head = commit_all(&root, "include generated source");
     write(
         &root,
         "fuck-ai-comments.toml",
-        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+        "schema-version = 2\nexclude = [\"generated/**\"]\n",
     );
 
     let output = command(&root)

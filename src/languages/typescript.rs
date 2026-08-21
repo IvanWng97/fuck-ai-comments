@@ -12,7 +12,7 @@ use super::tree::{
 };
 use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, ParsedFile};
+use crate::policy::{CommentClassification, ParsedFile};
 
 #[derive(Clone, Copy)]
 enum TypeScript {
@@ -94,12 +94,12 @@ impl LanguageSpec for TypeScript {
         node: Node<'_>,
         source: &str,
         context: &Self::Context,
-    ) -> Option<CommentKind> {
+    ) -> Option<CommentClassification> {
         if node.kind() == "comment"
             && context.is_attached(node, DirectivePlacement::FilePreamble)
             && valid_triple_slash_directive(node_text(node, source))
         {
-            Some(CommentKind::ToolDirective)
+            Some(CommentClassification::tool_directive())
         } else {
             classify_javascript_comment(node, source, context)
         }

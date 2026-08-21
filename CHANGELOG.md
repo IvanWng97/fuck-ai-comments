@@ -5,6 +5,24 @@ All notable changes to `fuck-ai-comments` are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-20
+
+### Changed
+
+- Replaced configuration schema v1 with the breaking, language-independent v2
+  taxonomy: `narrative`, `documentation`, `public-documentation`,
+  `safety-proof`, and `tool-directive`.
+- Split comment classification into independent semantic-role and attachment
+  dimensions so language adapters no longer create combined variants such as
+  file docstrings or file rustdoc.
+
+### Added
+
+- Structural documentation recognition for attached JSDoc/TSDoc, KDoc, Swift
+  documentation comments, and Objective-C Doxygen comments.
+- Explicit `owner-capped` configuration and zero-line caps for repositories
+  that want to forbid a semantic comment category completely.
+
 ## [0.1.3] - 2026-08-20
 
 ### Added
@@ -52,7 +70,8 @@ All notable changes to `fuck-ai-comments` are documented here. The project uses
   fail-closed Git modes, multi-language analyzers, native release archives, and
   the GitHub Action.
 
-[Unreleased]: https://github.com/IvanWng97/fuck-ai-comments/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/IvanWng97/fuck-ai-comments/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/IvanWng97/fuck-ai-comments/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/IvanWng97/fuck-ai-comments/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/IvanWng97/fuck-ai-comments/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/IvanWng97/fuck-ai-comments/compare/v0.1.0...v0.1.1
