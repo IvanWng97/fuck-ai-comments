@@ -116,9 +116,16 @@ impl RepositoryConfig {
         {
             return false;
         }
-        self.exclusions
-            .matched_path_or_any_parents(path, is_directory)
-            .is_ignore()
+        // Git does not descend into an ignored directory, so a child negation
+        // cannot re-include a path through an ignored parent. Query the
+        // library matcher at each hierarchy level to preserve that rule for
+        // the flat path lists used by Git change modes.
+        let ignored_parent = path
+            .ancestors()
+            .skip(1)
+            .take_while(|parent| !parent.as_os_str().is_empty())
+            .any(|parent| self.exclusions.matched(parent, true).is_ignore());
+        ignored_parent || self.exclusions.matched(path, is_directory).is_ignore()
     }
 
     pub(crate) fn policy(&self) -> &PolicyConfig {

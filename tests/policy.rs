@@ -35,6 +35,23 @@ fn repository_config_uses_gitignore_exclusion_semantics() {
 }
 
 #[test]
+fn repository_config_requires_ignored_parents_to_be_reincluded() {
+    let config = RepositoryConfig::from_toml(concat!(
+        "schema-version = 1\n",
+        "exclude = [\"!generated/keep.py\", \"generated/\"]\n",
+    ))
+    .expect("repository config should parse");
+    let reinclude_parent = RepositoryConfig::from_toml(concat!(
+        "schema-version = 1\n",
+        "exclude = [\"generated/\", \"!generated/\", \"!generated/keep.py\"]\n",
+    ))
+    .expect("repository config should parse");
+
+    assert!(config.excludes_path(Path::new("generated/keep.py"), false));
+    assert!(!reinclude_parent.excludes_path(Path::new("generated/keep.py"), false));
+}
+
+#[test]
 fn repository_config_never_excludes_unsafe_paths() {
     let config =
         RepositoryConfig::from_toml(concat!("schema-version = 1\n", "exclude = [\"**\"]\n",))
