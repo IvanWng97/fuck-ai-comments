@@ -147,9 +147,18 @@ pub(crate) enum CommentKind {
     FileNarrative,
     TypeNarrative,
     RustDocs,
+    FileRustDocs,
     ToolDirective,
     SafetyProof,
     PublicDocs,
+    FilePublicDocs,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CommentAttachmentScope {
+    File,
+    Type,
+    Inferred,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -161,11 +170,25 @@ enum CommentCategory {
 }
 
 impl CommentKind {
+    pub(crate) const fn attachment(self) -> CommentAttachmentScope {
+        match self {
+            Self::FileNarrative | Self::FileRustDocs | Self::FilePublicDocs => {
+                CommentAttachmentScope::File
+            }
+            Self::TypeNarrative => CommentAttachmentScope::Type,
+            Self::Narrative
+            | Self::RustDocs
+            | Self::ToolDirective
+            | Self::SafetyProof
+            | Self::PublicDocs => CommentAttachmentScope::Inferred,
+        }
+    }
+
     fn static_policy(self, policy: &PolicyConfig) -> StaticPolicy {
         match self {
             Self::Narrative | Self::FileNarrative | Self::TypeNarrative => policy.narrative(),
-            Self::RustDocs => policy.rustdoc(false),
-            Self::PublicDocs => policy.rustdoc(true),
+            Self::RustDocs | Self::FileRustDocs => policy.rustdoc(false),
+            Self::PublicDocs | Self::FilePublicDocs => policy.rustdoc(true),
             Self::SafetyProof => policy.safety_proof(),
             Self::ToolDirective => policy.tool_directive(),
         }
@@ -176,7 +199,9 @@ impl CommentKind {
             Self::Narrative | Self::FileNarrative | Self::TypeNarrative => {
                 CommentCategory::Narrative
             }
-            Self::RustDocs | Self::PublicDocs => CommentCategory::Rustdoc,
+            Self::RustDocs | Self::FileRustDocs | Self::PublicDocs | Self::FilePublicDocs => {
+                CommentCategory::Rustdoc
+            }
             Self::SafetyProof => CommentCategory::SafetyProof,
             Self::ToolDirective => CommentCategory::ToolDirective,
         }

@@ -586,7 +586,7 @@ fn rust_public_field_docs_on_a_private_type_are_narrative() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
         "bare pub on a field cannot outgrow its private type: {findings:#?}"
     );
 }
@@ -709,7 +709,7 @@ fn rust_authoritative_context_does_not_infer_an_unlisted_conventional_root() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
         "an authoritative target set must not fall back to path inference: {findings:#?}"
     );
 }
@@ -743,7 +743,7 @@ fn rust_nested_lib_inner_docs_are_narrative() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
         "a nested lib.rs cannot prove crate-root reachability: {findings:#?}"
     );
 }
@@ -768,7 +768,7 @@ fn rust_arbitrary_file_inner_docs_are_narrative() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
         "a standalone module file cannot prove its own public reachability: {findings:#?}"
     );
 }
@@ -815,7 +815,7 @@ fn rust_public_enum_variant_docs_require_public_module_ancestry() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
         "a public enum inside a private module is not public API: {findings:#?}"
     );
 }
@@ -883,7 +883,7 @@ fn rust_trait_member_docs_require_public_module_ancestry() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
         "a trait inside a private module cannot export member docs: {findings:#?}"
     );
 }
@@ -930,7 +930,7 @@ fn rust_inner_docs_in_a_crate_visible_inline_module_are_narrative() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/function-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/file-comment-budget"),
         "inner-doc syntax cannot make a pub(crate) module public: {findings:#?}"
     );
 }
