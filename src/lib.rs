@@ -12,7 +12,7 @@ mod languages;
 mod model;
 mod policy;
 
-pub use config::PolicyConfigError;
+pub use config::{PolicyConfigError, RepositoryConfig};
 pub use model::{AnalysisError, AnalysisProfile, Finding, SourceFile};
 
 /// Repository-level facts used to classify source files during analysis.
@@ -71,15 +71,28 @@ impl AnalysisContext {
         })
     }
 
-    /// Apply repository comment policy from a TOML document.
+    /// Apply comment policies from a repository configuration TOML document.
+    ///
+    /// The complete document is validated, including exclusion patterns, but
+    /// this analysis-only context does not walk files. Repository scanners can
+    /// parse [`RepositoryConfig`] once and apply both its policies and path
+    /// exclusions.
     ///
     /// # Errors
     ///
     /// Returns an error when the document is malformed, uses an unsupported
-    /// schema version, or contains an invalid policy declaration.
+    /// schema version, or contains an invalid configuration declaration.
     pub fn with_policy_toml(mut self, source: &str) -> Result<Self, PolicyConfigError> {
-        self.policy = config::PolicyConfig::parse(source)?;
+        let config = RepositoryConfig::from_toml(source)?;
+        self.policy = config.policy().clone();
         Ok(self)
+    }
+
+    /// Apply the comment policies from a parsed repository configuration.
+    #[must_use]
+    pub fn with_repository_config(mut self, config: &RepositoryConfig) -> Self {
+        self.policy = config.policy().clone();
+        self
     }
 
     pub(crate) fn policy(&self) -> &config::PolicyConfig {

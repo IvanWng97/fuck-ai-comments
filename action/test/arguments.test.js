@@ -40,7 +40,16 @@ test("constructs each explicit mode as an argv array", () => {
       base: "",
       head: "",
     }),
-    ["check", "--all", "--profile", "full", "--", "source tree"],
+    [
+      "check",
+      "--all",
+      "--profile",
+      "full",
+      "--format",
+      "json",
+      "--",
+      "source tree",
+    ],
   );
   assert.deepEqual(
     buildCheckArguments({
@@ -50,7 +59,16 @@ test("constructs each explicit mode as an argv array", () => {
       base: "",
       head: "",
     }),
-    ["check", "--staged", "--profile", "attestation", "--", "."],
+    [
+      "check",
+      "--staged",
+      "--profile",
+      "attestation",
+      "--format",
+      "json",
+      "--",
+      ".",
+    ],
   );
   assert.deepEqual(
     buildCheckArguments({
@@ -60,7 +78,7 @@ test("constructs each explicit mode as an argv array", () => {
       base: "",
       head: "",
     }),
-    ["check", "--profile", "full", "--", "."],
+    ["check", "--profile", "full", "--format", "json", "--", "."],
   );
   assert.deepEqual(
     buildCheckArguments({
@@ -78,6 +96,8 @@ test("constructs each explicit mode as an argv array", () => {
       "head sha",
       "--profile",
       "attestation",
+      "--format",
+      "json",
       "--",
       ".",
     ],
@@ -93,7 +113,16 @@ test("passes profile validation to the Rust CLI", () => {
       base: "",
       head: "",
     }),
-    ["check", "--all", "--profile", "attestation", "--", "."],
+    [
+      "check",
+      "--all",
+      "--profile",
+      "attestation",
+      "--format",
+      "json",
+      "--",
+      ".",
+    ],
   );
   assert.deepEqual(
     buildCheckArguments({
@@ -103,7 +132,7 @@ test("passes profile validation to the Rust CLI", () => {
       base: "",
       head: "",
     }),
-    ["check", "--profile", "future-profile", "--", "."],
+    ["check", "--profile", "future-profile", "--format", "json", "--", "."],
   );
 });
 
@@ -125,6 +154,8 @@ test("reads the Action profile input into the Rust CLI argv", () => {
       "attestation",
       "--config",
       "policy/custom.toml",
+      "--format",
+      "json",
       "--",
       "source tree",
     ],

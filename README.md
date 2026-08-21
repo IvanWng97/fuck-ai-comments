@@ -15,6 +15,22 @@ to add and stale comments harder to keep:
 Every finding is an error. There are no advisory rules and no inline disable
 comments.
 
+## Quick start
+
+Install the current crates.io release, then establish a repository-wide static
+baseline:
+
+```console
+cargo install fuck-ai-comments --locked
+cd your-repository
+fuck-ai-comments check --all
+```
+
+Commit an optional `fuck-ai-comments.toml` when a repository needs explicit
+semantic-type caps or generated-source exclusions. For pull requests, use the
+[`@v0` GitHub Action](#github-action) to enforce both the static baseline and
+changed-owner attestation.
+
 ## Rules
 
 | Rule                             | Required policy                                                                                                                                   |
@@ -87,10 +103,15 @@ uses that repository authority even when its final path narrows the scan to one
 file or subdirectory. Outside a Git worktree, `--all` discovers the file at its
 scan root. The schema is versioned and strict: unknown fields, unsupported
 versions, non-positive caps, and `max-lines` without a `capped` policy fail with
-exit code `2`.
+exit code `2`. Invalid exclusion patterns also fail closed.
 
 ```toml
 schema-version = 1
+exclude = ["generated/**", "vendor/**", "!vendor/maintained.py"]
+
+[comments.docstring]
+policy = "capped"
+max-lines = 6
 
 [comments.rustdoc]
 policy = "unlimited"
@@ -100,20 +121,20 @@ policy = "capped"
 max-lines = 8
 ```
 
-The configurable semantic types are `narrative`, `rustdoc`, `safety-proof`,
-and `tool-directive`. Each accepts one policy:
+The configurable semantic types are `narrative`, `docstring`, `rustdoc`,
+`safety-proof`, and `tool-directive`. Each accepts one policy:
 
 - `relative`: use the existing owner-relative and comment-block budgets;
 - `capped`: replace the relative and aggregate owner budgets for that semantic
   type with the positive `max-lines` limit per owner; or
 - `unlimited`: skip static length budgets for that semantic type.
 
-Omitted entries preserve the built-in policy. Narrative comments and internal
-Rust docs default to `relative`; public Rust API docs default to `unlimited`;
-structural safety proofs and tool directives skip relative budgets but remain
-subject to the aggregate absolute owner cap. A configured `capped` policy is
-enforced independently, so it can raise or lower the built-in ceiling for that
-semantic type without making it unlimited.
+Omitted entries preserve the built-in policy. Narrative comments, Python
+docstrings, and internal Rust docs default to `relative`; public Rust API docs
+default to `unlimited`; structural safety proofs and tool directives skip
+relative budgets but remain subject to the aggregate absolute owner cap. A
+configured `capped` policy is enforced independently, so it can raise or lower
+the built-in ceiling for that semantic type without making it unlimited.
 
 Classification stays structural. The `rustdoc` setting covers valid inner docs
 and outer docs attached to a Rust item; a detached `///` sequence remains
@@ -121,13 +142,21 @@ narrative. Safety proofs and tool directives must satisfy their existing marker,
 syntax, and attachment rules. Configuration does not create arbitrary prefix
 classifiers, and `unlimited` never disables stale-comment or reparenting checks.
 
-Git modes load the policy from the same authority as the source: the worktree,
-index for `--staged`, or requested head commit for `--base`. A policy-only change
-triggers a full static rescan under `--profile full`. Use `--config PATH` to
-select a different file explicitly; an explicit path is always read from the
-current filesystem, so full-profile Git checks conservatively rescan all source
-files. An explicit config inside the scan scope is excluded from the source
-count. Configurations do not cascade or merge.
+Top-level `exclude` entries use gitignore syntax, including `!` re-inclusions,
+and apply to repository-relative source paths. Automatic discovery and every
+Git mode match from the Git worktree root. Outside Git, `--all` matches from its
+scan root; explicit `--all --config` also uses the scan root and does not invoke
+Git discovery. Exclusions never hide the active config or Cargo metadata inputs
+from authority checks.
+
+Git modes load configuration from the same authority as the source: the
+worktree, index for `--staged`, or requested head commit for `--base`. A
+configuration-only change triggers a full static rescan under `--profile full`.
+Use `--config PATH` to select a different file explicitly; an explicit path is
+always read from the current filesystem, so full-profile Git checks
+conservatively rescan all included source files. An explicit config inside the
+scan scope is excluded from the source count. Configurations do not cascade or
+merge.
 
 ## CLI
 
@@ -156,6 +185,9 @@ fuck-ai-comments check --base origin/main --head HEAD --profile attestation
 
 # Override automatic fuck-ai-comments.toml discovery.
 fuck-ai-comments check --all --config policy/comments.toml
+
+# Emit the stable, versioned report consumed by integrations.
+fuck-ai-comments check --all --format json
 ```
 
 Pass a file or directory as the final argument to narrow the scope. Exit codes
@@ -165,7 +197,12 @@ are stable:
 - `1`: one or more required policy findings;
 - `2`: the analysis could not be trusted, including parser, Git, UTF-8,
   ownership ambiguity, nonexistent scopes, non-regular supported paths, or
-  resource-limit errors.
+resource-limit errors.
+
+`--format json` preserves those exit codes and writes one report containing
+`schemaVersion`, `filesScanned`, and sorted `findings` (`path`, `line`, `rule`,
+and `message`). Trusted-analysis failures (exit `2`) remain diagnostics on
+standard error instead of pretending to be a policy report.
 
 Git is the authority for rename pairing; if supported additions and deletions
 remain unpaired, the CLI cannot prove ancestry and exits with code `2`.
@@ -193,8 +230,8 @@ allocation.
 
 ## GitHub Action
 
-The Action becomes available when the first stable release creates the `v0`
-compatibility tag.
+Use `IvanWng97/fuck-ai-comments@v0`; stable `0.x` releases advance that
+compatibility tag only after packaged-Action E2E passes.
 
 The default Action mode is the fail-closed `base` mode: callers must provide a
 base revision, and the CLI compares the base/head merge base to the head. A bare
@@ -238,30 +275,21 @@ Action inputs are `mode` (`all`, `worktree`, `staged`, or `base`), `profile`
 (`full` or `attestation`), `path`, `base`, `head`, `config`, and an exact CLI
 `version`.
 Inputs become an argv array; they are never concatenated into a shell command,
-and the Rust CLI is the profile-validation authority. `mode: all` establishes
-or checks a static baseline; it does not replace `mode: base`, because a single
-valid comment can only be checked for drift by comparing revisions. Push and
-manual workflows must likewise pass an explicit before/after range for drift
-checks, or deliberately use `mode: all` when the job exists only to establish
-a new baseline.
+and the Rust CLI is the profile-validation authority. The Action consumes the
+versioned JSON report, emits source-line error annotations, keeps the complete
+finding list in a folded log group, and fails the step once. GitHub limits a
+step to ten error annotations, so nine are reserved for source findings and the
+tenth is the failure summary. `mode: all` establishes or checks a static
+baseline; it does not replace `mode: base`, because a single valid comment can
+only be checked for drift by comparing revisions. Push and manual workflows
+must likewise pass an explicit before/after range for drift checks, or
+deliberately use `mode: all` when the job exists only to establish a new
+baseline.
 
-The first stable `0.x` release creates `@v0` after packaged-Action E2E succeeds;
-subsequent stable `0.x` releases advance it under the same gate. Consumers do
-not need an exact Action commit SHA.
+Stable `0.x` releases advance `@v0` only after packaged-Action E2E succeeds.
+Consumers do not need an exact Action commit SHA.
 
-## Install
-
-Install the current crates.io release:
-
-```console
-cargo install fuck-ai-comments --locked
-```
-
-To install the current `main` branch directly from the public repository:
-
-```console
-cargo install --git https://github.com/IvanWng97/fuck-ai-comments --locked
-```
+## Release
 
 After updating the package version, releases are manual workflow dispatches from
 `main`; the workflow publishes the crate and creates the tag only after
@@ -334,7 +362,9 @@ The implementation deliberately delegates mechanical work:
   attestation normalization;
 - `imara-diff` supplies fixed-Myers line and comment anchors through one
   interned-input and hunk pipeline;
-- `ignore` supplies repository walking and ignore semantics;
+- `ignore` supplies repository walking plus both file-based and configured
+  gitignore semantics;
+- `serde_json` supplies the versioned integration report encoding;
 - Cargo metadata supplies workspace membership and Rust library target roots;
 - Git plumbing supplies revisions, rename records, and blobs;
 - `dist` supplies release planning and native archives; and

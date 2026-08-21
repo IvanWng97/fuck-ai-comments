@@ -33,7 +33,7 @@ pub struct SourceFile<'source> {
 }
 
 /// One required policy violation.
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub struct Finding {
     /// Repository-relative file path.
     pub path: String,

@@ -462,6 +462,107 @@ fn policy_changes_do_not_disable_comment_attestation() {
 }
 
 #[test]
+fn default_filters_changed_sources_with_worktree_exclusions() {
+    let root = repository();
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+    );
+    write(&root, "generated/source.rs", CLEAN_RUST);
+    commit_all(&root, "add excluded source");
+    write(&root, "generated/source.rs", SLOPPY_RUST);
+
+    command(&root)
+        .arg("check")
+        .assert()
+        .code(0)
+        .stdout("clean: 0 files scanned\n");
+}
+
+#[test]
+fn removing_a_worktree_exclusion_rescans_unchanged_sources() {
+    let root = repository();
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+    );
+    write(&root, "generated/source.rs", SLOPPY_RUST);
+    commit_all(&root, "add excluded source");
+    write(&root, "fuck-ai-comments.toml", "schema-version = 1\n");
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("generated/source.rs:1: comment-policy/leaf-comment-budget"));
+    assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
+fn staged_uses_exclusions_from_the_index() {
+    let root = repository();
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+    );
+    write(&root, "generated/source.rs", SLOPPY_RUST);
+    commit_all(&root, "add excluded source");
+    write(&root, "fuck-ai-comments.toml", "schema-version = 1\n");
+    git(&root, ["add", "fuck-ai-comments.toml"]);
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+    );
+
+    let output = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("generated/source.rs:1: comment-policy/leaf-comment-budget"));
+}
+
+#[test]
+fn commit_range_uses_exclusions_from_the_head_snapshot() {
+    let root = repository();
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+    );
+    write(&root, "generated/source.rs", SLOPPY_RUST);
+    let base = commit_all(&root, "add excluded source");
+    write(&root, "fuck-ai-comments.toml", "schema-version = 1\n");
+    let head = commit_all(&root, "include generated source");
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        "schema-version = 1\nexclude = [\"generated/**\"]\n",
+    );
+
+    let output = command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("generated/source.rs:1: comment-policy/leaf-comment-budget"));
+}
+
+#[test]
 fn default_analyzes_supported_files_before_the_first_commit() {
     let root = unborn_repository();
     write(&root, "src/lib.rs", SLOPPY_RUST);

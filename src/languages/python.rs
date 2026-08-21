@@ -111,9 +111,9 @@ impl LanguageSpec for Python {
     ) -> Option<CommentKind> {
         if let Some(scope) = context.docstring_scopes.get(&node.id()) {
             return Some(match scope {
-                DocstringScope::Function => CommentKind::Narrative,
-                DocstringScope::Type => CommentKind::TypeNarrative,
-                DocstringScope::File => CommentKind::FileNarrative,
+                DocstringScope::Function => CommentKind::Docstring,
+                DocstringScope::Type => CommentKind::TypeDocstring,
+                DocstringScope::File => CommentKind::FileDocstring,
             });
         }
         (node.kind() == "comment").then(|| {
