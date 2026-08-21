@@ -84,6 +84,60 @@ fn all_reports_findings_in_stable_path_order() {
 }
 
 #[test]
+fn all_can_render_a_versioned_clean_json_report() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(root.path().join("clean.rs"), "const LIMIT: usize = 4;\n")
+        .expect("clean.rs should be written");
+
+    command(&root)
+        .args(["check", "--all", "--format", "json", "."])
+        .assert()
+        .code(0)
+        .stdout("{\"schemaVersion\":1,\"filesScanned\":1,\"findings\":[]}\n");
+}
+
+#[test]
+fn all_can_render_machine_readable_json_findings() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("source.rs"),
+        concat!(
+            "// First explanation.\n",
+            "// Second explanation.\n",
+            "// Third explanation.\n",
+            "// Fourth explanation.\n",
+            "const LIMIT: usize = 4;\n",
+        ),
+    )
+    .expect("source.rs should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "--format", "json", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be one JSON document");
+
+    assert_eq!(report["schemaVersion"], 1);
+    assert_eq!(report["filesScanned"], 1);
+    assert_eq!(report["findings"].as_array().map(Vec::len), Some(1));
+    assert_eq!(report["findings"][0]["path"], "source.rs");
+    assert_eq!(report["findings"][0]["line"], 1);
+    assert_eq!(
+        report["findings"][0]["rule"],
+        "comment-policy/leaf-comment-budget"
+    );
+    assert!(
+        report["findings"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("allowance is 3")),
+        "unexpected report: {report:#}"
+    );
+}
+
+#[test]
 fn all_honors_an_unlimited_rustdoc_policy_from_the_repository_config() {
     let root = TempDir::new().expect("temporary directory should be created");
     fs::write(
@@ -784,6 +838,11 @@ fn all_rejects_invalid_repository_policy() {
             "unsupported schema-version 2; expected 1",
         ),
         (
+            "invalid exclusion",
+            "schema-version = 1\nexclude = [\"src/{generated,vendor\"]\n",
+            "invalid exclude pattern 1",
+        ),
+        (
             "missing cap",
             concat!(
                 "schema-version = 1\n",
@@ -938,6 +997,158 @@ fn all_applies_narrative_policy_to_non_rust_languages() {
 
     command(&root)
         .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_applies_a_docstring_cap_independently_from_narrative() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.narrative]\n",
+            "policy = \"unlimited\"\n",
+            "[comments.docstring]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("worker.py"),
+        concat!(
+            "def work():\n",
+            "    \"\"\"First docstring line.\n",
+            "    Second docstring line.\"\"\"\n",
+            "    return 1\n",
+        ),
+    )
+    .expect("Python source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("comment-policy/comment-type-cap"));
+    assert!(
+        stdout
+            .contains("function `work` owns 2 docstring comment lines; configured allowance is 1")
+    );
+}
+
+#[test]
+fn all_can_make_docstrings_unlimited_without_exempting_narrative() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.docstring]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("worker.py"),
+        concat!(
+            "def documented():\n",
+            "    \"\"\"First docstring line.\n",
+            "    Second docstring line.\n",
+            "    Third docstring line.\n",
+            "    Fourth docstring line.\"\"\"\n",
+            "    return 1\n",
+            "\n",
+            "def narrated():\n",
+            "    # First narrative line.\n",
+            "    # Second narrative line.\n",
+            "    # Third narrative line.\n",
+            "    return 2\n",
+        ),
+    )
+    .expect("Python source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("comment-policy/comment-block-budget"));
+    assert!(!stdout.contains("docstring comment lines"));
+}
+
+#[test]
+fn all_applies_repository_relative_exclusions_to_a_nested_scope() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    let status = ProcessCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root.path())
+        .status()
+        .expect("git init should run");
+    assert!(status.success(), "git init should succeed");
+    fs::create_dir_all(root.path().join("src/generated"))
+        .expect("source directories should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!("schema-version = 1\n", "exclude = [\"src/generated/**\"]\n",),
+    )
+    .expect("policy configuration should be written");
+    fs::write(root.path().join("src/keep.py"), "VALUE = 1\n")
+        .expect("kept source should be written");
+    fs::write(
+        root.path().join("src/generated/drop.py"),
+        concat!(
+            "# First narrative line.\n",
+            "# Second narrative line.\n",
+            "# Third narrative line.\n",
+            "# Fourth narrative line.\n",
+            "VALUE = 4\n",
+        ),
+    )
+    .expect("excluded source should be written");
+
+    command(&root)
+        .args(["check", "--all", "src"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn all_keeps_exclusion_coordinates_through_a_symlinked_scan_root() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    let status = ProcessCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root.path())
+        .status()
+        .expect("git init should run");
+    assert!(status.success(), "git init should succeed");
+    fs::create_dir_all(root.path().join("src/generated"))
+        .expect("source directories should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        "schema-version = 1\nexclude = [\"src/generated/**\"]\n",
+    )
+    .expect("policy configuration should be written");
+    fs::write(root.path().join("src/keep.py"), "VALUE = 1\n")
+        .expect("kept source should be written");
+    fs::write(root.path().join("src/generated/drop.py"), "VALUE = 2\n")
+        .expect("excluded source should be written");
+    std::os::unix::fs::symlink("src", root.path().join("linked-src"))
+        .expect("scan-root symlink should be created");
+
+    command(&root)
+        .args(["check", "--all", "linked-src"])
         .assert()
         .code(0)
         .stdout("clean: 1 file scanned\n");

@@ -53,6 +53,7 @@ export function buildCheckArguments({
   if (config) {
     result.push("--config", config);
   }
+  result.push("--format", "json");
   result.push("--", path);
   return result;
 }

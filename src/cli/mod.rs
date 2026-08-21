@@ -9,8 +9,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use fuck_ai_comments::AnalysisProfile;
+use serde::Serialize;
+
+const REPORT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Parser)]
 #[command(name = "fuck-ai-comments", version, about)]
@@ -42,6 +45,13 @@ struct CheckArgs {
         help = "Analysis guarantees to enforce"
     )]
     profile: AnalysisProfile,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "text",
+        help = "Report format written to standard output"
+    )]
+    format: OutputFormat,
     #[arg(long, help = "Analyze every supported file instead of a Git change")]
     all: bool,
     #[arg(
@@ -74,6 +84,13 @@ struct CheckArgs {
         help = "File or directory to check"
     )]
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 pub(crate) fn run(cli: Cli, output: &mut impl Write) -> Result<ExitCode> {
@@ -120,16 +137,23 @@ fn run_check(arguments: CheckArgs, output: &mut impl Write) -> Result<ExitCode> 
         )?
     };
 
-    render_report(&report, output)
+    render_report(&report, arguments.format, output)
 }
 
-fn render_report(report: &check::Report, output: &mut impl Write) -> Result<ExitCode> {
+fn render_report(
+    report: &check::Report,
+    format: OutputFormat,
+    output: &mut impl Write,
+) -> Result<ExitCode> {
     let exit_code = if report.findings.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
     };
-    let write_result = write_report(report, output);
+    let write_result = match format {
+        OutputFormat::Text => write_text_report(report, output),
+        OutputFormat::Json => write_json_report(report, output),
+    };
     match write_result {
         Ok(()) => Ok(exit_code),
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(exit_code),
@@ -137,7 +161,7 @@ fn render_report(report: &check::Report, output: &mut impl Write) -> Result<Exit
     }
 }
 
-fn write_report(report: &check::Report, output: &mut impl Write) -> io::Result<()> {
+fn write_text_report(report: &check::Report, output: &mut impl Write) -> io::Result<()> {
     if report.findings.is_empty() {
         writeln!(
             output,
@@ -168,6 +192,30 @@ fn write_report(report: &check::Report, output: &mut impl Write) -> io::Result<(
     )
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonReport<'report> {
+    schema_version: u32,
+    files_scanned: usize,
+    findings: &'report [fuck_ai_comments::Finding],
+}
+
+fn write_json_report(report: &check::Report, output: &mut impl Write) -> io::Result<()> {
+    serde_json::to_writer(
+        &mut *output,
+        &JsonReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            files_scanned: report.files_scanned,
+            findings: &report.findings,
+        },
+    )
+    .map_err(|error| {
+        let kind = error.io_error_kind().unwrap_or(io::ErrorKind::Other);
+        io::Error::new(kind, error)
+    })?;
+    writeln!(output)
+}
+
 fn noun<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
 }
@@ -178,7 +226,7 @@ mod tests {
     use std::process::ExitCode;
 
     use super::check::Report;
-    use super::{error_exit, render_report};
+    use super::{OutputFormat, error_exit, render_report};
 
     struct ErrorWriter(io::ErrorKind);
 
@@ -193,13 +241,33 @@ mod tests {
     }
 
     #[test]
+    fn broken_output_is_success_for_every_report_format() {
+        let report = Report {
+            findings: Vec::new(),
+            files_scanned: 0,
+        };
+
+        for format in [OutputFormat::Text, OutputFormat::Json] {
+            let exit_code =
+                render_report(&report, format, &mut ErrorWriter(io::ErrorKind::BrokenPipe))
+                    .expect("a closed output pipe should not fail the check");
+
+            assert_eq!(exit_code, ExitCode::SUCCESS);
+        }
+    }
+
+    #[test]
     fn non_broken_output_error_returns_two_even_when_stderr_also_fails() {
         let report = Report {
             findings: Vec::new(),
             files_scanned: 0,
         };
-        let error = render_report(&report, &mut ErrorWriter(io::ErrorKind::PermissionDenied))
-            .expect_err("non-broken output error should fail rendering");
+        let error = render_report(
+            &report,
+            OutputFormat::Text,
+            &mut ErrorWriter(io::ErrorKind::PermissionDenied),
+        )
+        .expect_err("non-broken output error should fail rendering");
 
         let exit_code = error_exit(&error, &mut ErrorWriter(io::ErrorKind::BrokenPipe));
 

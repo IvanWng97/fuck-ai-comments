@@ -144,8 +144,9 @@ pub(crate) struct Comment {
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum CommentKind {
     Narrative,
-    FileNarrative,
-    TypeNarrative,
+    Docstring,
+    FileDocstring,
+    TypeDocstring,
     RustDocs,
     FileRustDocs,
     ToolDirective,
@@ -164,6 +165,7 @@ pub(crate) enum CommentAttachmentScope {
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum CommentCategory {
     Narrative,
+    Docstring,
     Rustdoc,
     SafetyProof,
     ToolDirective,
@@ -172,11 +174,12 @@ enum CommentCategory {
 impl CommentKind {
     pub(crate) const fn attachment(self) -> CommentAttachmentScope {
         match self {
-            Self::FileNarrative | Self::FileRustDocs | Self::FilePublicDocs => {
+            Self::FileDocstring | Self::FileRustDocs | Self::FilePublicDocs => {
                 CommentAttachmentScope::File
             }
-            Self::TypeNarrative => CommentAttachmentScope::Type,
+            Self::TypeDocstring => CommentAttachmentScope::Type,
             Self::Narrative
+            | Self::Docstring
             | Self::RustDocs
             | Self::ToolDirective
             | Self::SafetyProof
@@ -186,7 +189,8 @@ impl CommentKind {
 
     fn static_policy(self, policy: &PolicyConfig) -> StaticPolicy {
         match self {
-            Self::Narrative | Self::FileNarrative | Self::TypeNarrative => policy.narrative(),
+            Self::Narrative => policy.narrative(),
+            Self::Docstring | Self::FileDocstring | Self::TypeDocstring => policy.docstring(),
             Self::RustDocs | Self::FileRustDocs => policy.rustdoc(false),
             Self::PublicDocs | Self::FilePublicDocs => policy.rustdoc(true),
             Self::SafetyProof => policy.safety_proof(),
@@ -196,8 +200,9 @@ impl CommentKind {
 
     fn category(self) -> CommentCategory {
         match self {
-            Self::Narrative | Self::FileNarrative | Self::TypeNarrative => {
-                CommentCategory::Narrative
+            Self::Narrative => CommentCategory::Narrative,
+            Self::Docstring | Self::FileDocstring | Self::TypeDocstring => {
+                CommentCategory::Docstring
             }
             Self::RustDocs | Self::FileRustDocs | Self::PublicDocs | Self::FilePublicDocs => {
                 CommentCategory::Rustdoc
@@ -865,6 +870,7 @@ impl CommentCategory {
     const fn label(self) -> &'static str {
         match self {
             Self::Narrative => "narrative",
+            Self::Docstring => "docstring",
             Self::Rustdoc => "rustdoc",
             Self::SafetyProof => "safety-proof",
             Self::ToolDirective => "tool-directive",

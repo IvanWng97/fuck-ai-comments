@@ -7,7 +7,9 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use anyhow::{Context, Result, bail};
-use fuck_ai_comments::{AnalysisContext, AnalysisProfile, SourceFile, supports_path};
+use fuck_ai_comments::{
+    AnalysisContext, AnalysisProfile, RepositoryConfig, SourceFile, supports_path,
+};
 
 use super::cargo_context;
 use super::check::Report;
@@ -104,12 +106,14 @@ pub(super) fn scan(
         changes.files,
         profile,
         &policy.excluded_paths,
+        &policy.config,
         full_static_snapshots,
     )
 }
 
 struct LoadedPolicy {
     analysis: AnalysisContext,
+    config: RepositoryConfig,
     changed: bool,
     excluded_paths: BTreeSet<PathBuf>,
 }
@@ -772,10 +776,9 @@ impl Repository {
             let absolute = cargo_context::normalized_absolute_path(config_path, "policy config")?;
             let bytes = source::read_regular(&absolute, config_path)?;
             let text = source::utf8(config_path, &bytes)?;
-            let analysis = analysis
-                .clone()
-                .with_policy_toml(text)
+            let config = RepositoryConfig::from_toml(text)
                 .with_context(|| format!("could not load {}", config_path.display()))?;
+            let analysis = analysis.clone().with_repository_config(&config);
             // Match the canonical repository root so Windows verbatim prefixes
             // cannot prevent the validated config exclusion from matching.
             let canonical = fs::canonicalize(&absolute).with_context(|| {
@@ -788,6 +791,7 @@ impl Repository {
                 .map(Path::to_owned);
             return Ok(LoadedPolicy {
                 analysis,
+                config,
                 // An explicit config is read from the live filesystem rather than the
                 // selected Git authority, so it has no reliable before snapshot.
                 changed: true,
@@ -820,18 +824,18 @@ impl Repository {
             .map(|snapshot| read_snapshot(self, snapshot, &blobs))
             .transpose()?;
         let changed = before_bytes.as_deref() != after_bytes.as_deref();
-        let analysis = match after_bytes {
+        let config = match after_bytes {
             Some(bytes) => {
                 let text = source::utf8(config_path, &bytes)?;
-                analysis
-                    .clone()
-                    .with_policy_toml(text)
+                RepositoryConfig::from_toml(text)
                     .with_context(|| format!("could not load {POLICY_CONFIG_PATH}"))?
             }
-            None => analysis.clone(),
+            None => RepositoryConfig::default(),
         };
+        let analysis = analysis.clone().with_repository_config(&config);
         Ok(LoadedPolicy {
             analysis,
+            config,
             changed,
             excluded_paths: std::iter::once(config_path.to_owned()).collect(),
         })
@@ -1466,22 +1470,25 @@ fn analyze_changes(
     mut changes: Vec<FileChange>,
     profile: AnalysisProfile,
     excluded_paths: &BTreeSet<PathBuf>,
+    config: &RepositoryConfig,
     full_static_snapshots: Option<Vec<Snapshot>>,
 ) -> Result<Report> {
     for change in &mut changes {
+        let after_excluded = change
+            .after
+            .path()
+            .is_some_and(|path| path_is_excluded(path, excluded_paths, config));
+        if after_excluded {
+            change.before = None;
+            change.after = None;
+            continue;
+        }
         if change
             .before
             .path()
-            .is_some_and(|path| excluded_paths.contains(path))
+            .is_some_and(|path| path_is_excluded(path, excluded_paths, config))
         {
             change.before = None;
-        }
-        if change
-            .after
-            .path()
-            .is_some_and(|path| excluded_paths.contains(path))
-        {
-            change.after = None;
         }
     }
     changes.retain(|change| change.before.is_some() || change.after.is_some());
@@ -1517,7 +1524,7 @@ fn analyze_changes(
                 .into_iter()
                 .filter(|snapshot| {
                     repository.in_scope(&snapshot.path)
-                        && !excluded_paths.contains(&snapshot.path)
+                        && !path_is_excluded(&snapshot.path, excluded_paths, config)
                         && supports_path(&snapshot.path)
                 })
                 .map(|snapshot| {
@@ -1568,6 +1575,14 @@ fn analyze_changes(
         findings,
         files_scanned,
     })
+}
+
+fn path_is_excluded(
+    path: &Path,
+    config_paths: &BTreeSet<PathBuf>,
+    config: &RepositoryConfig,
+) -> bool {
+    config_paths.contains(path) || config.excludes_path(path, false)
 }
 
 fn reject_unpaired_supported_addition_and_deletion(

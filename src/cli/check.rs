@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use fuck_ai_comments::{Finding, SourceFile, supports_path};
+use fuck_ai_comments::{Finding, RepositoryConfig, SourceFile, supports_path};
 use ignore::WalkBuilder;
 
 use super::{cargo_context, git, source};
@@ -16,22 +16,33 @@ pub(super) struct Report {
 }
 
 pub(super) fn scan_all(root: &Path, explicit_config: Option<&Path>) -> Result<Report> {
-    let (default_config, config_path) = match explicit_config {
-        Some(config_path) => (scan_root_config_path(root), config_path.to_owned()),
+    let (default_config, config_source) = match explicit_config {
+        Some(config_path) => (
+            scan_root_config_path(root),
+            ConfigSource {
+                path: config_path.to_owned(),
+                authority_root: scan_root(root).to_owned(),
+            },
+        ),
         None => {
-            let config_path = default_config_path(root)?;
-            (config_path.clone(), config_path)
+            let config_source = default_config_source(root)?;
+            (config_source.path.clone(), config_source)
         }
     };
-    let files = supported_files(root, [&default_config, &config_path])?;
+    let config = load_repository_config(&config_source.path, explicit_config.is_some())?;
+    let files = supported_files(
+        root,
+        &config_source.authority_root,
+        [&default_config, &config_source.path],
+        &config,
+    )?;
     let current_directory =
         std::env::current_dir().context("could not resolve current directory")?;
     let cargo_context = cargo_context::discover(root, &current_directory)?;
-    let analysis = analysis_with_repository_policy(
-        cargo_context.analysis(),
-        &config_path,
-        explicit_config.is_some(),
-    )?;
+    let analysis = cargo_context
+        .analysis()
+        .clone()
+        .with_repository_config(&config);
     let mut findings = Vec::new();
 
     for disk_path in &files {
@@ -67,8 +78,11 @@ pub(super) fn scan_all(root: &Path, explicit_config: Option<&Path>) -> Result<Re
 
 fn supported_files<'path>(
     root: &Path,
+    authority_root: &Path,
     config_paths: impl IntoIterator<Item = &'path PathBuf>,
+    config: &RepositoryConfig,
 ) -> Result<Vec<PathBuf>> {
+    let exclusion_coordinates = ExclusionCoordinates::new(root, authority_root)?;
     let absolute_configs: BTreeSet<_> = config_paths
         .into_iter()
         .map(|path| cargo_context::normalized_absolute_path(path, "policy config"))
@@ -97,47 +111,109 @@ fn supported_files<'path>(
         if absolute_configs.contains(&absolute_entry) {
             continue;
         }
+        let relative_entry = exclusion_coordinates.relative_path(&absolute_entry)?;
+        if config.excludes_path(&relative_entry, false) {
+            continue;
+        }
         files.push(entry.into_path());
     }
     files.sort();
     Ok(files)
 }
 
-fn analysis_with_repository_policy(
-    analysis: &fuck_ai_comments::AnalysisContext,
-    config_path: &Path,
-    required: bool,
-) -> Result<fuck_ai_comments::AnalysisContext> {
+struct ExclusionCoordinates {
+    lexical_scan_root: PathBuf,
+    authority_relative_scan_root: PathBuf,
+}
+
+impl ExclusionCoordinates {
+    fn new(root: &Path, authority_root: &Path) -> Result<Self> {
+        let lexical_scan_root =
+            cargo_context::normalized_absolute_path(scan_root(root), "scan root")?;
+        let canonical_scan_root = fs::canonicalize(scan_root(root)).with_context(|| {
+            format!("could not resolve scan root {}", scan_root(root).display())
+        })?;
+        let canonical_authority = fs::canonicalize(authority_root).with_context(|| {
+            format!(
+                "could not resolve config authority {}",
+                authority_root.display()
+            )
+        })?;
+        let authority_relative_scan_root = canonical_scan_root
+            .strip_prefix(&canonical_authority)
+            .with_context(|| {
+                format!(
+                    "scan root {} is outside config authority {}",
+                    scan_root(root).display(),
+                    authority_root.display()
+                )
+            })?
+            .to_owned();
+        Ok(Self {
+            lexical_scan_root,
+            authority_relative_scan_root,
+        })
+    }
+
+    fn relative_path<'path>(&self, absolute_path: &'path Path) -> Result<Cow<'path, Path>> {
+        let scan_relative = absolute_path
+            .strip_prefix(&self.lexical_scan_root)
+            .context("source path is outside the scan root")?;
+        if self.authority_relative_scan_root.as_os_str().is_empty() {
+            return Ok(Cow::Borrowed(scan_relative));
+        }
+        Ok(Cow::Owned(
+            self.authority_relative_scan_root.join(scan_relative),
+        ))
+    }
+}
+
+fn load_repository_config(config_path: &Path, required: bool) -> Result<RepositoryConfig> {
     match fs::symlink_metadata(config_path) {
         Ok(_) => {
             let bytes = source::read_regular(config_path, config_path)?;
             let text = source::utf8(config_path, &bytes)?;
-            analysis
-                .clone()
-                .with_policy_toml(text)
-                .with_context(|| format!("could not load {}", config_path.display()))
+            let config = RepositoryConfig::from_toml(text)
+                .with_context(|| format!("could not load {}", config_path.display()))?;
+            Ok(config)
         }
-        Err(error) if error.kind() == ErrorKind::NotFound && !required => Ok(analysis.clone()),
+        Err(error) if error.kind() == ErrorKind::NotFound && !required => {
+            Ok(RepositoryConfig::default())
+        }
         Err(error) => {
             Err(error).with_context(|| format!("could not inspect {}", config_path.display()))
         }
     }
 }
 
-fn default_config_path(root: &Path) -> Result<PathBuf> {
+struct ConfigSource {
+    path: PathBuf,
+    authority_root: PathBuf,
+}
+
+fn default_config_source(root: &Path) -> Result<ConfigSource> {
     if let Some(repository_root) = git::discover_worktree_root(root)? {
-        return Ok(repository_root.join("fuck-ai-comments.toml"));
+        return Ok(ConfigSource {
+            path: repository_root.join("fuck-ai-comments.toml"),
+            authority_root: repository_root,
+        });
     }
-    Ok(scan_root_config_path(root))
+    let authority_root = scan_root(root).to_owned();
+    Ok(ConfigSource {
+        path: authority_root.join("fuck-ai-comments.toml"),
+        authority_root,
+    })
 }
 
 fn scan_root_config_path(root: &Path) -> PathBuf {
+    scan_root(root).join("fuck-ai-comments.toml")
+}
+
+fn scan_root(root: &Path) -> &Path {
     if root.is_dir() {
-        root.join("fuck-ai-comments.toml")
+        root
     } else {
-        root.parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("fuck-ai-comments.toml")
+        root.parent().unwrap_or_else(|| Path::new("."))
     }
 }
 

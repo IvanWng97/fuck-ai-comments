@@ -9,6 +9,7 @@ import {
 } from "./arguments.js";
 import { platformSpec } from "./platform.js";
 import { installCli } from "./release.js";
+import { processCliResult } from "./report.js";
 
 async function run() {
   const specification = platformSpec(process.platform, process.arch);
@@ -19,7 +20,15 @@ async function run() {
   core.addPath(path.dirname(executable));
 
   const arguments_ = buildCheckArgumentsFromInputs(core.getInput);
-  await exec.exec(executableCommand(executable), arguments_);
+  const result = await exec.getExecOutput(
+    executableCommand(executable),
+    arguments_,
+    {
+      ignoreReturnCode: true,
+      silent: true,
+    },
+  );
+  processCliResult(result, core);
 }
 
 run().catch((error) => {

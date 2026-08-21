@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use fuck_ai_comments::{
-    AnalysisContext, AnalysisError, Finding, SourceFile, analyze_all, analyze_change,
+    AnalysisContext, AnalysisError, Finding, RepositoryConfig, SourceFile, analyze_all,
+    analyze_change,
 };
 
 fn analyze(path: &Path, source: &str) -> Result<Vec<Finding>, AnalysisError> {
@@ -17,6 +18,62 @@ fn analyze_line_change(
         SourceFile { path, text: before },
         SourceFile { path, text: after },
     )
+}
+
+#[test]
+fn repository_config_uses_gitignore_exclusion_semantics() {
+    let config = RepositoryConfig::from_toml(concat!(
+        "schema-version = 1\n",
+        "exclude = [\"generated/**\", \"!generated/keep.py\"]\n",
+    ))
+    .expect("repository config should parse");
+
+    assert!(config.excludes_path(Path::new("generated/drop.py"), false));
+    assert!(config.excludes_path(Path::new("generated/nested/drop.py"), false));
+    assert!(!config.excludes_path(Path::new("generated/keep.py"), false));
+    assert!(!config.excludes_path(Path::new("src/keep.py"), false));
+}
+
+#[test]
+fn repository_config_requires_ignored_parents_to_be_reincluded() {
+    let config = RepositoryConfig::from_toml(concat!(
+        "schema-version = 1\n",
+        "exclude = [\"!generated/keep.py\", \"generated/\"]\n",
+    ))
+    .expect("repository config should parse");
+    let reinclude_parent = RepositoryConfig::from_toml(concat!(
+        "schema-version = 1\n",
+        "exclude = [\"generated/\", \"!generated/\", \"!generated/keep.py\"]\n",
+    ))
+    .expect("repository config should parse");
+
+    assert!(config.excludes_path(Path::new("generated/keep.py"), false));
+    assert!(!reinclude_parent.excludes_path(Path::new("generated/keep.py"), false));
+}
+
+#[test]
+fn repository_config_normalizes_current_directory_components() {
+    let config = RepositoryConfig::from_toml(concat!(
+        "schema-version = 1\n",
+        "exclude = [\"**\", \"!foo.rs\"]\n",
+    ))
+    .expect("repository config should parse");
+
+    assert_eq!(
+        config.excludes_path(Path::new("foo.rs"), false),
+        config.excludes_path(Path::new("./foo.rs"), false)
+    );
+    assert!(!config.excludes_path(Path::new("./foo.rs"), false));
+}
+
+#[test]
+fn repository_config_never_excludes_unsafe_paths() {
+    let config =
+        RepositoryConfig::from_toml(concat!("schema-version = 1\n", "exclude = [\"**\"]\n",))
+            .expect("repository config should parse");
+
+    assert!(!config.excludes_path(Path::new("../outside.py"), false));
+    assert!(!config.excludes_path(Path::new("/outside.py"), false));
 }
 
 #[test]
