@@ -21,9 +21,591 @@ fn analyze_line_change(
 }
 
 #[test]
+fn repository_config_v2_uses_semantic_comment_categories() {
+    RepositoryConfig::from_toml(concat!(
+        "schema-version = 2\n",
+        "[comments.narrative]\n",
+        "mode = \"relative\"\n",
+        "[comments.documentation]\n",
+        "mode = \"capped\"\n",
+        "max-lines = 0\n",
+        "[comments.public-documentation]\n",
+        "mode = \"unlimited\"\n",
+        "[comments.safety-proof]\n",
+        "mode = \"owner-capped\"\n",
+        "[comments.tool-directive]\n",
+        "mode = \"owner-capped\"\n",
+    ))
+    .expect("schema v2 semantic comment policies should parse");
+
+    let old_schema = RepositoryConfig::from_toml("schema-version = 1\n")
+        .expect_err("schema v1 must not be accepted implicitly");
+    assert_eq!(
+        old_schema.to_string(),
+        "unsupported schema-version 1; expected 2"
+    );
+
+    let old_category = RepositoryConfig::from_toml(concat!(
+        "schema-version = 2\n",
+        "[comments.rustdoc]\n",
+        "mode = \"unlimited\"\n",
+    ))
+    .expect_err("language-specific v1 categories must be rejected");
+    assert!(
+        old_category.to_string().contains("unknown field `rustdoc`"),
+        "unexpected error: {old_category}"
+    );
+}
+
+#[test]
+fn configured_owner_capped_mode_skips_relative_budgets_but_keeps_the_owner_cap() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"owner-capped\"\n",
+        ))
+        .expect("owner-capped documentation policy should parse");
+
+    let within_cap = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.py"),
+            text: concat!(
+                "def work():\n",
+                "    \"\"\"First line.\n",
+                "    Second line.\n",
+                "    Third line.\"\"\"\n",
+                "    return 1\n",
+            ),
+        })
+        .expect("valid Python should parse");
+    assert!(
+        within_cap.is_empty(),
+        "owner-capped documentation skips relative and block budgets: {within_cap:#?}"
+    );
+
+    let over_cap = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.py"),
+            text: concat!(
+                "def work():\n",
+                "    \"\"\"One.\n",
+                "    Two.\n",
+                "    Three.\n",
+                "    Four.\n",
+                "    Five.\n",
+                "    Six.\n",
+                "    Seven.\n",
+                "    Eight.\n",
+                "    Nine.\"\"\"\n",
+                "    return 1\n",
+            ),
+        })
+        .expect("valid Python should parse");
+    assert!(
+        over_cap
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/owner-comment-cap"),
+        "owner-capped documentation retains the absolute cap: {over_cap:#?}"
+    );
+}
+
+#[test]
+fn rustdoc_syntax_takes_precedence_over_a_safety_marker() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.public-documentation]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.safety-proof]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("overlapping Rust comment policies should parse");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: "/// SAFETY: callers uphold the function contract.\npub unsafe fn call() {}\n",
+        })
+        .expect("valid Rust should parse");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding
+                    .message
+                    .contains("public-documentation comment lines")
+        }),
+        "language-level rustdoc syntax must outrank a marker in its prose: {findings:#?}"
+    );
+}
+
+#[test]
+fn javascript_documentation_requires_an_adjacent_declaration() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let attached = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.js"),
+            text: "/** Runs one unit of work. */\nfunction work() { return 1; }\n",
+        })
+        .expect("valid JavaScript should parse");
+    assert!(
+        attached.is_empty(),
+        "attached JSDoc is documentation: {attached:#?}"
+    );
+
+    let detached = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.js"),
+            text: "/** This block is detached. */\n\nfunction work() { return 1; }\n",
+        })
+        .expect("valid JavaScript should parse");
+    assert!(
+        detached.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "detached JSDoc syntax must remain narrative: {detached:#?}"
+    );
+}
+
+#[test]
+fn a_non_documentation_comment_breaks_a_documentation_run() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 1\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.js"),
+            text: concat!(
+                "/** No longer attached to the declaration. */\n",
+                "// An ordinary comment breaks the documentation run.\n",
+                "function work() { return 1; }\n",
+            ),
+        })
+        .expect("valid JavaScript should parse");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("2 narrative comment lines")
+        }),
+        "only a homogeneous documentation suffix may attach: {findings:#?}"
+    );
+}
+
+#[test]
+fn typescript_documentation_cannot_attach_inside_a_decorator_chain() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.ts"),
+            text: "@first\n/** Not attached to the class. */\n@second\nclass Worker {}\n",
+        })
+        .expect("valid TypeScript should parse");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "comments inside a decorator chain must stay narrative: {findings:#?}"
+    );
+}
+
+#[test]
+fn typescript_uses_jsdoc_syntax_for_declarations() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let attached = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.ts"),
+            text: "/** Public worker contract. */\nexport interface Worker { run(): void; }\n",
+        })
+        .expect("valid TypeScript should parse");
+    assert!(
+        attached.is_empty(),
+        "attached TSDoc is documentation: {attached:#?}"
+    );
+
+    let decorated = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.ts"),
+            text: "/** Documents the decorated class. */\n@sealed\nclass Worker {}\n",
+        })
+        .expect("valid TypeScript should parse");
+    assert!(
+        decorated.is_empty(),
+        "documentation before the whole decorator chain remains attached: {decorated:#?}"
+    );
+
+    let extra_star = context
+        .analyze_all(SourceFile {
+            path: Path::new("worker.ts"),
+            text: "/*** Deliberately ignored by JSDoc. */\ninterface Worker {}\n",
+        })
+        .expect("valid TypeScript should parse");
+    assert!(
+        extra_star.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "an extra-star block is not JSDoc: {extra_star:#?}"
+    );
+}
+
+#[test]
+fn kotlin_kdoc_requires_an_adjacent_declaration() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let attached = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.kt"),
+            text: "/** Runs one unit of work. */\nfun work(): Int = 1\n",
+        })
+        .expect("valid Kotlin should parse");
+    assert!(
+        attached.is_empty(),
+        "attached KDoc is documentation: {attached:#?}"
+    );
+
+    let extra_star = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.kt"),
+            text: "/*** Kotlin still treats this as KDoc. */\nfun work(): Int = 1\n",
+        })
+        .expect("valid Kotlin should parse");
+    assert!(
+        extra_star.is_empty(),
+        "an extra-star KDoc remains documentation: {extra_star:#?}"
+    );
+
+    let empty_block = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.kt"),
+            text: "/**/\nfun work(): Int = 1\n",
+        })
+        .expect("valid Kotlin should parse");
+    assert!(
+        empty_block.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "the Kotlin lexer treats /**/ as an ordinary block comment: {empty_block:#?}"
+    );
+
+    let detached = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.kt"),
+            text: "/** This block is detached. */\n\nfun work(): Int = 1\n",
+        })
+        .expect("valid Kotlin should parse");
+    assert!(
+        detached.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "detached KDoc syntax must remain narrative: {detached:#?}"
+    );
+}
+
+#[test]
+fn swift_documentation_requires_an_adjacent_declaration() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    for source in [
+        "/// Runs one unit.\n/// Returns its result.\nfunc work() -> Int { 1 }\n",
+        "/** Stores one result. */\nstruct ResultBox {}\n",
+        "//// Swift still treats this as documentation.\nfunc work() -> Int { 1 }\n",
+        "/*** Swift still treats this as documentation. */\nstruct ResultBox {}\n",
+    ] {
+        let findings = context
+            .analyze_all(SourceFile {
+                path: Path::new("Worker.swift"),
+                text: source,
+            })
+            .expect("valid Swift should parse");
+        assert!(
+            findings.is_empty(),
+            "attached Swift docs are documentation: {findings:#?}"
+        );
+    }
+
+    let detached = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: "/// This block is detached.\n\nfunc work() -> Int { 1 }\n",
+        })
+        .expect("valid Swift should parse");
+    assert!(
+        detached.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "detached Swift doc syntax must remain narrative: {detached:#?}"
+    );
+}
+
+#[test]
+fn swift_documentation_crosses_attributes_to_its_declaration_owner() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.documentation]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 1\n",
+        ))
+        .expect("semantic documentation policy should parse");
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: concat!(
+                "/// Documents the first function.\n",
+                "@available(*, deprecated)\n",
+                "func first() {}\n",
+                "/// Documents the second function.\n",
+                "@available(*, deprecated)\n",
+                "func second() {}\n",
+            ),
+        })
+        .expect("valid Swift should parse");
+
+    assert!(
+        findings.is_empty(),
+        "each attributed declaration must own its documentation independently: {findings:#?}"
+    );
+}
+
+#[test]
+fn swift_documentation_cannot_attach_inside_an_attribute_chain() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.swift"),
+            text: concat!(
+                "@available(*, deprecated)\n",
+                "/// Not attached to the function.\n",
+                "@MainActor\n",
+                "func work() {}\n",
+            ),
+        })
+        .expect("valid Swift should parse");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "comments inside an attribute chain must stay narrative: {findings:#?}"
+    );
+}
+
+#[test]
+fn objective_c_documentation_requires_an_adjacent_declaration() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    for source in [
+        "/** Runs one unit of work. */\nint work(void) { return 1; }\n",
+        "/// Stores one result.\n@interface ResultBox\n@end\n",
+        "/*! Publishes one result. */\nint publish(void);\n",
+    ] {
+        let findings = context
+            .analyze_all(SourceFile {
+                path: Path::new("Worker.m"),
+                text: source,
+            })
+            .expect("valid Objective-C should parse");
+        assert!(
+            findings.is_empty(),
+            "attached Objective-C docs are documentation: {findings:#?}"
+        );
+    }
+
+    let detached = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.m"),
+            text: "/** This block is detached. */\n\nint work(void) { return 1; }\n",
+        })
+        .expect("valid Objective-C should parse");
+    assert!(
+        detached.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "detached Objective-C doc syntax must remain narrative: {detached:#?}"
+    );
+}
+
+#[test]
+fn objective_c_recognizes_trailing_doxygen_documentation() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.m"),
+            text: concat!(
+                "struct Record {\n",
+                "    int first;  ///< Documents the first field.\n",
+                "    int second; //!< Documents the second field.\n",
+                "    int third;  /**< Documents the third field. */\n",
+                "    int fourth; /*!< Documents the fourth field. */\n",
+                "};\n",
+            ),
+        })
+        .expect("valid Objective-C should parse");
+
+    assert!(
+        findings.is_empty(),
+        "canonical trailing Doxygen comments are documentation: {findings:#?}"
+    );
+}
+
+#[test]
+fn objective_c_trailing_doxygen_cannot_attach_to_an_attribute() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.m"),
+            text: "[[deprecated /**< Not a member document. */, aligned]] int value;\n",
+        })
+        .expect("valid Objective-C should parse");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "internal attribute comments must not receive a trailing-doc exemption: {findings:#?}"
+    );
+}
+
+#[test]
+fn objective_c_leading_doxygen_cannot_attach_inside_an_attribute_list() {
+    let context = AnalysisContext::default()
+        .with_policy_toml(concat!(
+            "schema-version = 2\n",
+            "[comments.narrative]\n",
+            "mode = \"capped\"\n",
+            "max-lines = 0\n",
+            "[comments.documentation]\n",
+            "mode = \"unlimited\"\n",
+        ))
+        .expect("semantic documentation policy should parse");
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("Worker.m"),
+            text: "[[\n/** Not a declaration document. */\ndeprecated\n]] int value;\n",
+        })
+        .expect("valid Objective-C should parse");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "comment-policy/comment-category-cap"
+                && finding.message.contains("narrative comment lines")
+        }),
+        "comments inside an attribute list must stay narrative: {findings:#?}"
+    );
+}
+
+#[test]
 fn repository_config_uses_gitignore_exclusion_semantics() {
     let config = RepositoryConfig::from_toml(concat!(
-        "schema-version = 1\n",
+        "schema-version = 2\n",
         "exclude = [\"generated/**\", \"!generated/keep.py\"]\n",
     ))
     .expect("repository config should parse");
@@ -37,12 +619,12 @@ fn repository_config_uses_gitignore_exclusion_semantics() {
 #[test]
 fn repository_config_requires_ignored_parents_to_be_reincluded() {
     let config = RepositoryConfig::from_toml(concat!(
-        "schema-version = 1\n",
+        "schema-version = 2\n",
         "exclude = [\"!generated/keep.py\", \"generated/\"]\n",
     ))
     .expect("repository config should parse");
     let reinclude_parent = RepositoryConfig::from_toml(concat!(
-        "schema-version = 1\n",
+        "schema-version = 2\n",
         "exclude = [\"generated/\", \"!generated/\", \"!generated/keep.py\"]\n",
     ))
     .expect("repository config should parse");
@@ -54,7 +636,7 @@ fn repository_config_requires_ignored_parents_to_be_reincluded() {
 #[test]
 fn repository_config_normalizes_current_directory_components() {
     let config = RepositoryConfig::from_toml(concat!(
-        "schema-version = 1\n",
+        "schema-version = 2\n",
         "exclude = [\"**\", \"!foo.rs\"]\n",
     ))
     .expect("repository config should parse");
@@ -69,7 +651,7 @@ fn repository_config_normalizes_current_directory_components() {
 #[test]
 fn repository_config_never_excludes_unsafe_paths() {
     let config =
-        RepositoryConfig::from_toml(concat!("schema-version = 1\n", "exclude = [\"**\"]\n",))
+        RepositoryConfig::from_toml(concat!("schema-version = 2\n", "exclude = [\"**\"]\n",))
             .expect("repository config should parse");
 
     assert!(!config.excludes_path(Path::new("../outside.py"), false));

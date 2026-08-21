@@ -4,13 +4,13 @@ use std::path::{Component, Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::Deserialize;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PolicyConfig {
     narrative: Option<StaticPolicy>,
-    docstring: Option<StaticPolicy>,
-    rustdoc: Option<StaticPolicy>,
+    documentation: Option<StaticPolicy>,
+    public_documentation: Option<StaticPolicy>,
     safety_proof: Option<StaticPolicy>,
     tool_directive: Option<StaticPolicy>,
 }
@@ -64,15 +64,15 @@ impl RepositoryConfig {
                 .narrative
                 .map(|policy| policy.resolve("comments.narrative"))
                 .transpose()?,
-            docstring: file
+            documentation: file
                 .comments
-                .docstring
-                .map(|policy| policy.resolve("comments.docstring"))
+                .documentation
+                .map(|policy| policy.resolve("comments.documentation"))
                 .transpose()?,
-            rustdoc: file
+            public_documentation: file
                 .comments
-                .rustdoc
-                .map(|policy| policy.resolve("comments.rustdoc"))
+                .public_documentation
+                .map(|policy| policy.resolve("comments.public-documentation"))
                 .transpose()?,
             safety_proof: file
                 .comments
@@ -151,20 +151,16 @@ impl RepositoryConfig {
 }
 
 impl PolicyConfig {
-    pub(crate) fn docstring(&self) -> StaticPolicy {
-        self.docstring.unwrap_or(StaticPolicy::Relative)
-    }
-
     pub(crate) fn narrative(&self) -> StaticPolicy {
         self.narrative.unwrap_or(StaticPolicy::Relative)
     }
 
-    pub(crate) fn rustdoc(&self, public: bool) -> StaticPolicy {
-        self.rustdoc.unwrap_or(if public {
-            StaticPolicy::Unlimited
-        } else {
-            StaticPolicy::Relative
-        })
+    pub(crate) fn documentation(&self) -> StaticPolicy {
+        self.documentation.unwrap_or(StaticPolicy::Relative)
+    }
+
+    pub(crate) fn public_documentation(&self) -> StaticPolicy {
+        self.public_documentation.unwrap_or(StaticPolicy::Unlimited)
     }
 
     pub(crate) fn safety_proof(&self) -> StaticPolicy {
@@ -190,8 +186,8 @@ struct ConfigFile {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct CommentPolicies {
     narrative: Option<CommentPolicy>,
-    docstring: Option<CommentPolicy>,
-    rustdoc: Option<CommentPolicy>,
+    documentation: Option<CommentPolicy>,
+    public_documentation: Option<CommentPolicy>,
     safety_proof: Option<CommentPolicy>,
     tool_directive: Option<CommentPolicy>,
 }
@@ -199,27 +195,25 @@ struct CommentPolicies {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct CommentPolicy {
-    policy: PolicyMode,
+    mode: PolicyMode,
     max_lines: Option<usize>,
 }
 
 impl CommentPolicy {
     fn resolve(self, path: &str) -> Result<StaticPolicy, PolicyConfigError> {
-        match (self.policy, self.max_lines) {
+        match (self.mode, self.max_lines) {
             (PolicyMode::Relative, None) => Ok(StaticPolicy::Relative),
+            (PolicyMode::OwnerCapped, None) => Ok(StaticPolicy::OwnerCapped),
             (PolicyMode::Unlimited, None) => Ok(StaticPolicy::Unlimited),
-            (PolicyMode::Capped, Some(max_lines)) if max_lines > 0 => {
-                Ok(StaticPolicy::Capped(max_lines))
-            }
-            (PolicyMode::Capped, Some(_)) => Err(PolicyConfigError(format!(
-                "{path}.max-lines must be greater than zero"
-            ))),
+            (PolicyMode::Capped, Some(max_lines)) => Ok(StaticPolicy::Capped(max_lines)),
             (PolicyMode::Capped, None) => Err(PolicyConfigError(format!(
-                "{path}.max-lines is required when policy = \"capped\""
+                "{path}.max-lines is required when mode = \"capped\""
             ))),
-            (PolicyMode::Relative | PolicyMode::Unlimited, Some(_)) => Err(PolicyConfigError(
-                format!("{path}.max-lines is only valid when policy = \"capped\""),
-            )),
+            (PolicyMode::Relative | PolicyMode::OwnerCapped | PolicyMode::Unlimited, Some(_)) => {
+                Err(PolicyConfigError(format!(
+                    "{path}.max-lines is only valid when mode = \"capped\""
+                )))
+            }
         }
     }
 }
@@ -228,6 +222,7 @@ impl CommentPolicy {
 #[serde(rename_all = "kebab-case")]
 enum PolicyMode {
     Relative,
+    OwnerCapped,
     Capped,
     Unlimited,
 }

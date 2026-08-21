@@ -10,7 +10,7 @@ use super::tree::{
 use super::walk::{WalkEvent, events};
 use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, ParsedFile, Span};
+use crate::policy::{CommentAttachmentScope, CommentClassification, ParsedFile, Span};
 
 const BANDIT_NUMERIC_TEST_ID_DIGITS: usize = 3;
 
@@ -108,19 +108,25 @@ impl LanguageSpec for Python {
         node: Node<'_>,
         _source: &str,
         context: &Self::Context,
-    ) -> Option<CommentKind> {
+    ) -> Option<CommentClassification> {
         if let Some(scope) = context.docstring_scopes.get(&node.id()) {
             return Some(match scope {
-                DocstringScope::Function => CommentKind::Docstring,
-                DocstringScope::Type => CommentKind::TypeDocstring,
-                DocstringScope::File => CommentKind::FileDocstring,
+                DocstringScope::Function => {
+                    CommentClassification::documentation(CommentAttachmentScope::Inferred)
+                }
+                DocstringScope::Type => {
+                    CommentClassification::documentation(CommentAttachmentScope::Type)
+                }
+                DocstringScope::File => {
+                    CommentClassification::documentation(CommentAttachmentScope::File)
+                }
             });
         }
         (node.kind() == "comment").then(|| {
             if context.tool_directives.contains(&node.id()) {
-                CommentKind::ToolDirective
+                CommentClassification::tool_directive()
             } else {
-                CommentKind::Narrative
+                CommentClassification::narrative()
             }
         })
     }
@@ -695,7 +701,10 @@ mod tests {
             .find(|comment| comment.text.contains("fmt: off"))
             .expect("format marker comment");
 
-        assert_eq!(marker.kind, CommentKind::ToolDirective);
+        assert_eq!(
+            marker.classification,
+            CommentClassification::tool_directive()
+        );
     }
 
     #[test]

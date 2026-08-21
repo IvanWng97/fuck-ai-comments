@@ -6,11 +6,11 @@ use super::tree::{
     ANONYMOUS_FUNCTION_NAME, AttachmentIndex, AttachmentSyntax, CallableSubtrees,
     DirectivePlacement, LanguageSpec, OwnerCandidate, OwnerLocation, analyze_with_policy, document,
     first_descendant_with_kind, function_name as default_function_name, has_direct_child,
-    node_text,
+    is_exact_slash_star_documentation, node_text,
 };
 use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, ParsedFile, Span};
+use crate::policy::{CommentClassification, ParsedFile, Span};
 
 // A module can have only one default export, so it supplies a stable identity without a binding.
 const DEFAULT_EXPORT_NAME: &str = "default";
@@ -75,7 +75,7 @@ impl LanguageSpec for JavaScript {
         node: Node<'_>,
         source: &str,
         context: &Self::Context,
-    ) -> Option<CommentKind> {
+    ) -> Option<CommentClassification> {
         classify_comment(node, source, context)
     }
 }
@@ -85,6 +85,7 @@ pub(crate) fn attachment_syntax() -> AttachmentSyntax {
         |kind| kind == "jsx_expression",
         |kind| kind == "hash_bang_line",
     )
+    .with_documentation_comments(is_exact_slash_star_documentation)
 }
 
 pub(crate) fn is_owner_prefix(kind: &str) -> bool {
@@ -139,18 +140,49 @@ pub(crate) fn classify_comment(
     node: Node<'_>,
     source: &str,
     attachments: &AttachmentIndex,
-) -> Option<CommentKind> {
+) -> Option<CommentClassification> {
     if node.kind() != "comment" {
         return None;
     }
-    let kind = if tool_directive(node_text(node, source))
-        .is_some_and(|placement| attachments.is_attached(node, placement))
-    {
-        CommentKind::ToolDirective
-    } else {
-        CommentKind::Narrative
-    };
+    let text = node_text(node, source);
+    let kind =
+        if tool_directive(text).is_some_and(|placement| attachments.is_attached(node, placement)) {
+            CommentClassification::tool_directive()
+        } else if attachments.is_leading_documentation(node, is_documentable_declaration) {
+            CommentClassification::documentation(crate::policy::CommentAttachmentScope::Inferred)
+        } else {
+            CommentClassification::narrative()
+        };
     Some(kind)
+}
+
+fn is_documentable_declaration(kind: &str) -> bool {
+    matches!(
+        kind,
+        "export_statement"
+            | "class_declaration"
+            | "abstract_class_declaration"
+            | "function_declaration"
+            | "generator_function_declaration"
+            | "function_signature"
+            | "lexical_declaration"
+            | "variable_declaration"
+            | "method_definition"
+            | "method_signature"
+            | "abstract_method_signature"
+            | "field_definition"
+            | "public_field_definition"
+            | "interface_declaration"
+            | "type_alias_declaration"
+            | "enum_declaration"
+            | "ambient_declaration"
+            | "internal_module"
+            | "module"
+            | "property_signature"
+            | "call_signature"
+            | "construct_signature"
+            | "index_signature"
+    )
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

@@ -3,13 +3,14 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    ANONYMOUS_FUNCTION_NAME, CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation,
-    analyze_with_policy, direct_named_child, document, first_descendant_with_kind, node_text,
+    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, AttachmentSyntax, CallableSubtrees, LanguageSpec,
+    OwnerCandidate, OwnerLocation, analyze_with_policy, direct_named_child, document,
+    first_descendant_with_kind, is_exact_slash_star_documentation, node_text,
 };
 use super::walk::{WalkEvent, events};
 use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, ParsedFile, Span};
+use crate::policy::{CommentAttachmentScope, CommentClassification, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct ObjectiveC;
@@ -28,7 +29,7 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
 }
 
 impl LanguageSpec for ObjectiveC {
-    type Context = ();
+    type Context = AttachmentIndex;
 
     fn label(self) -> &'static str {
         "Objective-C"
@@ -36,6 +37,15 @@ impl LanguageSpec for ObjectiveC {
 
     fn grammar(self) -> tree_sitter::Language {
         tree_sitter_objc::LANGUAGE.into()
+    }
+
+    fn build_context(self, root: Node<'_>, source: &str) -> Result<Self::Context, AnalysisError> {
+        Ok(AttachmentIndex::with_syntax(
+            root,
+            source,
+            AttachmentSyntax::default()
+                .with_documentation_comments(is_leading_objective_c_documentation),
+        ))
     }
 
     fn callable_kind(self) -> Option<fn(&str) -> bool> {
@@ -58,16 +68,78 @@ impl LanguageSpec for ObjectiveC {
         self,
         node: Node<'_>,
         source: &str,
-        _context: &Self::Context,
-    ) -> Option<CommentKind> {
+        context: &Self::Context,
+    ) -> Option<CommentClassification> {
         (node.kind() == "comment").then(|| {
-            if clang_format_directive(node_text(node, source)) {
-                CommentKind::ToolDirective
+            let text = node_text(node, source);
+            if clang_format_directive(text) {
+                CommentClassification::tool_directive()
+            } else if context.is_leading_documentation(node, is_documentable_declaration)
+                || (is_trailing_objective_c_documentation(text)
+                    && context.is_immediately_after(node, is_trailing_documentable_member))
+            {
+                CommentClassification::documentation(CommentAttachmentScope::Inferred)
             } else {
-                CommentKind::Narrative
+                CommentClassification::narrative()
             }
         })
     }
+}
+
+fn is_leading_objective_c_documentation(comment: &str) -> bool {
+    let comment = comment.trim_start();
+    (is_exact_slash_star_documentation(comment)
+        && comment
+            .strip_prefix("/**")
+            .is_some_and(|body| !body.starts_with('<')))
+        || comment
+            .strip_prefix("/*!")
+            .is_some_and(|body| !body.starts_with('*') && !body.starts_with('<'))
+        || comment
+            .strip_prefix("///")
+            .is_some_and(|body| !body.starts_with('/') && !body.starts_with('<'))
+        || comment
+            .strip_prefix("//!")
+            .is_some_and(|body| !body.starts_with('!') && !body.starts_with('<'))
+}
+
+fn is_trailing_objective_c_documentation(comment: &str) -> bool {
+    let comment = comment.trim_start();
+    comment.starts_with("/**<")
+        || comment.starts_with("/*!<")
+        || comment.starts_with("///<")
+        || comment.starts_with("//!<")
+}
+
+fn is_documentable_declaration(kind: &str) -> bool {
+    matches!(
+        kind,
+        "class_interface"
+            | "class_implementation"
+            | "protocol_declaration"
+            | "qualified_protocol_interface_declaration"
+            | "compatibility_alias_declaration"
+            | "function_definition"
+            | "declaration"
+            | "method_declaration"
+            | "method_definition"
+            | "property_declaration"
+            | "struct_specifier"
+            | "union_specifier"
+            | "enum_specifier"
+            | "type_definition"
+            | "field_declaration"
+            | "enumerator"
+            | "preproc_def"
+            | "preproc_function_def"
+    )
+}
+
+fn is_trailing_documentable_member(kind: &str) -> bool {
+    matches!(
+        kind,
+        "field_declaration" | "enumerator" | "method_declaration" | "property_declaration"
+    )
 }
 
 fn owner_from_node(

@@ -3,13 +3,13 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::tree::{
-    ANONYMOUS_FUNCTION_NAME, CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation,
-    analyze_with_policy, canonical_syntax, direct_named_child, document, has_direct_child,
-    node_text,
+    ANONYMOUS_FUNCTION_NAME, AttachmentIndex, AttachmentSyntax, CallableSubtrees, LanguageSpec,
+    OwnerCandidate, OwnerLocation, analyze_with_policy, canonical_syntax, direct_named_child,
+    document, has_direct_child, node_text,
 };
 use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentKind, ParsedFile, Span};
+use crate::policy::{CommentAttachmentScope, CommentClassification, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Kotlin;
@@ -28,7 +28,7 @@ pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, Analys
 }
 
 impl LanguageSpec for Kotlin {
-    type Context = ();
+    type Context = AttachmentIndex;
 
     fn label(self) -> &'static str {
         "Kotlin"
@@ -36,6 +36,14 @@ impl LanguageSpec for Kotlin {
 
     fn grammar(self) -> tree_sitter::Language {
         tree_sitter_kotlin_ng::LANGUAGE.into()
+    }
+
+    fn build_context(self, root: Node<'_>, source: &str) -> Result<Self::Context, AnalysisError> {
+        Ok(AttachmentIndex::with_syntax(
+            root,
+            source,
+            AttachmentSyntax::default().with_documentation_comments(is_kotlin_documentation),
+        ))
     }
 
     fn callable_kind(self) -> Option<fn(&str) -> bool> {
@@ -58,10 +66,38 @@ impl LanguageSpec for Kotlin {
         self,
         node: Node<'_>,
         _source: &str,
-        _context: &Self::Context,
-    ) -> Option<CommentKind> {
-        matches!(node.kind(), "line_comment" | "block_comment").then_some(CommentKind::Narrative)
+        context: &Self::Context,
+    ) -> Option<CommentClassification> {
+        if !matches!(node.kind(), "line_comment" | "block_comment") {
+            return None;
+        }
+        Some(
+            if context.is_leading_documentation(node, is_documentable_declaration) {
+                CommentClassification::documentation(CommentAttachmentScope::Inferred)
+            } else {
+                CommentClassification::narrative()
+            },
+        )
     }
+}
+
+fn is_kotlin_documentation(comment: &str) -> bool {
+    let comment = comment.trim();
+    comment.starts_with("/**") && comment != "/**/"
+}
+
+fn is_documentable_declaration(kind: &str) -> bool {
+    matches!(
+        kind,
+        "class_declaration"
+            | "object_declaration"
+            | "companion_object"
+            | "enum_entry"
+            | "function_declaration"
+            | "property_declaration"
+            | "secondary_constructor"
+            | "type_alias"
+    )
 }
 
 fn owner_from_node(

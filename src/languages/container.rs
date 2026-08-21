@@ -9,7 +9,7 @@ use crate::config::PolicyConfig;
 use crate::identity::IdentityArena;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::{
-    CodeToken, Comment, CommentKind, CommentSnapshot, OwnerSnapshot, ParsedFile, Span,
+    CodeToken, Comment, CommentClassification, CommentSnapshot, OwnerSnapshot, ParsedFile, Span,
     template_findings,
 };
 
@@ -129,7 +129,7 @@ pub(crate) fn parse_file<S: ContainerSpec>(
         comments: comments
             .into_iter()
             .map(|comment| CommentSnapshot {
-                kind: comment.kind,
+                classification: comment.classification,
                 text: comment.text,
                 span: comment.span,
                 owner: 1,
@@ -172,7 +172,7 @@ fn parse_facts<S: ContainerSpec>(
                 if is_comment {
                     comments.push(Comment {
                         span: Span::from_comment_node(node, &outer_source),
-                        kind: CommentKind::Narrative,
+                        classification: CommentClassification::narrative(),
                         text: tree::node_text(node, &outer_source).to_owned(),
                     });
                 }
