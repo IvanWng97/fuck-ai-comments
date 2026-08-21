@@ -1,4 +1,5 @@
-use std::path::{Component, Path};
+use std::borrow::Cow;
+use std::path::{Component, Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::Deserialize;
@@ -114,6 +115,24 @@ impl RepositoryConfig {
                 )
             })
         {
+            return false;
+        }
+        let path = if path
+            .components()
+            .any(|component| matches!(component, Component::CurDir))
+        {
+            let mut normalized = PathBuf::new();
+            for component in path.components() {
+                if let Component::Normal(component) = component {
+                    normalized.push(component);
+                }
+            }
+            Cow::Owned(normalized)
+        } else {
+            Cow::Borrowed(path)
+        };
+        let path = path.as_ref();
+        if path.as_os_str().is_empty() {
             return false;
         }
         // Git does not descend into an ignored directory, so a child negation

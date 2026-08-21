@@ -52,6 +52,21 @@ fn repository_config_requires_ignored_parents_to_be_reincluded() {
 }
 
 #[test]
+fn repository_config_normalizes_current_directory_components() {
+    let config = RepositoryConfig::from_toml(concat!(
+        "schema-version = 1\n",
+        "exclude = [\"**\", \"!foo.rs\"]\n",
+    ))
+    .expect("repository config should parse");
+
+    assert_eq!(
+        config.excludes_path(Path::new("foo.rs"), false),
+        config.excludes_path(Path::new("./foo.rs"), false)
+    );
+    assert!(!config.excludes_path(Path::new("./foo.rs"), false));
+}
+
+#[test]
 fn repository_config_never_excludes_unsafe_paths() {
     let config =
         RepositoryConfig::from_toml(concat!("schema-version = 1\n", "exclude = [\"**\"]\n",))
