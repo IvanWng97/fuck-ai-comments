@@ -136,27 +136,47 @@ struct Repository {
     scope: PathBuf,
 }
 
-impl Repository {
-    fn discover(scope: &Path) -> Result<Self> {
+struct RepositoryProbe {
+    directory: PathBuf,
+    normalized_scope: PathBuf,
+}
+
+pub(super) fn discover_worktree_root(scope: &Path) -> Result<Option<PathBuf>> {
+    let probe = RepositoryProbe::new(scope)?;
+    if !has_git_marker(&probe.directory)? {
+        return Ok(None);
+    }
+    probe.locate(scope).map(|repository| Some(repository.root))
+}
+
+impl RepositoryProbe {
+    fn new(scope: &Path) -> Result<Self> {
         let absolute_scope = std::path::absolute(scope)
             .with_context(|| format!("could not resolve {}", scope.display()))?;
-        let probe = existing_directory(&absolute_scope).ok_or_else(|| {
+        let existing = existing_directory(&absolute_scope).ok_or_else(|| {
             anyhow::anyhow!("could not find an existing parent of {}", scope.display())
         })?;
-        let canonical_probe = fs::canonicalize(probe)
-            .with_context(|| format!("could not resolve {}", probe.display()))?;
+        let directory = fs::canonicalize(existing)
+            .with_context(|| format!("could not resolve {}", existing.display()))?;
         let scope_suffix = absolute_scope
-            .strip_prefix(probe)
+            .strip_prefix(existing)
             .context("could not place path relative to its existing parent")?;
-        let normalized_scope = canonical_probe.join(scope_suffix);
+        let normalized_scope = directory.join(scope_suffix);
+        Ok(Self {
+            directory,
+            normalized_scope,
+        })
+    }
+
+    fn locate(&self, scope: &Path) -> Result<Repository> {
         let output = run_git_at(
-            probe,
+            &self.directory,
             [OsStr::new("rev-parse"), OsStr::new("--show-toplevel")],
         )?;
         let root_text = one_line(&output, "repository root")?;
         let root = fs::canonicalize(Path::new(root_text))
             .with_context(|| format!("could not resolve repository root {root_text}"))?;
-        let relative_scope = normalized_scope.strip_prefix(&root).with_context(|| {
+        let relative_scope = self.normalized_scope.strip_prefix(&root).with_context(|| {
             format!(
                 "{} is outside Git repository {}",
                 scope.display(),
@@ -178,7 +198,13 @@ impl Repository {
         } else {
             relative_scope.to_owned()
         };
-        Ok(Self { root, scope })
+        Ok(Repository { root, scope })
+    }
+}
+
+impl Repository {
+    fn discover(scope: &Path) -> Result<Self> {
+        RepositoryProbe::new(scope)?.locate(scope)
     }
 
     fn changes(&self, mode: Mode) -> Result<ScopeChanges> {
@@ -1005,6 +1031,21 @@ fn existing_directory(path: &Path) -> Option<&Path> {
         }
         candidate = candidate.parent()?;
     }
+}
+
+fn has_git_marker(directory: &Path) -> Result<bool> {
+    for ancestor in directory.ancestors() {
+        let marker = ancestor.join(".git");
+        match fs::symlink_metadata(&marker) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not inspect {}", marker.display()));
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
