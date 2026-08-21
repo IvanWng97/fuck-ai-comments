@@ -380,7 +380,7 @@ test("cargo-dist publishes the crate through OIDC before announcing", async () =
   assert.deepEqual(Object.keys(workflow.jobs), ["publish-crate"]);
 
   const job = workflow.jobs["publish-crate"];
-  assert.equal(job["runs-on"], "ubuntu-24.04");
+  assert.equal(job["runs-on"], "ubuntu-latest");
   assert.equal(job["timeout-minutes"], 15);
   assert.equal(job.environment, "release-authorization");
   assert.deepEqual(job.permissions, {
@@ -487,7 +487,7 @@ test("cargo-dist gates the compatibility tag on released Action E2E", async () =
   assert.deepEqual(job.strategy, {
     "fail-fast": false,
     matrix: {
-      os: ["macos-15", "macos-15-intel", "ubuntu-24.04", "windows-2025"],
+      os: ["macos-latest", "macos-26-intel", "ubuntu-latest", "windows-latest"],
     },
   });
   assert.equal(job["runs-on"], "${{ matrix.os }}");

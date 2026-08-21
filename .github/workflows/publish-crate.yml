@@ -12,7 +12,7 @@ permissions: {}
 jobs:
   publish-crate:
     name: Publish crate with Trusted Publishing
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: release-authorization
     permissions:
