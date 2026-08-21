@@ -135,10 +135,8 @@ impl RepositoryConfig {
         if path.as_os_str().is_empty() {
             return false;
         }
-        // Git does not descend into an ignored directory, so a child negation
-        // cannot re-include a path through an ignored parent. Query the
-        // library matcher at each hierarchy level to preserve that rule for
-        // the flat path lists used by Git change modes.
+        // Git never descends into an ignored parent, so query each hierarchy
+        // level before honoring a child negation from a flat Git path list.
         let ignored_parent = path
             .ancestors()
             .skip(1)
