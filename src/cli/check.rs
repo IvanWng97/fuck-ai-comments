@@ -1,4 +1,7 @@
 use std::borrow::Cow;
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -12,11 +15,18 @@ pub(super) struct Report {
     pub(super) files_scanned: usize,
 }
 
-pub(super) fn scan_all(root: &Path) -> Result<Report> {
-    let files = supported_files(root)?;
+pub(super) fn scan_all(root: &Path, explicit_config: Option<&Path>) -> Result<Report> {
+    let default_config = default_config_path(root);
+    let config_path = explicit_config.map_or_else(|| default_config.clone(), Path::to_owned);
+    let files = supported_files(root, [&default_config, &config_path])?;
     let current_directory =
         std::env::current_dir().context("could not resolve current directory")?;
     let cargo_context = cargo_context::discover(root, &current_directory)?;
+    let analysis = analysis_with_repository_policy(
+        cargo_context.analysis(),
+        &config_path,
+        explicit_config.is_some(),
+    )?;
     let mut findings = Vec::new();
 
     for disk_path in &files {
@@ -34,8 +44,7 @@ pub(super) fn scan_all(root: &Path) -> Result<Report> {
         };
         let bytes = source::read_regular(disk_path, source_path)?;
         let text = source::utf8(source_path, &bytes)?;
-        let mut file_findings = cargo_context
-            .analysis()
+        let mut file_findings = analysis
             .analyze_all(SourceFile {
                 path: &analysis_path,
                 text,
@@ -51,7 +60,14 @@ pub(super) fn scan_all(root: &Path) -> Result<Report> {
     })
 }
 
-fn supported_files(root: &Path) -> Result<Vec<PathBuf>> {
+fn supported_files<'path>(
+    root: &Path,
+    config_paths: impl IntoIterator<Item = &'path PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let absolute_configs: BTreeSet<_> = config_paths
+        .into_iter()
+        .map(|path| cargo_context::normalized_absolute_path(path, "policy config"))
+        .collect::<Result<_>>()?;
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(true)
@@ -72,10 +88,45 @@ fn supported_files(root: &Path) -> Result<Vec<PathBuf>> {
         if !supports_path(entry.path()) {
             continue;
         }
+        let absolute_entry = cargo_context::normalized_absolute_path(entry.path(), "source path")?;
+        if absolute_configs.contains(&absolute_entry) {
+            continue;
+        }
         files.push(entry.into_path());
     }
     files.sort();
     Ok(files)
+}
+
+fn analysis_with_repository_policy(
+    analysis: &fuck_ai_comments::AnalysisContext,
+    config_path: &Path,
+    required: bool,
+) -> Result<fuck_ai_comments::AnalysisContext> {
+    match fs::symlink_metadata(config_path) {
+        Ok(_) => {
+            let bytes = source::read_regular(config_path, config_path)?;
+            let text = source::utf8(config_path, &bytes)?;
+            analysis
+                .clone()
+                .with_policy_toml(text)
+                .with_context(|| format!("could not load {}", config_path.display()))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound && !required => Ok(analysis.clone()),
+        Err(error) => {
+            Err(error).with_context(|| format!("could not inspect {}", config_path.display()))
+        }
+    }
+}
+
+fn default_config_path(root: &Path) -> PathBuf {
+    if root.is_dir() {
+        root.join("fuck-ai-comments.toml")
+    } else {
+        root.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("fuck-ai-comments.toml")
+    }
 }
 
 fn without_dot_prefix(path: &Path) -> &Path {
@@ -116,7 +167,7 @@ mod tests {
         }
         reset_discovery_count();
 
-        let report = scan_all(root.path()).expect("the Cargo project should scan cleanly");
+        let report = scan_all(root.path(), None).expect("the Cargo project should scan cleanly");
 
         assert_eq!(report.files_scanned, 10);
         assert_eq!(cargo_metadata_discoveries(), 1);
@@ -159,7 +210,7 @@ mod tests {
         }
         reset_discovery_count();
 
-        let report = scan_all(root.path()).expect("the Cargo workspace should scan cleanly");
+        let report = scan_all(root.path(), None).expect("the Cargo workspace should scan cleanly");
 
         assert_eq!(report.files_scanned, 11);
         assert_eq!(cargo_metadata_discoveries(), 1);

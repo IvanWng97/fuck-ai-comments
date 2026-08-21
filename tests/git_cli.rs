@@ -157,6 +157,261 @@ fn default_compares_head_to_the_worktree() {
 }
 
 #[test]
+fn default_rescans_unchanged_sources_when_worktree_policy_changes() {
+    let root = repository();
+    write(
+        &root,
+        "private.rs",
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    );
+    commit_all(&root, "add documented source");
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    );
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
+fn staged_reads_policy_from_the_index_and_rescans_unchanged_sources() {
+    let root = repository();
+    write(
+        &root,
+        "private.rs",
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    );
+    commit_all(&root, "add documented source");
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    );
+    git(&root, ["add", "fuck-ai-comments.toml"]);
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    );
+
+    let output = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
+fn commit_range_reads_policy_from_the_head_snapshot() {
+    let root = repository();
+    write(
+        &root,
+        "private.rs",
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    );
+    let base = commit_all(&root, "add documented source");
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    );
+    let head = commit_all(&root, "cap rustdoc comments");
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    );
+
+    let output = command(&root)
+        .args(["check", "--base", &base, "--head", &head])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
+fn default_uses_an_explicit_worktree_policy_file() {
+    let root = repository();
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        "this default config is intentionally invalid\n",
+    );
+    write(
+        &root,
+        "custom-policy.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    );
+    write(
+        &root,
+        "private.rs",
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    );
+
+    command(&root)
+        .args(["check", "--config", "custom-policy.toml"])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn explicit_policy_rescans_unchanged_sources() {
+    let root = repository();
+    write(
+        &root,
+        "private.rs",
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    );
+    commit_all(&root, "add documented source");
+    write(
+        &root,
+        "custom-policy.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    );
+
+    let output = command(&root)
+        .args(["check", "--config", "custom-policy.toml"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
+fn default_applies_committed_policy_to_changed_sources() {
+    let root = repository();
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    );
+    commit_all(&root, "configure comment policy");
+    write(
+        &root,
+        "private.rs",
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    );
+
+    command(&root)
+        .arg("check")
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn policy_changes_do_not_disable_comment_attestation() {
+    let root = repository();
+    write(&root, "lib.rs", STALE_BEFORE);
+    commit_all(&root, "add attested source");
+    write(&root, "lib.rs", STALE_AFTER);
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.narrative]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    );
+
+    let output = command(&root)
+        .arg("check")
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("lib.rs:2: comment-policy/comment-owner-changed"));
+}
+
+#[test]
 fn default_analyzes_supported_files_before_the_first_commit() {
     let root = unborn_repository();
     write(&root, "src/lib.rs", SLOPPY_RUST);

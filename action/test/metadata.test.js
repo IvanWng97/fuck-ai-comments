@@ -67,6 +67,7 @@ test("action metadata uses Node 24 and a committed bundle", async () => {
   assert.equal(metadata.inputs.path.default, ".");
   assert.deepEqual(Object.keys(metadata.inputs).toSorted(), [
     "base",
+    "config",
     "head",
     "mode",
     "path",

@@ -25,7 +25,7 @@ comments.
 | Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                           |
 | File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                              |
 | Template budget                  | HTML, CSS, and Astro template owners get at most 3 narrative lines                                                                                |
-| Absolute owner cap               | Non-public comments, including directives and safety proofs, cannot exceed 8 lines on function/type/file owners or 3 on leaf/template/TOML owners |
+| Default absolute owner cap       | Comments using built-in relative or owner-capped policies cannot exceed 8 lines on function/type/file owners or 3 on leaf/template/TOML owners   |
 | Stale comment                    | Unchanged meaningful normalized text fails when its owning code or semantic role changes                                                          |
 | Reparented comment               | Unchanged meaningful normalized text fails when it moves to another owner                                                                         |
 
@@ -39,7 +39,7 @@ target roots, including custom `[lib].path` and workspace members. Pure library
 calls retain the conservative `src/lib.rs` default unless the caller supplies an
 `AnalysisContext` with proven roots.
 Structurally valid safety proofs and tool directives do not consume the relative
-narrative budget, but they do count toward the absolute owner cap. All three
+narrative budget, but by default they count toward the absolute owner cap. All three
 remain subject to drift checks when they have meaningful normalized text. Python
 function and class docstrings consume their owner budget; module docstrings
 consume the file budget.
@@ -74,8 +74,55 @@ complete Objective-C++.
 
 Tool-directive recognition validates source syntax and placement, not whether
 an external linter configuration enables a rule identifier. Custom rule IDs
-make a baked-in catalog incorrect; directives still count toward the absolute
-owner cap and still require stale-comment attestation.
+make a baked-in catalog incorrect; by default directives still count toward the
+absolute owner cap and still require stale-comment attestation.
+
+## Configuration
+
+Place an optional `fuck-ai-comments.toml` at the scan root (`--all`) or Git
+repository root (change modes). The schema is versioned and strict: unknown
+fields, unsupported versions, non-positive caps, and `max-lines` without a
+`capped` policy fail with exit code `2`.
+
+```toml
+schema-version = 1
+
+[comments.rustdoc]
+policy = "unlimited"
+
+[comments.safety-proof]
+policy = "capped"
+max-lines = 8
+```
+
+The configurable semantic types are `narrative`, `rustdoc`, `safety-proof`,
+and `tool-directive`. Each accepts one policy:
+
+- `relative`: use the existing owner-relative and comment-block budgets;
+- `capped`: replace the relative and aggregate owner budgets for that semantic
+  type with the positive `max-lines` limit per owner; or
+- `unlimited`: skip static length budgets for that semantic type.
+
+Omitted entries preserve the built-in policy. Narrative comments and internal
+Rust docs default to `relative`; public Rust API docs default to `unlimited`;
+structural safety proofs and tool directives skip relative budgets but remain
+subject to the aggregate absolute owner cap. A configured `capped` policy is
+enforced independently, so it can raise or lower the built-in ceiling for that
+semantic type without making it unlimited.
+
+Classification stays structural. The `rustdoc` setting covers valid inner docs
+and outer docs attached to a Rust item; a detached `///` sequence remains
+narrative. Safety proofs and tool directives must satisfy their existing marker,
+syntax, and attachment rules. Configuration does not create arbitrary prefix
+classifiers, and `unlimited` never disables stale-comment or reparenting checks.
+
+Git modes load the policy from the same authority as the source: the worktree,
+index for `--staged`, or requested head commit for `--base`. A policy-only change
+triggers a full static rescan under `--profile full`. Use `--config PATH` to
+select a different file explicitly; an explicit path is always read from the
+current filesystem, so full-profile Git checks conservatively rescan all source
+files. An explicit config inside the scan scope is excluded from the source
+count. Configurations do not cascade or merge.
 
 ## CLI
 
@@ -101,6 +148,9 @@ fuck-ai-comments check --base origin/main --head HEAD
 
 # Change attestation only: validate and pair source, but skip static budgets.
 fuck-ai-comments check --base origin/main --head HEAD --profile attestation
+
+# Override automatic fuck-ai-comments.toml discovery.
+fuck-ai-comments check --all --config policy/comments.toml
 ```
 
 Pass a file or directory as the final argument to narrow the scope. Exit codes
@@ -180,7 +230,8 @@ jobs:
 ```
 
 Action inputs are `mode` (`all`, `worktree`, `staged`, or `base`), `profile`
-(`full` or `attestation`), `path`, `base`, `head`, and an exact CLI `version`.
+(`full` or `attestation`), `path`, `base`, `head`, `config`, and an exact CLI
+`version`.
 Inputs become an argv array; they are never concatenated into a shell command,
 and the Rust CLI is the profile-validation authority. `mode: all` establishes
 or checks a static baseline; it does not replace `mode: base`, because a single

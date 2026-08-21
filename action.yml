@@ -25,6 +25,9 @@ inputs:
   head:
     description: Head commit used when mode is base; defaults to HEAD
     required: false
+  config:
+    description: Optional path to a comment-policy TOML file
+    required: false
 
 runs:
   using: node24

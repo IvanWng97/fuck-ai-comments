@@ -84,6 +84,610 @@ fn all_reports_findings_in_stable_path_order() {
 }
 
 #[test]
+fn all_honors_an_unlimited_rustdoc_policy_from_the_repository_config() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("private.rs"),
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    )
+    .expect("private Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn rustdoc_policy_does_not_exempt_unattached_doc_syntax() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("unattached.rs"),
+        concat!(
+            "/// This syntax is not attached to an item.\n",
+            "/// It must remain ordinary narrative.\n",
+            "/// A third line still does not make it documentation.\n",
+            "/// A fourth line must stay within narrative policy.\n",
+            "// This ordinary comment prevents attachment to the item.\n",
+            "const VALUE: usize = 2;\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("unattached.rs:1: comment-policy/leaf-comment-budget"));
+}
+
+#[test]
+fn rustdoc_policy_does_not_exempt_inner_doc_syntax_outside_module_bodies() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("nested.rs"),
+        concat!(
+            "mod internal {\n",
+            "    trait Contract {\n",
+            "        //! This is not a module-level inner doc.\n",
+            "        //! It must remain ordinary narrative.\n",
+            "        //! A third line is still not module documentation.\n",
+            "        //! A fourth line must stay within narrative policy.\n",
+            "        fn call();\n",
+            "    }\n",
+            "}\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("nested.rs:3: comment-policy/comment-block-budget"));
+}
+
+#[test]
+fn rustdoc_policy_recognizes_inner_docs_on_module_bodies() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("module.rs"),
+        concat!(
+            "mod internal {\n",
+            "    #![allow(dead_code)]\n",
+            "    //! First line of module documentation.\n",
+            "    //! Second line of module documentation.\n",
+            "    //! Third line of module documentation.\n",
+            "    //! Fourth line of module documentation.\n",
+            "    pub(crate) fn helper() {}\n",
+            "}\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn rustdoc_policy_does_not_exempt_inner_docs_after_items() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("late-file.rs"),
+        concat!(
+            "fn before() {}\n",
+            "//! Late inner doc line one.\n",
+            "//! Late inner doc line two.\n",
+            "//! Late inner doc line three.\n",
+            "//! Late inner doc line four.\n",
+        ),
+    )
+    .expect("late file docs should be written");
+    fs::write(
+        root.path().join("late-module.rs"),
+        concat!(
+            "mod internal {\n",
+            "    fn before() {}\n",
+            "    //! Late module doc line one.\n",
+            "    //! Late module doc line two.\n",
+            "    //! Late module doc line three.\n",
+            "    //! Late module doc line four.\n",
+            "}\n",
+        ),
+    )
+    .expect("late module docs should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("late-file.rs:2: comment-policy/comment-block-budget"));
+    assert!(stdout.contains("late-module.rs:3: comment-policy/comment-block-budget"));
+}
+
+#[test]
+fn rustdoc_policy_recognizes_documented_tuple_fields() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("tuple.rs"),
+        concat!(
+            "pub(crate) struct Pair(\n",
+            "    /// First line of field documentation.\n",
+            "    /// Second line of field documentation.\n",
+            "    /// Third line of field documentation.\n",
+            "    /// Fourth line of field documentation.\n",
+            "    pub(crate) u8,\n",
+            ");\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_enforces_a_configured_rustdoc_line_cap() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("private.rs"),
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    )
+    .expect("private Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("private.rs:1: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("2 rustdoc comment lines; configured allowance is 1"));
+    assert!(stdout.contains("1 violation in 1 file"));
+}
+
+#[test]
+fn configured_type_cap_can_raise_the_builtin_owner_ceiling() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 10\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("private.rs"),
+        concat!(
+            "/// Documentation line one.\n",
+            "/// Documentation line two.\n",
+            "/// Documentation line three.\n",
+            "/// Documentation line four.\n",
+            "/// Documentation line five.\n",
+            "/// Documentation line six.\n",
+            "/// Documentation line seven.\n",
+            "/// Documentation line eight.\n",
+            "/// Documentation line nine.\n",
+            "/// Documentation line ten.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    )
+    .expect("private Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn rustdoc_relative_policy_can_tighten_public_documentation() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir(root.path().join("src")).expect("source directory should be created");
+    fs::write(
+        root.path().join("Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"configured-public-docs\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+        ),
+    )
+    .expect("Cargo manifest should be written");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"relative\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("src/lib.rs"),
+        concat!(
+            "/// First line of public documentation.\n",
+            "/// Second line of public documentation.\n",
+            "pub fn helper() {}\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let finding = format!(
+        "{}:1: comment-policy/function-comment-budget",
+        rendered_path("src/lib.rs")
+    );
+
+    assert!(stdout.contains(&finding), "unexpected stdout:\n{stdout}");
+}
+
+#[test]
+fn all_rejects_invalid_repository_policy() {
+    let cases = [
+        (
+            "unknown field",
+            "schema-version = 1\nunknown = true\n",
+            "unknown field `unknown`",
+        ),
+        (
+            "unsupported schema",
+            "schema-version = 2\n",
+            "unsupported schema-version 2; expected 1",
+        ),
+        (
+            "missing cap",
+            concat!(
+                "schema-version = 1\n",
+                "[comments.rustdoc]\n",
+                "policy = \"capped\"\n",
+            ),
+            "comments.rustdoc.max-lines is required",
+        ),
+        (
+            "zero cap",
+            concat!(
+                "schema-version = 1\n",
+                "[comments.rustdoc]\n",
+                "policy = \"capped\"\n",
+                "max-lines = 0\n",
+            ),
+            "comments.rustdoc.max-lines must be greater than zero",
+        ),
+        (
+            "unused cap",
+            concat!(
+                "schema-version = 1\n",
+                "[comments.rustdoc]\n",
+                "policy = \"unlimited\"\n",
+                "max-lines = 2\n",
+            ),
+            "comments.rustdoc.max-lines is only valid when policy = \"capped\"",
+        ),
+    ];
+
+    for (label, config, expected) in cases {
+        let root = TempDir::new().expect("temporary directory should be created");
+        fs::write(root.path().join("fuck-ai-comments.toml"), config)
+            .expect("policy configuration should be written");
+
+        let output = command(&root)
+            .args(["check", "--all", "."])
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+        let config_error = format!(
+            "could not load {}",
+            rendered_path("./fuck-ai-comments.toml")
+        );
+        assert!(
+            stderr.contains(&config_error),
+            "{label}: unexpected stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(expected),
+            "{label}: unexpected stderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn all_uses_an_explicit_policy_configuration() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        "this default config is intentionally invalid\n",
+    )
+    .expect("default policy configuration should be written");
+    fs::write(
+        root.path().join("custom-policy.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.rustdoc]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("private.rs"),
+        concat!(
+            "/// First line of internal documentation.\n",
+            "/// Second line of internal documentation.\n",
+            "pub(crate) fn helper() {}\n",
+        ),
+    )
+    .expect("private Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "--config", "custom-policy.toml", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_applies_narrative_policy_to_non_rust_languages() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.narrative]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("module.py"),
+        concat!(
+            "# First narrative line.\n",
+            "# Second narrative line.\n",
+            "# Third narrative line.\n",
+            "# Fourth narrative line.\n",
+            "VALUE = 4\n",
+        ),
+    )
+    .expect("Python source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_applies_narrative_policy_to_container_and_toml_owners() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.narrative]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("style.css"),
+        concat!(
+            "/* First narrative line. */\n",
+            "/* Second narrative line. */\n",
+            "/* Third narrative line. */\n",
+            "/* Fourth narrative line. */\n",
+            ".item { color: black; }\n",
+        ),
+    )
+    .expect("CSS source should be written");
+    fs::write(
+        root.path().join("data.toml"),
+        concat!(
+            "# First narrative line.\n",
+            "# Second narrative line.\n",
+            "# Third narrative line.\n",
+            "# Fourth narrative line.\n",
+            "value = 4\n",
+        ),
+    )
+    .expect("TOML source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 2 files scanned\n");
+}
+
+#[test]
+fn all_applies_unlimited_policy_to_structural_safety_proofs() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.safety-proof]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("safety.rs"),
+        concat!(
+            "fn read(pointer: *const u8) -> u8 {\n",
+            "    // SAFETY: the caller keeps the pointer readable.\n",
+            "    // The allocation remains live.\n",
+            "    // The pointer is aligned.\n",
+            "    // Reading one byte stays in bounds.\n",
+            "    // No mutable reference aliases it.\n",
+            "    // The address is non-null.\n",
+            "    // The provenance remains valid.\n",
+            "    // The pointee is initialized.\n",
+            "    // The read does not cross the allocation.\n",
+            "    unsafe { core::ptr::read(pointer) }\n",
+            "}\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_applies_a_line_cap_to_structural_tool_directives() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.tool-directive]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("directives.js"),
+        concat!(
+            "function report() {\n",
+            "  // eslint-disable-next-line no-console\n",
+            "  console.log('one');\n",
+            "  // eslint-disable-next-line no-console\n",
+            "  console.log('two');\n",
+            "}\n",
+        ),
+    )
+    .expect("JavaScript source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(stdout.contains("directives.js:2: comment-policy/comment-type-cap"));
+    assert!(stdout.contains("2 tool-directive comment lines; configured allowance is 1"));
+}
+
+#[test]
 fn all_uses_cargo_metadata_for_a_custom_library_root() {
     let root = TempDir::new().expect("temporary directory should be created");
     fs::create_dir(root.path().join("custom")).expect("custom directory should be created");

@@ -6,11 +6,13 @@ use toml_edit::{Document, Item, Table, TomlError};
 use toml_parser::Source;
 use toml_parser::lexer::{Token, TokenKind};
 
+use crate::config::PolicyConfig;
 use crate::identity::IdentityArena;
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
 use crate::policy::{
     CodeToken, Comment, CommentKind, CommentSnapshot, LEAF_COMMENT_MAX_LINES, OwnerSnapshot,
-    ParsedFile, Span, file_findings,
+    ParsedFile, Span, configured_comment_cap_findings, file_findings,
+    owner_comment_cap_finding_with_policy,
 };
 
 const TABLE_PATH_TOKEN_KIND: &str = "toml-table-path";
@@ -252,6 +254,7 @@ pub(crate) fn analyze_file(
     path: &Path,
     source: &str,
     selection: &Selection,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
     let document = parse_file(path, source)?;
     let comments: Vec<_> = document
@@ -281,10 +284,28 @@ pub(crate) fn analyze_file(
         if !selected {
             continue;
         }
+        let owned_comments: Vec<_> = owned
+            .iter()
+            .map(|comment_index| comments[*comment_index].clone())
+            .collect();
+        let owner_label = format!("TOML key `{}`", owner.name);
+        findings.extend(owner_comment_cap_finding_with_policy(
+            path,
+            OwnerKind::TomlKey,
+            &owner_label,
+            &owned_comments,
+            policy,
+        ));
+        findings.extend(configured_comment_cap_findings(
+            path,
+            &owner_label,
+            &owned_comments,
+            policy,
+        ));
         let lines: BTreeSet<_> = owned
             .iter()
             .map(|comment_index| &document.comments[*comment_index])
-            .filter(|comment| comment.kind == CommentKind::Narrative)
+            .filter(|comment| comment.kind.uses_relative_budget(policy))
             .flat_map(|comment| comment.span.lines())
             .collect();
         if lines.len() > LEAF_COMMENT_MAX_LINES {
@@ -310,6 +331,7 @@ pub(crate) fn analyze_file(
         selection,
         &file_comments,
         &comments,
+        policy,
     ));
     Ok(findings)
 }

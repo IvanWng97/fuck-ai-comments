@@ -114,11 +114,20 @@ test("reads the Action profile input into the Rust CLI argv", () => {
     ["path", "source tree"],
     ["base", ""],
     ["head", ""],
+    ["config", "policy/custom.toml"],
   ]);
 
   assert.deepEqual(
     buildCheckArgumentsFromInputs((name) => inputs.get(name) ?? ""),
-    ["check", "--profile", "attestation", "--", "source tree"],
+    [
+      "check",
+      "--profile",
+      "attestation",
+      "--config",
+      "policy/custom.toml",
+      "--",
+      "source tree",
+    ],
   );
 });
 

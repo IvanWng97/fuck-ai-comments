@@ -10,6 +10,7 @@ use super::container::{
 };
 use super::tree;
 use super::walk::{WalkEvent, events};
+use crate::config::PolicyConfig;
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{ParsedFile, Span};
 
@@ -63,8 +64,11 @@ pub(crate) fn analyze_file(
     path: &Path,
     source: &str,
     selection: &Selection,
+    policy: &PolicyConfig,
 ) -> Result<Vec<Finding>, AnalysisError> {
-    retry_with_frontmatter_recovery(path, source, |spec| analyze(path, source, selection, spec))
+    retry_with_frontmatter_recovery(path, source, |spec| {
+        analyze(path, source, selection, spec, policy)
+    })
 }
 
 pub(crate) fn parse_file(path: &Path, source: &str) -> Result<ParsedFile, AnalysisError> {
