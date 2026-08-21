@@ -343,6 +343,257 @@ fn all_enforces_a_configured_rustdoc_line_cap() {
 }
 
 #[test]
+fn capped_rustdoc_is_budgeted_per_rust_type() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("types.rs"),
+        concat!(
+            "/// First type.\n",
+            "pub(crate) struct First;\n",
+            "\n",
+            "/// Second type.\n",
+            "pub(crate) enum Second { Value }\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn capped_rustdoc_recognizes_every_rust_type_owner() {
+    let cases = [
+        (
+            "union",
+            concat!(
+                "/// First union.\n",
+                "pub(crate) union First { value: u8 }\n",
+                "/// Second union.\n",
+                "pub(crate) union Second { value: u8 }\n",
+            ),
+        ),
+        (
+            "trait",
+            concat!(
+                "/// First trait.\n",
+                "pub(crate) trait First {}\n",
+                "/// Second trait.\n",
+                "pub(crate) trait Second {}\n",
+            ),
+        ),
+        (
+            "type alias",
+            concat!(
+                "/// First alias.\n",
+                "pub(crate) type First = u8;\n",
+                "/// Second alias.\n",
+                "pub(crate) type Second = u16;\n",
+            ),
+        ),
+        (
+            "impl",
+            concat!(
+                "struct First;\n",
+                "/// First implementation.\n",
+                "impl First {}\n",
+                "struct Second;\n",
+                "/// Second implementation.\n",
+                "impl Second {}\n",
+            ),
+        ),
+    ];
+
+    for (label, source) in cases {
+        let root = TempDir::new().expect("temporary directory should be created");
+        fs::write(
+            root.path().join("fuck-ai-comments.toml"),
+            concat!(
+                "schema-version = 1\n",
+                "[comments.rustdoc]\n",
+                "policy = \"capped\"\n",
+                "max-lines = 1\n",
+            ),
+        )
+        .expect("policy configuration should be written");
+        fs::write(root.path().join("types.rs"), source).expect("Rust source should be written");
+
+        let output = command(&root)
+            .args(["check", "--all", "."])
+            .output()
+            .expect("check command should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{label} docs should have independent type owners:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(output.stdout, b"clean: 1 file scanned\n");
+    }
+}
+
+#[test]
+fn capped_rustdoc_reports_the_type_even_with_an_attribute_prefix() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("types.rs"),
+        concat!(
+            "/// First line.\n",
+            "/// Second line.\n",
+            "#[derive(Clone)]\n",
+            "pub(crate) struct First;\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(
+        stdout.contains("type `First` owns 2 rustdoc comment lines; configured allowance is 1")
+    );
+    assert!(
+        !stdout.contains("file scope owns"),
+        "unexpected stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn capped_rustdoc_reports_a_readable_impl_owner() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("implementation.rs"),
+        concat!(
+            "struct Record;\n",
+            "trait Service<T> {}\n",
+            "/// First line.\n",
+            "/// Second line.\n",
+            "impl Record {}\n",
+            "/// First negative implementation line.\n",
+            "/// Second negative implementation line.\n",
+            "impl !Service /* separator */ <u8> for Record {}\n",
+        ),
+    )
+    .expect("Rust source should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(
+        stdout
+            .contains("type `impl Record` owns 2 rustdoc comment lines; configured allowance is 1")
+    );
+    assert!(
+        stdout.contains(
+            "type `impl !Service <u8> for Record` owns 2 rustdoc comment lines; configured allowance is 1"
+        ),
+        "unexpected stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("type_identifier") && !stdout.contains("separator"),
+        "unexpected stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn capped_inner_rustdoc_remains_at_file_scope_before_a_type() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::create_dir(root.path().join("src")).expect("source directory should be created");
+    fs::write(
+        root.path().join("Cargo.toml"),
+        concat!(
+            "[package]\n",
+            "name = \"inner-doc-owners\"\n",
+            "version = \"0.1.0\"\n",
+            "edition = \"2024\"\n",
+        ),
+    )
+    .expect("Cargo manifest should be written");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    let source = concat!(
+        "//! Module documentation, line one.\n",
+        "//! Module documentation, line two.\n",
+        "struct Record;\n",
+    );
+    fs::write(root.path().join("src/lib.rs"), source).expect("crate root should be written");
+    fs::write(root.path().join("src/model.rs"), source).expect("module should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    for path in ["src/lib.rs", "src/model.rs"] {
+        let finding = format!(
+            "{}:1: comment-policy/comment-type-cap: file scope owns 2 rustdoc comment lines; configured allowance is 1",
+            rendered_path(path)
+        );
+        assert!(stdout.contains(&finding), "unexpected stdout:\n{stdout}");
+    }
+    assert!(
+        !stdout.contains("type `Record` owns"),
+        "unexpected stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("2 violations in 3 files"));
+}
+
+#[test]
 fn configured_type_cap_can_raise_the_builtin_owner_ceiling() {
     let root = TempDir::new().expect("temporary directory should be created");
     fs::write(

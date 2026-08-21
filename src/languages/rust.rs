@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use super::tree::{
     CallableSubtrees, LanguageSpec, OwnerCandidate, OwnerLocation, analyze_with_policy,
-    canonical_syntax, document, function_name, has_direct_child, node_text,
+    canonical_syntax, document, function_name, has_direct_child, node_text, readable_syntax,
 };
 use super::walk::{WalkEvent, events};
 use crate::RustFileRole;
@@ -22,7 +22,7 @@ struct Rust {
 #[derive(Default)]
 struct RustContext {
     nodes: HashMap<usize, RustNodeContext>,
-    function_namespaces: HashMap<usize, Option<IdentityId>>,
+    owner_namespaces: HashMap<usize, Option<IdentityId>>,
     namespaces: IdentityArena,
     containers: HashMap<usize, RustContainerKind>,
     public_local_impls: HashMap<usize, bool>,
@@ -48,6 +48,16 @@ struct RustNodeContext {
 enum RustContainerKind {
     PublicMembers,
     ExplicitlyPublicMembers,
+}
+
+#[derive(Clone, Copy)]
+enum RustTypeKind {
+    Struct,
+    Enum,
+    Union,
+    Trait,
+    TypeAlias,
+    Implementation,
 }
 
 struct RustTypeDraft {
@@ -224,13 +234,27 @@ impl LanguageSpec for Rust {
         _callable_subtrees: &CallableSubtrees,
     ) -> Result<Option<OwnerCandidate>, AnalysisError> {
         if let Some(span) = rust_function_span(node, location) {
-            let namespace = *context.function_namespaces.get(&node.id()).ok_or_else(|| {
+            let namespace = *context.owner_namespaces.get(&node.id()).ok_or_else(|| {
                 AnalysisError::Invariant("Rust callable has no namespace context entry".to_owned())
             })?;
             return Ok(Some(OwnerCandidate::function_with_identity_parent(
                 span,
                 function_name(node, location, source),
                 namespace,
+            )));
+        }
+        if let Some(kind) = RustTypeKind::from_node(node) {
+            let Some((name, segment)) = kind.owner_identity(node, source) else {
+                return Ok(None);
+            };
+            let namespace = *context.owner_namespaces.get(&node.id()).ok_or_else(|| {
+                AnalysisError::Invariant("Rust type has no namespace context entry".to_owned())
+            })?;
+            return Ok(Some(OwnerCandidate::type_owner_with_identity_parent(
+                rust_item_span(node, location),
+                name,
+                namespace,
+                segment,
             )));
         }
         if !matches!(node.kind(), "const_item" | "static_item") {
@@ -254,10 +278,18 @@ impl LanguageSpec for Rust {
             return None;
         }
         if is_public_rustdoc(node, source, self.file_role, context) {
-            return Some(CommentKind::PublicDocs);
+            return Some(if is_inner_rustdoc(node, source) {
+                CommentKind::FilePublicDocs
+            } else {
+                CommentKind::PublicDocs
+            });
         }
         if is_attached_rustdoc(node, source, context) {
-            return Some(CommentKind::RustDocs);
+            return Some(if is_inner_rustdoc(node, source) {
+                CommentKind::FileRustDocs
+            } else {
+                CommentKind::RustDocs
+            });
         }
         if context.safety_proof_comments.contains(&node.id()) {
             return Some(CommentKind::SafetyProof);
@@ -270,11 +302,61 @@ fn rust_function_span(node: Node<'_>, location: OwnerLocation<'_>) -> Option<Spa
     if !matches!(node.kind(), "function_item" | "closure_expression") {
         return None;
     }
+    Some(rust_item_span(node, location))
+}
+
+fn rust_item_span(node: Node<'_>, location: OwnerLocation<'_>) -> Span {
     let start = location.leading_prefix().unwrap_or(node);
     let mut span = Span::from_node(node);
     span.start_byte = start.start_byte();
     span.start_line = start.start_position().row + 1;
-    Some(span)
+    span
+}
+
+impl RustTypeKind {
+    fn from_node(node: Node<'_>) -> Option<Self> {
+        match node.kind() {
+            "struct_item" => Some(Self::Struct),
+            "enum_item" => Some(Self::Enum),
+            "union_item" => Some(Self::Union),
+            "trait_item" => Some(Self::Trait),
+            "type_item" => Some(Self::TypeAlias),
+            "impl_item" => Some(Self::Implementation),
+            _ => None,
+        }
+    }
+
+    fn owner_identity(self, node: Node<'_>, source: &str) -> Option<(String, String)> {
+        let kind = match self {
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Union => "union",
+            Self::Trait => "trait",
+            Self::TypeAlias => "type",
+            Self::Implementation => {
+                let segment = rust_namespace_segment(node, source)?;
+                let target = node
+                    .child_by_field_name("type")
+                    .map(|target| readable_syntax(target, source))?;
+                let name = node.child_by_field_name("trait").map_or_else(
+                    || format!("impl {target}"),
+                    |item| {
+                        let polarity = if has_direct_child(node, "!") { "!" } else { "" };
+                        format!(
+                            "impl {polarity}{} for {target}",
+                            readable_syntax(item, source)
+                        )
+                    },
+                );
+                return Some((name, segment));
+            }
+        };
+        let name = node
+            .child_by_field_name("name")
+            .map(|name| node_text(name, source).to_owned())?;
+        let segment = format!("{kind}:{name}");
+        Some((name, segment))
+    }
 }
 
 fn rust_namespace_segment(node: Node<'_>, source: &str) -> Option<String> {
@@ -286,14 +368,15 @@ fn rust_namespace_segment(node: Node<'_>, source: &str) -> Option<String> {
             let trait_name = node
                 .child_by_field_name("trait")
                 .map(|item| canonical_syntax(item, source));
+            let polarity = if has_direct_child(node, "!") { "!" } else { "" };
             Some(trait_name.map_or_else(
                 || format!("impl:{target}"),
-                |trait_name| format!("impl:{trait_name} for {target}"),
+                |trait_name| format!("impl:{polarity}{trait_name} for {target}"),
             ))
         }
-        "trait_item" => node
-            .child_by_field_name("name")
-            .map(|name| format!("trait:{}", canonical_syntax(name, source))),
+        "trait_item" => RustTypeKind::Trait
+            .owner_identity(node, source)
+            .map(|(_, segment)| segment),
         "mod_item" => node
             .child_by_field_name("name")
             .map(|name| format!("mod:{}", node_text(name, source))),
@@ -455,8 +538,10 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     );
                 }
 
-                if matches!(node.kind(), "function_item" | "closure_expression") {
-                    context.function_namespaces.insert(node.id(), namespace);
+                if matches!(node.kind(), "function_item" | "closure_expression")
+                    || RustTypeKind::from_node(node).is_some()
+                {
+                    context.owner_namespaces.insert(node.id(), namespace);
                 }
                 if matches!(node.kind(), "struct_item" | "enum_item" | "union_item")
                     && let Some(scope) = parent.filter(|frame| frame.is_declaration_scope())
@@ -577,7 +662,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
     }
     record_rust_context_entries(
         context.nodes.len()
-            + context.function_namespaces.len()
+            + context.owner_namespaces.len()
             + context.namespaces.len()
             + context.containers.len()
             + context.public_local_impls.len()

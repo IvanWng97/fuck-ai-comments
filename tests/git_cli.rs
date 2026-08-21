@@ -193,6 +193,56 @@ fn default_rescans_unchanged_sources_when_worktree_policy_changes() {
 }
 
 #[test]
+fn staged_preserves_rust_type_ownership_for_capped_rustdoc() {
+    let root = repository();
+    write(
+        &root,
+        "fuck-ai-comments.toml",
+        concat!(
+            "schema-version = 1\n",
+            "[comments.rustdoc]\n",
+            "policy = \"capped\"\n",
+            "max-lines = 1\n",
+        ),
+    );
+    write(
+        &root,
+        "record.rs",
+        concat!(
+            "/// Existing documentation.\n",
+            "pub(crate) struct Record;\n",
+        ),
+    );
+    commit_all(&root, "add documented type");
+    write(
+        &root,
+        "record.rs",
+        concat!(
+            "/// Existing documentation.\n",
+            "/// Newly added detail.\n",
+            "pub(crate) struct Record;\n",
+        ),
+    );
+    git(&root, ["add", "record.rs"]);
+
+    let output = command(&root)
+        .args(["check", "--staged"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(
+        stdout.contains("type `Record` owns 2 rustdoc comment lines; configured allowance is 1")
+    );
+    assert!(
+        !stdout.contains("file scope owns"),
+        "unexpected stdout:\n{stdout}"
+    );
+}
+
+#[test]
 fn staged_reads_policy_from_the_index_and_rescans_unchanged_sources() {
     let root = repository();
     write(

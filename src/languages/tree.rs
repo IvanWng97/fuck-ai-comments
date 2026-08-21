@@ -7,8 +7,8 @@ use crate::config::PolicyConfig;
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{
-    CodeToken, Comment, CommentKind, Function, IdentitySource, Leaf, ParsedFile, Span, TreeInput,
-    TreeOwner, TreeOwnership, TypeOwner, tree_document, tree_findings,
+    CodeToken, Comment, CommentAttachmentScope, CommentKind, Function, IdentitySource, Leaf,
+    ParsedFile, Span, TreeInput, TreeOwner, TreeOwnership, TypeOwner, tree_document, tree_findings,
 };
 
 use super::walk::{WalkEvent, events};
@@ -727,11 +727,24 @@ impl OwnerCandidate {
     }
 
     pub(crate) fn type_owner(span: Span, name: String, identity: Vec<String>) -> Self {
+        Self::type_owner_with_identity(span, name, IdentitySource::segments(identity))
+    }
+
+    pub(crate) fn type_owner_with_identity_parent(
+        span: Span,
+        name: String,
+        parent: Option<IdentityId>,
+        segment: String,
+    ) -> Self {
+        Self::type_owner_with_identity(span, name, IdentitySource::child(parent, segment))
+    }
+
+    fn type_owner_with_identity(span: Span, name: String, identity: IdentitySource) -> Self {
         Self {
             data: OwnerData::Type(TypeOwner {
                 span,
                 name,
-                identity: IdentitySource::segments(identity),
+                identity,
                 budget_code_lines: 0,
             }),
             suppressed_nodes: Vec::new(),
@@ -1301,9 +1314,9 @@ impl<'source> FactCollector<'source> {
 
     fn push_comment(&mut self, comment: Comment) {
         let mut choice = CommentChoice::default();
-        match comment.kind {
-            CommentKind::FileNarrative => {}
-            CommentKind::TypeNarrative => {
+        match comment.kind.attachment() {
+            CommentAttachmentScope::File => {}
+            CommentAttachmentScope::Type => {
                 if let Some(owner) = self
                     .active_types
                     .last()
@@ -1314,11 +1327,7 @@ impl<'source> FactCollector<'source> {
                     choice.direct = Some(owner);
                 }
             }
-            CommentKind::Narrative
-            | CommentKind::RustDocs
-            | CommentKind::ToolDirective
-            | CommentKind::SafetyProof
-            | CommentKind::PublicDocs => {
+            CommentAttachmentScope::Inferred => {
                 choice.direct = self
                     .active
                     .last()
@@ -1382,7 +1391,7 @@ impl<'source> FactCollector<'source> {
             }
             if comment.span.end_byte <= node_start
                 && candidate.start_byte <= comment.span.start_byte
-                && is_regular(comment.kind)
+                && uses_inferred_attachment(comment.kind)
             {
                 choice.direct = Some(candidate);
                 if is_budget_owner(owner) {
@@ -1510,7 +1519,7 @@ fn assign_leading(
     }
     for index in (0..comments.len()).rev() {
         let seed = seeds[index];
-        if is_regular(comments[index].kind) {
+        if uses_inferred_attachment(comments[index].kind) {
             merge_choice(&mut choices[index], seed);
         }
         if let Some(previous) = previous[index] {
@@ -1568,11 +1577,8 @@ fn is_budget_owner(owner: TreeOwner) -> bool {
     matches!(owner, TreeOwner::Function(_) | TreeOwner::Type(_))
 }
 
-fn is_regular(kind: CommentKind) -> bool {
-    !matches!(
-        kind,
-        CommentKind::FileNarrative | CommentKind::TypeNarrative
-    )
+fn uses_inferred_attachment(kind: CommentKind) -> bool {
+    kind.attachment() == CommentAttachmentScope::Inferred
 }
 
 fn materialize_comments(
@@ -1796,6 +1802,31 @@ pub(crate) fn starts_physical_line(node: Node<'_>, source: &str) -> bool {
 
 pub(crate) fn canonical_syntax(node: Node<'_>, source: &str) -> String {
     let mut identity = String::new();
+    for_each_syntax_leaf(node, source, |current, text| {
+        push_length_prefixed(&mut identity, current.kind());
+        push_length_prefixed(&mut identity, text);
+    });
+    identity
+}
+
+pub(crate) fn readable_syntax(node: Node<'_>, source: &str) -> String {
+    let mut syntax = String::new();
+    let mut previous_end = None;
+    for_each_syntax_leaf(node, source, |current, text| {
+        if previous_end.is_some_and(|end| end < current.start_byte()) {
+            syntax.push(' ');
+        }
+        syntax.push_str(text);
+        previous_end = Some(current.end_byte());
+    });
+    syntax
+}
+
+fn for_each_syntax_leaf<'tree, 'source>(
+    node: Node<'tree>,
+    source: &'source str,
+    mut visit: impl FnMut(Node<'tree>, &'source str),
+) {
     let mut excluded_depth = 0_usize;
     for event in events(node) {
         match event {
@@ -1804,8 +1835,7 @@ pub(crate) fn canonical_syntax(node: Node<'_>, source: &str) -> String {
             WalkEvent::Enter(current) if current.child_count() == 0 => {
                 let text = node_text(current, source);
                 if !text.trim().is_empty() {
-                    push_length_prefixed(&mut identity, current.kind());
-                    push_length_prefixed(&mut identity, text);
+                    visit(current, text);
                 }
             }
             WalkEvent::Enter(_) => {}
@@ -1813,7 +1843,6 @@ pub(crate) fn canonical_syntax(node: Node<'_>, source: &str) -> String {
             WalkEvent::Leave(_) => {}
         }
     }
-    identity
 }
 
 fn is_comment_kind(kind: &str) -> bool {

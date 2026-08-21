@@ -20,7 +20,7 @@ comments.
 | Rule                             | Required policy                                                                                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                  |
-| Type budget                      | Recognized type owners in Python, JavaScript/TypeScript, Kotlin, Objective-C, and Swift use the same relative narrative budget as functions       |
+| Type budget                      | Recognized type owners in Rust, Python, JavaScript/TypeScript, Kotlin, Objective-C, and Swift use the same relative narrative budget as functions |
 | Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, template, and TOML owners allow at most 3 total                                        |
 | Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                           |
 | File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                              |
@@ -32,6 +32,9 @@ comments.
 Function and type `code_lines` count physical rows assigned to that budget.
 Nested functions and types use their own budgets, while leaf code stays in its
 nearest function or type budget. File `code_lines` remain whole-file.
+Rust structs, enums, unions, traits, type aliases, and implementation blocks are
+type owners. Module headers and documentation on module declarations remain at
+file scope.
 
 Rust public API docs do not consume a length budget. In one repository discovery
 pass, the CLI asks each detected Cargo workspace once for authoritative library
