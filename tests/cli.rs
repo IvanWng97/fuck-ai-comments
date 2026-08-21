@@ -114,6 +114,97 @@ fn all_honors_an_unlimited_rustdoc_policy_from_the_repository_config() {
 }
 
 #[test]
+fn all_discovers_the_repository_config_for_a_nested_scope() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    let status = ProcessCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root.path())
+        .status()
+        .expect("git init should run");
+    assert!(status.success(), "git init should succeed");
+    fs::create_dir(root.path().join("src")).expect("source directory should be created");
+    fs::write(
+        root.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "\n",
+            "[comments.narrative]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("policy configuration should be written");
+    fs::write(
+        root.path().join("src/module.py"),
+        concat!(
+            "# First narrative line.\n",
+            "# Second narrative line.\n",
+            "# Third narrative line.\n",
+            "# Fourth narrative line.\n",
+            "VALUE = 4\n",
+        ),
+    )
+    .expect("Python source should be written");
+
+    for scope in ["src", "src/module.py"] {
+        command(&root)
+            .args(["check", "--all", scope])
+            .assert()
+            .code(0)
+            .stdout("clean: 1 file scanned\n");
+    }
+}
+
+#[test]
+fn all_rejects_a_git_root_that_does_not_contain_the_scope() {
+    let scan = TempDir::new().expect("scan repository should be created");
+    let redirected = TempDir::new().expect("redirected repository should be created");
+    for root in [&scan, &redirected] {
+        let status = ProcessCommand::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root.path())
+            .status()
+            .expect("git init should run");
+        assert!(status.success(), "git init should succeed");
+    }
+    fs::create_dir(scan.path().join("src")).expect("source directory should be created");
+    fs::write(
+        scan.path().join("src/module.py"),
+        concat!(
+            "# First narrative line.\n",
+            "# Second narrative line.\n",
+            "# Third narrative line.\n",
+            "# Fourth narrative line.\n",
+            "VALUE = 4\n",
+        ),
+    )
+    .expect("Python source should be written");
+    fs::write(
+        redirected.path().join("fuck-ai-comments.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.narrative]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("redirected policy configuration should be written");
+
+    let output = command(&scan)
+        .env("GIT_DIR", redirected.path().join(".git"))
+        .env("GIT_WORK_TREE", redirected.path())
+        .args(["check", "--all", "src"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(
+        stderr.contains("src is outside Git repository"),
+        "unexpected stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn rustdoc_policy_does_not_exempt_unattached_doc_syntax() {
     let root = TempDir::new().expect("temporary directory should be created");
     fs::write(
@@ -781,6 +872,40 @@ fn all_uses_an_explicit_policy_configuration() {
 
     command(&root)
         .args(["check", "--all", "--config", "custom-policy.toml", "."])
+        .assert()
+        .code(0)
+        .stdout("clean: 1 file scanned\n");
+}
+
+#[test]
+fn all_explicit_config_skips_repository_discovery() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(root.path().join(".git"), "gitdir: missing\n")
+        .expect("broken Git marker should be written");
+    fs::create_dir(root.path().join("src")).expect("source directory should be created");
+    fs::write(
+        root.path().join("custom-policy.toml"),
+        concat!(
+            "schema-version = 1\n",
+            "[comments.narrative]\n",
+            "policy = \"unlimited\"\n",
+        ),
+    )
+    .expect("explicit policy configuration should be written");
+    fs::write(
+        root.path().join("src/module.py"),
+        concat!(
+            "# First narrative line.\n",
+            "# Second narrative line.\n",
+            "# Third narrative line.\n",
+            "# Fourth narrative line.\n",
+            "VALUE = 4\n",
+        ),
+    )
+    .expect("Python source should be written");
+
+    command(&root)
+        .args(["check", "--all", "--config", "custom-policy.toml", "src"])
         .assert()
         .code(0)
         .stdout("clean: 1 file scanned\n");

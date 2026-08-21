@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use fuck_ai_comments::{Finding, SourceFile, supports_path};
 use ignore::WalkBuilder;
 
-use super::{cargo_context, source};
+use super::{cargo_context, git, source};
 
 pub(super) struct Report {
     pub(super) findings: Vec<Finding>,
@@ -16,8 +16,13 @@ pub(super) struct Report {
 }
 
 pub(super) fn scan_all(root: &Path, explicit_config: Option<&Path>) -> Result<Report> {
-    let default_config = default_config_path(root);
-    let config_path = explicit_config.map_or_else(|| default_config.clone(), Path::to_owned);
+    let (default_config, config_path) = match explicit_config {
+        Some(config_path) => (scan_root_config_path(root), config_path.to_owned()),
+        None => {
+            let config_path = default_config_path(root)?;
+            (config_path.clone(), config_path)
+        }
+    };
     let files = supported_files(root, [&default_config, &config_path])?;
     let current_directory =
         std::env::current_dir().context("could not resolve current directory")?;
@@ -119,7 +124,14 @@ fn analysis_with_repository_policy(
     }
 }
 
-fn default_config_path(root: &Path) -> PathBuf {
+fn default_config_path(root: &Path) -> Result<PathBuf> {
+    if let Some(repository_root) = git::discover_worktree_root(root)? {
+        return Ok(repository_root.join("fuck-ai-comments.toml"));
+    }
+    Ok(scan_root_config_path(root))
+}
+
+fn scan_root_config_path(root: &Path) -> PathBuf {
     if root.is_dir() {
         root.join("fuck-ai-comments.toml")
     } else {

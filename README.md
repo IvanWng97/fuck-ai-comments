@@ -82,10 +82,12 @@ absolute owner cap and still require stale-comment attestation.
 
 ## Configuration
 
-Place an optional `fuck-ai-comments.toml` at the scan root (`--all`) or Git
-repository root (change modes). The schema is versioned and strict: unknown
-fields, unsupported versions, non-positive caps, and `max-lines` without a
-`capped` policy fail with exit code `2`.
+Place an optional `fuck-ai-comments.toml` at the Git repository root. `--all`
+uses that repository authority even when its final path narrows the scan to one
+file or subdirectory. Outside a Git worktree, `--all` discovers the file at its
+scan root. The schema is versioned and strict: unknown fields, unsupported
+versions, non-positive caps, and `max-lines` without a `capped` policy fail with
+exit code `2`.
 
 ```toml
 schema-version = 1
