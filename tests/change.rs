@@ -3106,3 +3106,174 @@ fn deeply_nested_kotlin_change_preserves_owner_correspondence() {
         "the deepest unchanged comment must remain attached to its changed function: {findings:#?}"
     );
 }
+
+fn stale_lines(path: &str, before: &str, after: &str) -> (Vec<Finding>, Vec<usize>) {
+    let findings = analyze_change(
+        SourceFile {
+            path: Path::new(path),
+            text: before,
+        },
+        SourceFile {
+            path: Path::new(path),
+            text: after,
+        },
+    )
+    .expect("valid change should be analyzed");
+    let lines = findings
+        .iter()
+        .filter(|finding| finding.rule == "comment-policy/comment-owner-changed")
+        .map(|finding| finding.line)
+        .collect();
+    (findings, lines)
+}
+
+#[test]
+fn rust_field_edit_stales_only_that_field_doc_and_the_type_doc() {
+    let before = concat!(
+        "/// Summary of the report shape.\n",
+        "struct Report {\n",
+        "    /// Width in cells.\n",
+        "    width: u8,\n",
+        "    /// Height in cells.\n",
+        "    height: u8,\n",
+        "}\n",
+    );
+    let after = concat!(
+        "/// Summary of the report shape.\n",
+        "struct Report {\n",
+        "    /// Width in cells.\n",
+        "    width: u16,\n",
+        "    /// Height in cells.\n",
+        "    height: u8,\n",
+        "}\n",
+    );
+
+    let (findings, lines) = stale_lines("src/lib.rs", before, after);
+
+    assert_eq!(
+        lines,
+        [1, 3],
+        "the edited field and the declaring type go stale; the sibling does not: {findings:#?}"
+    );
+    assert!(
+        findings.iter().any(|finding| {
+            finding.line == 3 && finding.message.contains("member `Report.width`")
+        }),
+        "member attestations name the parent-qualified member: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_same_field_name_in_different_types_keeps_separate_identities() {
+    let before = concat!(
+        "struct First {\n",
+        "    /// Shared wording.\n",
+        "    value: u8,\n",
+        "}\n",
+        "struct Second {\n",
+        "    /// Shared wording.\n",
+        "    value: u8,\n",
+        "}\n",
+    );
+    let after = concat!(
+        "struct First {\n",
+        "    /// Shared wording.\n",
+        "    value: u8,\n",
+        "}\n",
+        "struct Second {\n",
+        "    /// Shared wording.\n",
+        "    value: u64,\n",
+        "}\n",
+    );
+
+    let (findings, lines) = stale_lines("src/lib.rs", before, after);
+
+    assert_eq!(lines, [6], "only Second.value changed: {findings:#?}");
+}
+
+#[test]
+fn rust_parent_type_rename_stales_field_docs() {
+    assert_parent_type_rename_stales_nested_comment(
+        "src/lib.rs",
+        concat!(
+            "struct OldReport {\n",
+            "    /// Coupled to the enclosing report type.\n",
+            "    width: u8,\n",
+            "}\n",
+        ),
+        concat!(
+            "struct NewReport {\n",
+            "    /// Coupled to the enclosing report type.\n",
+            "    width: u8,\n",
+            "}\n",
+        ),
+        2,
+    );
+}
+
+#[test]
+fn rust_enum_variant_edit_stales_only_that_variant_doc_and_the_enum_doc() {
+    let before = concat!(
+        "/// Drawable kinds.\n",
+        "enum Kind {\n",
+        "    /// A line.\n",
+        "    Line(u8),\n",
+        "    /// A box.\n",
+        "    Rect(u8),\n",
+        "}\n",
+    );
+    let after = concat!(
+        "/// Drawable kinds.\n",
+        "enum Kind {\n",
+        "    /// A line.\n",
+        "    Line(u8),\n",
+        "    /// A box.\n",
+        "    Rect(u16),\n",
+        "}\n",
+    );
+
+    let (findings, lines) = stale_lines("src/lib.rs", before, after);
+
+    assert_eq!(
+        lines,
+        [1, 5],
+        "the edited variant and the declaring enum go stale; the sibling does not: {findings:#?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.line == 5 && finding.message.contains("member `Kind::Rect`")),
+        "variant attestations name the parent-qualified variant: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_new_field_doc_activates_the_member_budget_only() {
+    let before = concat!(
+        "struct Report {\n",
+        "    /// Width.\n",
+        "    width: u8,\n",
+        "    height: u8,\n",
+        "}\n",
+    );
+    let after = concat!(
+        "struct Report {\n",
+        "    /// Width.\n",
+        "    width: u8,\n",
+        "    /// One.\n",
+        "    /// Two.\n",
+        "    /// Three.\n",
+        "    /// Four.\n",
+        "    height: u8,\n",
+        "}\n",
+    );
+
+    let (findings, _) = stale_lines("src/lib.rs", before, after);
+
+    let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+    assert_eq!(
+        rules,
+        ["comment-policy/member-comment-budget"],
+        "the new member doc is budgeted on the member, not the type: {findings:#?}"
+    );
+}
