@@ -8,8 +8,8 @@ use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
 use crate::policy::{
     CodeToken, Comment, CommentAttachmentScope, CommentClassification, Function, IdentitySource,
-    Leaf, ParsedFile, Span, TreeInput, TreeOwner, TreeOwnership, TypeOwner, tree_document,
-    tree_findings,
+    Leaf, Member, MemberRole, ParsedFile, Span, TreeInput, TreeOwner, TreeOwnership, TypeOwner,
+    tree_document, tree_findings,
 };
 
 use super::walk::{WalkEvent, events};
@@ -762,6 +762,7 @@ enum OwnerData {
     Function(Function),
     Type(TypeOwner),
     Leaf(Leaf),
+    Member(Member),
 }
 
 impl OwnerCandidate {
@@ -830,6 +831,19 @@ impl OwnerCandidate {
         }
     }
 
+    pub(crate) fn member(span: Span, role: MemberRole, name: String, segment: String) -> Self {
+        Self {
+            data: OwnerData::Member(Member {
+                span,
+                role,
+                name,
+                segment,
+            }),
+            suppressed_nodes: Vec::new(),
+            callable_frontier_roots: Vec::new(),
+        }
+    }
+
     pub(crate) fn suppressing(mut self, nodes: Vec<usize>) -> Self {
         self.suppressed_nodes = nodes;
         self
@@ -849,6 +863,7 @@ struct Facts {
     types: Vec<TypeOwner>,
     comments: Vec<Comment>,
     leaves: Vec<Leaf>,
+    members: Vec<Member>,
     syntax: Vec<SyntaxEvent>,
     ownership: TreeOwnership,
 }
@@ -865,6 +880,7 @@ impl Facts {
             functions: &self.functions,
             types: &self.types,
             leaves: &self.leaves,
+            members: &self.members,
             comments: &self.comments,
             ownership: &self.ownership,
         }
@@ -934,16 +950,24 @@ pub(crate) fn document<S: LanguageSpec>(
         types,
         comments,
         leaves,
+        members,
         syntax,
         ownership,
     } = parse_facts(path, source, spec)?;
-    let code = assign_code(syntax, functions.len(), types.len(), leaves.len());
+    let code = assign_code(
+        syntax,
+        functions.len(),
+        types.len(),
+        leaves.len(),
+        &ownership.member_parents,
+    );
     tree_document(
         source,
         TreeInput {
             functions: &functions,
             types: &types,
             leaves: &leaves,
+            members: &members,
             comments: &comments,
             ownership: &ownership,
         },
@@ -1046,6 +1070,7 @@ struct FactCollector<'source> {
     source: &'source str,
     active: Vec<TreeOwner>,
     active_budgets: Vec<TreeOwner>,
+    active_code_budgets: Vec<TreeOwner>,
     active_types: Vec<TreeOwner>,
     owner_nodes: Vec<OwnerFrame>,
     suppressed_owner_nodes: HashSet<usize>,
@@ -1064,6 +1089,9 @@ struct FactCollector<'source> {
     leaves: Vec<Leaf>,
     leaf_parents: Vec<Option<TreeOwner>>,
     leaf_budget_owners: Vec<Option<TreeOwner>>,
+    members: Vec<Member>,
+    member_parents: Vec<Option<TreeOwner>>,
+    member_budget_owners: Vec<Option<TreeOwner>>,
     syntax: Vec<SyntaxEvent>,
     trailing_direct: HashMap<usize, OwnerSpan>,
     trailing_budget: HashMap<usize, OwnerSpan>,
@@ -1152,7 +1180,14 @@ impl<'source> FactCollector<'source> {
                     let owner = TreeOwner::Leaf(self.leaves.len());
                     self.leaves.push(leaf);
                     self.leaf_budget_owners
-                        .push(self.active_budgets.last().copied());
+                        .push(self.active_code_budgets.last().copied());
+                    owner
+                }
+                OwnerData::Member(member) => {
+                    let owner = TreeOwner::Member(self.members.len());
+                    self.members.push(member);
+                    self.member_budget_owners
+                        .push(self.active_code_budgets.last().copied());
                     owner
                 }
             };
@@ -1202,6 +1237,10 @@ impl<'source> FactCollector<'source> {
             if is_budget_owner(owner) {
                 let popped = self.active_budgets.pop();
                 self.record_closed_owner("budget owner", popped, owner);
+            }
+            if owns_code_budget(owner) {
+                let popped = self.active_code_budgets.pop();
+                self.record_closed_owner("code budget owner", popped, owner);
             }
             if matches!(owner, TreeOwner::Type(_)) {
                 let popped = self.active_types.pop();
@@ -1297,6 +1336,7 @@ impl<'source> FactCollector<'source> {
         if !self.owner_nodes.is_empty()
             || !self.active.is_empty()
             || !self.active_budgets.is_empty()
+            || !self.active_code_budgets.is_empty()
             || !self.active_types.is_empty()
         {
             self.invariant_error
@@ -1313,13 +1353,14 @@ impl<'source> FactCollector<'source> {
         assign_leading(
             self.source,
             &self.comments,
-            &owner_spans(&self.functions, &self.types, &self.leaves),
+            &owner_spans(&self.functions, &self.types, &self.leaves, &self.members),
             &mut choices,
         );
         assign_budget_code_lines(
             self.source,
             &self.syntax,
             &self.leaf_budget_owners,
+            &self.member_budget_owners,
             &mut self.functions,
             &mut self.types,
         );
@@ -1330,6 +1371,8 @@ impl<'source> FactCollector<'source> {
             type_parents: self.type_parents,
             leaves: vec![Vec::new(); self.leaves.len()],
             leaf_parents: self.leaf_parents,
+            members: vec![Vec::new(); self.members.len()],
+            member_parents: self.member_parents,
             file: Vec::new(),
             comment_owners: Vec::with_capacity(self.comments.len()),
         };
@@ -1340,6 +1383,7 @@ impl<'source> FactCollector<'source> {
             types: self.types,
             comments: self.comments,
             leaves: self.leaves,
+            members: self.members,
             syntax: self.syntax,
             ownership,
         })
@@ -1370,12 +1414,16 @@ impl<'source> FactCollector<'source> {
             TreeOwner::Function(_) => self.function_parents.push(parent),
             TreeOwner::Type(_) => self.type_parents.push(parent),
             TreeOwner::Leaf(_) => self.leaf_parents.push(parent),
+            TreeOwner::Member(_) => self.member_parents.push(parent),
         }
         self.reassign_prefixed_comments(owner, node_start);
         self.reassign_prefixed_syntax(owner, node_start);
         self.active.push(owner);
         if is_budget_owner(owner) {
             self.active_budgets.push(owner);
+        }
+        if owns_code_budget(owner) {
+            self.active_code_budgets.push(owner);
         }
         if matches!(owner, TreeOwner::Type(_)) {
             self.active_types.push(owner);
@@ -1431,12 +1479,24 @@ impl<'source> FactCollector<'source> {
     fn candidate(&self, owner: TreeOwner) -> OwnerSpan {
         OwnerSpan::new(
             owner,
-            owner_span(owner, &self.functions, &self.types, &self.leaves),
+            owner_span(
+                owner,
+                &self.functions,
+                &self.types,
+                &self.leaves,
+                &self.members,
+            ),
         )
     }
 
     fn reassign_prefixed_syntax(&mut self, owner: TreeOwner, node_start: usize) {
-        let span = owner_span(owner, &self.functions, &self.types, &self.leaves);
+        let span = owner_span(
+            owner,
+            &self.functions,
+            &self.types,
+            &self.leaves,
+            &self.members,
+        );
         if span.start_byte >= node_start {
             return;
         }
@@ -1503,8 +1563,9 @@ impl OwnerSpan {
     fn key(self) -> (usize, u8) {
         let priority = match self.owner {
             TreeOwner::Leaf(_) => 0,
-            TreeOwner::Function(_) => 1,
-            TreeOwner::Type(_) => 2,
+            TreeOwner::Member(_) => 1,
+            TreeOwner::Function(_) => 2,
+            TreeOwner::Type(_) => 3,
         };
         (self.end_byte - self.start_byte, priority)
     }
@@ -1516,7 +1577,12 @@ struct CommentChoice {
     direct: Option<OwnerSpan>,
 }
 
-fn owner_spans(functions: &[Function], types: &[TypeOwner], leaves: &[Leaf]) -> Vec<OwnerSpan> {
+fn owner_spans(
+    functions: &[Function],
+    types: &[TypeOwner],
+    leaves: &[Leaf],
+    members: &[Member],
+) -> Vec<OwnerSpan> {
     functions
         .iter()
         .enumerate()
@@ -1532,6 +1598,12 @@ fn owner_spans(functions: &[Function], types: &[TypeOwner], leaves: &[Leaf]) -> 
                 .iter()
                 .enumerate()
                 .map(|(index, leaf)| OwnerSpan::new(TreeOwner::Leaf(index), &leaf.span)),
+        )
+        .chain(
+            members
+                .iter()
+                .enumerate()
+                .map(|(index, member)| OwnerSpan::new(TreeOwner::Member(index), &member.span)),
         )
         .collect()
 }
@@ -1644,6 +1716,13 @@ fn choose_line_owner(owners: &mut HashMap<usize, OwnerSpan>, line: usize, candid
 }
 
 fn is_budget_owner(owner: TreeOwner) -> bool {
+    matches!(
+        owner,
+        TreeOwner::Function(_) | TreeOwner::Type(_) | TreeOwner::Member(_)
+    )
+}
+
+fn owns_code_budget(owner: TreeOwner) -> bool {
     matches!(owner, TreeOwner::Function(_) | TreeOwner::Type(_))
 }
 
@@ -1662,12 +1741,13 @@ fn materialize_comments(
                 ownership.function_budget[index].push(comment.clone());
             }
             Some(TreeOwner::Type(index)) => ownership.type_budget[index].push(comment.clone()),
+            Some(TreeOwner::Member(index)) => ownership.members[index].push(comment.clone()),
             Some(TreeOwner::Leaf(_)) | None => {}
         }
         let direct = choice.direct.map(|owner| owner.owner);
         match direct {
             Some(TreeOwner::Leaf(index)) => ownership.leaves[index].push(comment.clone()),
-            Some(TreeOwner::Function(_) | TreeOwner::Type(_)) => {}
+            Some(TreeOwner::Function(_) | TreeOwner::Type(_) | TreeOwner::Member(_)) => {}
             None => ownership.file.push(comment.clone()),
         }
         ownership.comment_owners.push(direct);
@@ -1678,6 +1758,7 @@ fn assign_budget_code_lines(
     source: &str,
     syntax: &[SyntaxEvent],
     leaf_budget_owners: &[Option<TreeOwner>],
+    member_budget_owners: &[Option<TreeOwner>],
     functions: &mut [Function],
     types: &mut [TypeOwner],
 ) {
@@ -1691,6 +1772,7 @@ fn assign_budget_code_lines(
         let budget_owner = match event.owner {
             Some(owner @ (TreeOwner::Function(_) | TreeOwner::Type(_))) => Some(owner),
             Some(TreeOwner::Leaf(index)) => leaf_budget_owners[index],
+            Some(TreeOwner::Member(index)) => member_budget_owners[index],
             None => None,
         };
         match budget_owner {
@@ -1700,7 +1782,7 @@ fn assign_budget_code_lines(
             Some(TreeOwner::Type(index)) => {
                 type_rows[index].record_span(&event.span, source.as_bytes());
             }
-            Some(TreeOwner::Leaf(_)) | None => {}
+            Some(TreeOwner::Leaf(_) | TreeOwner::Member(_)) | None => {}
         }
     }
     for (function, rows) in functions.iter_mut().zip(function_rows) {
@@ -1716,11 +1798,13 @@ fn owner_span<'owner>(
     functions: &'owner [Function],
     types: &'owner [TypeOwner],
     leaves: &'owner [Leaf],
+    members: &'owner [Member],
 ) -> &'owner Span {
     match owner {
         TreeOwner::Function(index) => &functions[index].span,
         TreeOwner::Type(index) => &types[index].span,
         TreeOwner::Leaf(index) => &leaves[index].span,
+        TreeOwner::Member(index) => &members[index].span,
     }
 }
 
@@ -1774,15 +1858,27 @@ fn assign_code(
     function_count: usize,
     type_count: usize,
     leaf_count: usize,
+    member_parents: &[Option<TreeOwner>],
 ) -> Vec<Vec<CodeToken>> {
-    let mut code = vec![Vec::new(); 1 + function_count + type_count + leaf_count];
-    for event in syntax {
-        let owner = event.owner.map_or(0, |owner| match owner {
+    let slot = |owner: Option<TreeOwner>| {
+        owner.map_or(0, |owner| match owner {
             TreeOwner::Function(index) => index + 1,
             TreeOwner::Type(index) => function_count + index + 1,
             TreeOwner::Leaf(index) => function_count + type_count + index + 1,
-        });
-        code[owner].push(event.token);
+            TreeOwner::Member(index) => function_count + type_count + leaf_count + index + 1,
+        })
+    };
+    let mut code =
+        vec![Vec::new(); 1 + function_count + type_count + leaf_count + member_parents.len()];
+    for event in syntax {
+        let mut declaring = event.owner;
+        while let Some(TreeOwner::Member(index)) = declaring {
+            declaring = member_parents[index];
+        }
+        if declaring != event.owner {
+            code[slot(declaring)].push(event.token.clone());
+        }
+        code[slot(event.owner)].push(event.token);
     }
     code
 }
@@ -2058,7 +2154,7 @@ mod tests {
         assign_leading(
             &source,
             &comments,
-            &owner_spans(&functions, &[], &[]),
+            &owner_spans(&functions, &[], &[], &[]),
             &mut choices,
         );
 

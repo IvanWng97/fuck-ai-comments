@@ -13,6 +13,7 @@ const COMMENT_BLOCK_MIN_LINES: usize = 3;
 const FILE_COMMENT_ABSOLUTE_MAX: usize = 8;
 const FILE_CODE_LINES_PER_COMMENT: usize = 16;
 pub(crate) const LEAF_COMMENT_MAX_LINES: usize = 3;
+const MEMBER_COMMENT_MAX_LINES: usize = 3;
 const TEMPLATE_COMMENT_MAX_LINES: usize = 3;
 const OWNER_COMMENT_CAP_RULE: &str = "comment-policy/owner-comment-cap";
 const COMMENT_CATEGORY_CAP_RULE: &str = "comment-policy/comment-category-cap";
@@ -242,6 +243,33 @@ pub(crate) struct Leaf {
     pub(crate) name: String,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum MemberRole {
+    Field,
+    Variant,
+}
+
+impl MemberRole {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Field => "field",
+            Self::Variant => "variant",
+        }
+    }
+}
+
+/// A declaration member (field, variant, ...) that owns its own comments while
+/// its code rows still size the enclosing type.
+#[derive(Debug)]
+pub(crate) struct Member {
+    pub(crate) span: Span,
+    pub(crate) role: MemberRole,
+    /// Parent-qualified display name, e.g. `Report.a` or `Kind::First`.
+    pub(crate) name: String,
+    /// Identity segment hung under the parent owner's identity, e.g. `field:a`.
+    pub(crate) segment: String,
+}
+
 pub(crate) struct TreeOwnership {
     pub(crate) function_budget: Vec<Vec<Comment>>,
     pub(crate) function_parents: Vec<Option<TreeOwner>>,
@@ -249,6 +277,8 @@ pub(crate) struct TreeOwnership {
     pub(crate) type_parents: Vec<Option<TreeOwner>>,
     pub(crate) leaves: Vec<Vec<Comment>>,
     pub(crate) leaf_parents: Vec<Option<TreeOwner>>,
+    pub(crate) members: Vec<Vec<Comment>>,
+    pub(crate) member_parents: Vec<Option<TreeOwner>>,
     pub(crate) file: Vec<Comment>,
     pub(crate) comment_owners: Vec<Option<TreeOwner>>,
 }
@@ -258,6 +288,7 @@ pub(crate) struct TreeInput<'input> {
     pub(crate) functions: &'input [Function],
     pub(crate) types: &'input [TypeOwner],
     pub(crate) leaves: &'input [Leaf],
+    pub(crate) members: &'input [Member],
     pub(crate) comments: &'input [Comment],
     pub(crate) ownership: &'input TreeOwnership,
 }
@@ -343,8 +374,9 @@ pub(crate) fn tree_document(
         start_line: 1,
         end_line: source.lines().count().max(1),
     };
-    let mut owners =
-        Vec::with_capacity(1 + input.functions.len() + input.types.len() + input.leaves.len());
+    let mut owners = Vec::with_capacity(
+        1 + input.functions.len() + input.types.len() + input.leaves.len() + input.members.len(),
+    );
     let file_identity = identities.push_path(["file"])?;
     owners.push(OwnerSnapshot {
         kind: OwnerKind::File,
@@ -362,7 +394,12 @@ pub(crate) fn tree_document(
             span: function.span.clone(),
             parent: input.ownership.function_parents[index]
                 .map(|parent| {
-                    owner_snapshot_index(parent, input.functions.len(), input.types.len())
+                    owner_snapshot_index(
+                        parent,
+                        input.functions.len(),
+                        input.types.len(),
+                        input.leaves.len(),
+                    )
                 })
                 .or(Some(0)),
             code: code.get(index + 1).cloned().unwrap_or_default(),
@@ -377,7 +414,12 @@ pub(crate) fn tree_document(
             span: type_owner.span.clone(),
             parent: input.ownership.type_parents[index]
                 .map(|parent| {
-                    owner_snapshot_index(parent, input.functions.len(), input.types.len())
+                    owner_snapshot_index(
+                        parent,
+                        input.functions.len(),
+                        input.types.len(),
+                        input.leaves.len(),
+                    )
                 })
                 .or(Some(0)),
             code: code.get(type_offset + index).cloned().unwrap_or_default(),
@@ -392,10 +434,37 @@ pub(crate) fn tree_document(
             span: leaf.span.clone(),
             parent: input.ownership.leaf_parents[index]
                 .map(|parent| {
-                    owner_snapshot_index(parent, input.functions.len(), input.types.len())
+                    owner_snapshot_index(
+                        parent,
+                        input.functions.len(),
+                        input.types.len(),
+                        input.leaves.len(),
+                    )
                 })
                 .or(Some(0)),
             code: code.get(leaf_offset + index).cloned().unwrap_or_default(),
+        });
+    }
+    let member_offset = leaf_offset + input.leaves.len();
+    for (index, member) in input.members.iter().enumerate() {
+        let parent = input.ownership.member_parents[index]
+            .map(|parent| {
+                owner_snapshot_index(
+                    parent,
+                    input.functions.len(),
+                    input.types.len(),
+                    input.leaves.len(),
+                )
+            })
+            .or(Some(0));
+        let parent_identity = parent.map(|parent| owners[parent].identity);
+        owners.push(OwnerSnapshot {
+            kind: OwnerKind::Member,
+            name: member.name.clone(),
+            identity: identities.push(parent_identity, member.segment.clone())?,
+            span: member.span.clone(),
+            parent,
+            code: code.get(member_offset + index).cloned().unwrap_or_default(),
         });
     }
     let comments = input
@@ -407,7 +476,12 @@ pub(crate) fn tree_document(
             text: comment.text.clone(),
             span: comment.span.clone(),
             owner: owner.map_or(0, |owner| {
-                owner_snapshot_index(owner, input.functions.len(), input.types.len())
+                owner_snapshot_index(
+                    owner,
+                    input.functions.len(),
+                    input.types.len(),
+                    input.leaves.len(),
+                )
             }),
         })
         .collect();
@@ -418,11 +492,17 @@ pub(crate) fn tree_document(
     })
 }
 
-fn owner_snapshot_index(owner: TreeOwner, function_count: usize, type_count: usize) -> usize {
+fn owner_snapshot_index(
+    owner: TreeOwner,
+    function_count: usize,
+    type_count: usize,
+    leaf_count: usize,
+) -> usize {
     match owner {
         TreeOwner::Function(index) => index + 1,
         TreeOwner::Type(index) => function_count + index + 1,
         TreeOwner::Leaf(index) => function_count + type_count + index + 1,
+        TreeOwner::Member(index) => function_count + type_count + leaf_count + index + 1,
     }
 }
 
@@ -456,6 +536,14 @@ pub(crate) fn tree_findings(
         selection,
         input.leaves,
         &input.ownership.leaves,
+        language,
+        policy,
+    ));
+    findings.extend(member_findings(
+        path,
+        selection,
+        input.members,
+        &input.ownership.members,
         language,
         policy,
     ));
@@ -660,6 +748,7 @@ pub(crate) enum TreeOwner {
     Function(usize),
     Type(usize),
     Leaf(usize),
+    Member(usize),
 }
 
 fn leaf_findings(
@@ -705,6 +794,60 @@ fn leaf_findings(
                     "{} comment lines own {language} leaf `{}`; allowance is {LEAF_COMMENT_MAX_LINES}",
                     narrative_lines.len(),
                     leaf.name
+                ),
+            });
+        }
+    }
+    findings
+}
+
+fn member_findings(
+    path: &Path,
+    selection: &Selection,
+    members: &[Member],
+    owned: &[Vec<Comment>],
+    language: &str,
+    policy: &PolicyConfig,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (member, owned_comments) in members.iter().zip(owned) {
+        if owned_comments.is_empty()
+            || !selection.selects_owner(
+                OwnerKind::Member,
+                member.span.start_byte,
+                member.span.end_byte,
+            )
+        {
+            continue;
+        }
+        let owner_label = format!("{language} {} `{}`", member.role.label(), member.name);
+        findings.extend(owner_comment_cap_finding_with_policy(
+            path,
+            OwnerKind::Member,
+            &owner_label,
+            owned_comments,
+            policy,
+        ));
+        findings.extend(configured_category_cap_findings(
+            path,
+            &owner_label,
+            owned_comments,
+            policy,
+        ));
+        let narrative: Vec<Comment> = owned_comments
+            .iter()
+            .filter(|comment| comment.classification.uses_relative_budget(policy))
+            .cloned()
+            .collect();
+        let narrative_lines = comment_lines(&narrative);
+        if narrative_lines.len() > MEMBER_COMMENT_MAX_LINES {
+            findings.push(Finding {
+                path: path.display().to_string(),
+                line: first_line(&narrative_lines),
+                rule: "comment-policy/member-comment-budget",
+                message: format!(
+                    "{owner_label} owns {} comment lines; allowance is {MEMBER_COMMENT_MAX_LINES}",
+                    narrative_lines.len()
                 ),
             });
         }
@@ -832,6 +975,7 @@ pub(crate) fn owner_comment_cap_finding_with_policy(
         OwnerKind::Function | OwnerKind::Type => FUNCTION_COMMENT_ABSOLUTE_MAX,
         OwnerKind::File => FILE_COMMENT_ABSOLUTE_MAX,
         OwnerKind::Leaf | OwnerKind::TomlKey => LEAF_COMMENT_MAX_LINES,
+        OwnerKind::Member => MEMBER_COMMENT_MAX_LINES,
         OwnerKind::Template => TEMPLATE_COMMENT_MAX_LINES,
     };
     (lines.len() > allowance && relative_lines.len() <= allowance).then(|| Finding {
