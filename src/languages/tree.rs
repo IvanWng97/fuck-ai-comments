@@ -1871,12 +1871,12 @@ fn assign_code(
     let mut code =
         vec![Vec::new(); 1 + function_count + type_count + leaf_count + member_parents.len()];
     for event in syntax {
-        let mut declaring = event.owner;
-        while let Some(TreeOwner::Member(index)) = declaring {
-            declaring = member_parents[index];
-        }
-        if declaring != event.owner {
-            code[slot(declaring)].push(event.token.clone());
+        // Member code also belongs to every enclosing member and to the
+        // declaring owner, so their change detection keeps seeing it.
+        let mut ancestor = event.owner;
+        while let Some(TreeOwner::Member(index)) = ancestor {
+            ancestor = member_parents[index];
+            code[slot(ancestor)].push(event.token.clone());
         }
         code[slot(event.owner)].push(event.token);
     }
