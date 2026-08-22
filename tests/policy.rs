@@ -1460,7 +1460,7 @@ fn rust_public_enum_variant_docs_require_public_module_ancestry() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/member-comment-budget"),
         "a public enum inside a private module is not public API: {findings:#?}"
     );
 }
