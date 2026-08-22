@@ -5,6 +5,12 @@ All notable changes to `fuck-ai-comments` are documented here. The project uses
 
 ## [Unreleased]
 
+### Fixed
+
+- Rust struct, union, and tuple fields and enum variants are now member
+  owners with independent comment budgets, so per-field and per-variant
+  documentation no longer aggregates onto the enclosing type (#41).
+
 ## [0.2.0] - 2026-08-20
 
 ### Changed

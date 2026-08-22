@@ -258,8 +258,7 @@ impl MemberRole {
     }
 }
 
-/// A declaration member (field, variant, ...) that owns its own comments while
-/// its code rows still size the enclosing type.
+/// A declaration member that owns its comments while its code still sizes the type.
 #[derive(Debug)]
 pub(crate) struct Member {
     pub(crate) span: Span,
