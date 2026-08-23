@@ -12,7 +12,7 @@ use crate::RustFileRole;
 use crate::config::PolicyConfig;
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, Selection};
-use crate::policy::{CommentAttachmentScope, CommentClassification, ParsedFile, Span};
+use crate::policy::{CommentAttachmentScope, CommentClassification, MemberRole, ParsedFile, Span};
 
 #[derive(Clone, Copy)]
 struct Rust {
@@ -23,6 +23,7 @@ struct Rust {
 struct RustContext {
     nodes: HashMap<usize, RustNodeContext>,
     owner_namespaces: HashMap<usize, Option<IdentityId>>,
+    members: HashMap<usize, RustMemberDraft>,
     namespaces: IdentityArena,
     containers: HashMap<usize, RustContainerKind>,
     public_local_impls: HashMap<usize, bool>,
@@ -66,6 +67,12 @@ struct RustTypeDraft {
     name: String,
 }
 
+struct RustMemberDraft {
+    role: MemberRole,
+    name: String,
+    segment: String,
+}
+
 struct RustImplDraft {
     node_id: usize,
     scope_id: Option<usize>,
@@ -79,6 +86,8 @@ struct RustContextFrame {
     is_module_body: bool,
     is_declaration_list: bool,
     is_ordered_field_declaration_list: bool,
+    ordered_field_count: usize,
+    member_scope_pushed: bool,
     inner_rustdocs_allowed: bool,
     namespace_before: Option<IdentityId>,
     callable_pushed: bool,
@@ -221,7 +230,7 @@ impl LanguageSpec for Rust {
     }
 
     fn is_owner_prefix(self, kind: &str) -> bool {
-        kind == "attribute_item"
+        matches!(kind, "attribute_item" | "visibility_modifier")
     }
 
     fn owner(
@@ -255,6 +264,14 @@ impl LanguageSpec for Rust {
                 name,
                 namespace,
                 segment,
+            )));
+        }
+        if let Some(member) = context.members.get(&node.id()) {
+            return Ok(Some(OwnerCandidate::member(
+                rust_item_span(node, location),
+                member.role,
+                member.name.clone(),
+                member.segment.clone(),
             )));
         }
         if !matches!(node.kind(), "const_item" | "static_item") {
@@ -486,6 +503,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
     let mut type_drafts = Vec::new();
     let mut impl_drafts = Vec::new();
     let mut outer_doc_targets = Vec::new();
+    let mut member_scopes: Vec<String> = Vec::new();
 
     for event in events(root) {
         record_rust_context_work();
@@ -507,6 +525,8 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     &mut context,
                     &mut private_module_depth,
                 );
+                let member_scope_pushed =
+                    record_member(node, source, &mut frames, &mut context, &mut member_scopes);
                 let parent = frames.last();
                 let rustdoc_target = is_outer_rustdoc_target(node)
                     || parent.is_some_and(|frame| {
@@ -599,6 +619,8 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     is_declaration_list: node.kind() == "declaration_list",
                     is_ordered_field_declaration_list: node.kind()
                         == "ordered_field_declaration_list",
+                    ordered_field_count: 0,
+                    member_scope_pushed,
                     inner_rustdocs_allowed: node.kind() == "source_file" || is_module_body,
                     namespace_before,
                     callable_pushed,
@@ -629,6 +651,11 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                 }
                 if frame.container_pushed {
                     pop_scope(&mut containers, node.id(), "Rust container")?;
+                }
+                if frame.member_scope_pushed && member_scopes.pop().is_none() {
+                    return Err(AnalysisError::Invariant(
+                        "Rust member scopes closed out of order".to_owned(),
+                    ));
                 }
             }
         }
@@ -665,6 +692,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
     record_rust_context_entries(
         context.nodes.len()
             + context.owner_namespaces.len()
+            + context.members.len()
             + context.namespaces.len()
             + context.containers.len()
             + context.public_local_impls.len()
@@ -674,6 +702,82 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
     );
     record_rust_namespace_segment_storage(context.namespaces.len());
     Ok(context)
+}
+
+/// Registers `node` as a declaration member when it is a field, tuple field,
+/// or enum variant; returns whether it opened a member scope for its children.
+fn record_member(
+    node: Node<'_>,
+    source: &str,
+    frames: &mut [RustContextFrame],
+    context: &mut RustContext,
+    member_scopes: &mut Vec<String>,
+) -> bool {
+    match node.kind() {
+        "struct_item" | "enum_item" | "union_item" => {
+            let Some(name) = node.child_by_field_name("name") else {
+                return false;
+            };
+            member_scopes.push(node_text(name, source).to_owned());
+            return true;
+        }
+        "enum_variant" => {
+            let Some((scope, name)) = member_scopes.last().zip(node.child_by_field_name("name"))
+            else {
+                return false;
+            };
+            let variant = node_text(name, source);
+            let qualified = format!("{scope}::{variant}");
+            context.members.insert(
+                node.id(),
+                RustMemberDraft {
+                    role: MemberRole::Variant,
+                    name: qualified.clone(),
+                    segment: format!("variant:{variant}"),
+                },
+            );
+            member_scopes.push(qualified);
+            return true;
+        }
+        "field_declaration" => {
+            if let Some((scope, name)) = member_scopes.last().zip(node.child_by_field_name("name"))
+            {
+                let field = node_text(name, source);
+                context.members.insert(
+                    node.id(),
+                    RustMemberDraft {
+                        role: MemberRole::Field,
+                        name: format!("{scope}.{field}"),
+                        segment: format!("field:{field}"),
+                    },
+                );
+            }
+            return false;
+        }
+        _ => {}
+    }
+    let Some(frame) = frames
+        .last_mut()
+        .filter(|frame| frame.is_ordered_field_declaration_list)
+    else {
+        return false;
+    };
+    if !is_ordered_field_rustdoc_target(node) {
+        return false;
+    }
+    let index = frame.ordered_field_count;
+    frame.ordered_field_count += 1;
+    if let Some(scope) = member_scopes.last() {
+        context.members.insert(
+            node.id(),
+            RustMemberDraft {
+                role: MemberRole::Field,
+                name: format!("{scope}.{index}"),
+                segment: format!("field:{index}"),
+            },
+        );
+    }
+    false
 }
 
 fn pop_scope(

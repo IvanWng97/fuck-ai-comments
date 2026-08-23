@@ -25,6 +25,14 @@ All notable changes to `fuck-ai-comments` are documented here. The project uses
   the platform's per-step limits and the complete finding list stays in the
   step log.
 
+### Fixed
+
+- Rust struct, union, and tuple fields and enum variants are now member
+  owners with independent comment budgets, so per-field and per-variant
+  documentation no longer aggregates onto the enclosing type (#41).
+
+## [0.2.0] - 2026-08-20
+
 ### Changed
 
 - Replaced configuration schema v1 with the breaking, language-independent v2

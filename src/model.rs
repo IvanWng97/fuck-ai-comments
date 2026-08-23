@@ -105,6 +105,7 @@ pub(crate) enum OwnerKind {
     Function,
     Type,
     Leaf,
+    Member,
     Template,
     TomlKey,
 }

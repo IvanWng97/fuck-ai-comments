@@ -23,6 +23,8 @@ pub const TYPE_COMMENT_BUDGET: &str = "comment-policy/type-comment-budget";
 pub const COMMENT_BLOCK_BUDGET: &str = "comment-policy/comment-block-budget";
 /// Narrative comment lines on a leaf owner exceed the leaf allowance.
 pub const LEAF_COMMENT_BUDGET: &str = "comment-policy/leaf-comment-budget";
+/// Narrative comment lines on a member owner exceed the member allowance.
+pub const MEMBER_COMMENT_BUDGET: &str = "comment-policy/member-comment-budget";
 /// File-scope narrative comment lines exceed the file budget.
 pub const FILE_COMMENT_BUDGET: &str = "comment-policy/file-comment-budget";
 /// Narrative comment lines in a template owner exceed the template allowance.
@@ -65,6 +67,13 @@ pub const ALL: &[Rule] = &[
         short_description: "A constant, static, or equivalent leaf owns more than 3 narrative lines.",
         full_description: "Leaf owners such as constants, statics, and TOML keys get at most 3 narrative comment lines.",
         help: "Shorten the leaf's rationale to three lines or fewer, or document the concept once at a higher-level owner.",
+    },
+    Rule {
+        id: MEMBER_COMMENT_BUDGET,
+        name: "MemberCommentBudget",
+        short_description: "A field, variant, or equivalent member owns more than 3 narrative lines.",
+        full_description: "Member owners such as struct, union, and tuple fields and enum variants budget their own comments and get at most 3 narrative lines; their code rows still size the declaring type's relative budget.",
+        help: "Shorten the member's rationale to three lines or fewer, or configure a capped allowance for its semantic category in fuck-ai-comments.toml.",
     },
     Rule {
         id: FILE_COMMENT_BUDGET,

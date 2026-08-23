@@ -261,7 +261,10 @@ impl OwnerChangeIndex {
                     .parent
                     .and_then(|parent| pairs.before_to_after[parent]);
                 let parent_path_changed = old_owner.parent.is_some_and(|parent| {
-                    before.owners[parent].kind == OwnerKind::Type && identity_path_changed[parent]
+                    matches!(
+                        before.owners[parent].kind,
+                        OwnerKind::Type | OwnerKind::Member
+                    ) && identity_path_changed[parent]
                 });
                 let structural_parent_changed =
                     old_owner.parent.is_some() && new_owner.parent != expected_after_parent;
@@ -1104,7 +1107,7 @@ fn semantic_selection(
     }
     for (before_index, after_index) in owners.before_to_after.iter().enumerate() {
         if after_index.is_none()
-            && before.owners[before_index].kind == OwnerKind::Leaf
+            && sizes_parent_budget(before.owners[before_index].kind)
             && let Some(after_parent) = before.owners[before_index]
                 .parent
                 .and_then(|parent| owners.before_to_after[parent])
@@ -1153,7 +1156,7 @@ fn semantic_selection(
     for owner_index in affected {
         let owner = &after.owners[owner_index];
         selection.select_owner(owner.kind, owner.span.start_byte, owner.span.end_byte);
-        if owner.kind == OwnerKind::Leaf {
+        if sizes_parent_budget(owner.kind) {
             let mut parent = owner.parent;
             while let Some(parent_index) = parent {
                 let parent_owner = &after.owners[parent_index];
@@ -1174,6 +1177,10 @@ fn semantic_selection(
 
 fn is_scoped_budget_owner(kind: OwnerKind) -> bool {
     matches!(kind, OwnerKind::Function | OwnerKind::Type)
+}
+
+fn sizes_parent_budget(kind: OwnerKind) -> bool {
+    matches!(kind, OwnerKind::Leaf | OwnerKind::Member)
 }
 
 fn change_findings(
@@ -1236,6 +1243,7 @@ fn owner_label(owner: &OwnerSnapshot) -> String {
         OwnerKind::Function => format!("function `{}`", owner.name),
         OwnerKind::Type => format!("type `{}`", owner.name),
         OwnerKind::Leaf => format!("leaf `{}`", owner.name),
+        OwnerKind::Member => format!("member `{}`", owner.name),
         OwnerKind::Template => "template owner".to_owned(),
         OwnerKind::TomlKey => format!("TOML key `{}`", owner.name),
     }

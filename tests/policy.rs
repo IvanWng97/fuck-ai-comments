@@ -1225,8 +1225,14 @@ fn rust_public_field_docs_on_a_private_type_are_narrative() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/member-comment-budget"),
         "bare pub on a field cannot outgrow its private type: {findings:#?}"
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+        "field docs no longer aggregate onto the type: {findings:#?}"
     );
 }
 
@@ -1454,7 +1460,7 @@ fn rust_public_enum_variant_docs_require_public_module_ancestry() {
     assert!(
         findings
             .iter()
-            .any(|finding| finding.rule == "comment-policy/type-comment-budget"),
+            .any(|finding| finding.rule == "comment-policy/member-comment-budget"),
         "a public enum inside a private module is not public API: {findings:#?}"
     );
 }
@@ -3392,5 +3398,273 @@ fn javascript_tool_directives_cannot_bypass_the_absolute_owner_cap() {
             .iter()
             .any(|finding| finding.rule == "comment-policy/owner-comment-cap"),
         "tool metadata must not grant an unlimited comment allowance: {findings:#?}"
+    );
+}
+
+fn capped_documentation(max_lines: usize) -> AnalysisContext {
+    AnalysisContext::default()
+        .with_policy_toml(&format!(
+            "schema-version = 2\n[comments.documentation]\nmode = \"capped\"\nmax-lines = {max_lines}\n"
+        ))
+        .expect("capped documentation policy should parse")
+}
+
+fn rust_struct_with_documented_fields(
+    field_count: usize,
+    oversized: Option<(usize, usize)>,
+) -> String {
+    let mut source = String::from("/// One line of type doc.\npub(crate) struct Report {\n");
+    for field in 0..field_count {
+        let lines = oversized
+            .filter(|(index, _)| *index == field)
+            .map_or(1, |(_, lines)| lines);
+        for line in 0..lines {
+            source.push_str(&format!("    /// Field {field} detail {line}.\n"));
+        }
+        source.push_str(&format!("    f{field}: u8,\n"));
+    }
+    source.push_str("}\n");
+    source
+}
+
+#[test]
+fn rust_field_docs_budget_against_the_field_not_the_type() {
+    let source = rust_struct_with_documented_fields(20, None);
+
+    let findings = capped_documentation(5)
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &source,
+        })
+        .expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "twenty one-line field docs never exceed a five-line cap: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_oversized_field_doc_reports_only_that_field() {
+    let source = rust_struct_with_documented_fields(3, Some((1, 6)));
+
+    let findings = capped_documentation(5)
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &source,
+        })
+        .expect("valid Rust should parse");
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "only the oversized field is reported: {findings:#?}"
+    );
+    let finding = &findings[0];
+    assert_eq!(finding.rule, "comment-policy/comment-category-cap");
+    assert_eq!(
+        finding.line, 5,
+        "the finding anchors on the field's first doc line"
+    );
+    assert_eq!(
+        finding.message,
+        "Rust field `Report.f1` owns 6 documentation comment lines; configured allowance is 5"
+    );
+}
+
+#[test]
+fn rust_enum_variant_docs_budget_against_the_variant() {
+    let mut clean = String::from("/// Kinds of drawable.\npub(crate) enum Kind {\n");
+    for variant in 0..8 {
+        clean.push_str(&format!(
+            "    /// Draws variant {variant}.\n    V{variant},\n"
+        ));
+    }
+    clean.push_str("}\n");
+    let context = capped_documentation(5);
+
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: &clean,
+        })
+        .expect("valid Rust should parse");
+    assert!(
+        findings.is_empty(),
+        "one-line variant docs stay within budget: {findings:#?}"
+    );
+
+    let oversized = concat!(
+        "pub(crate) enum Kind {\n",
+        "    /// First.\n",
+        "    First,\n",
+        "    /// Second one.\n",
+        "    /// Second two.\n",
+        "    /// Second three.\n",
+        "    /// Second four.\n",
+        "    /// Second five.\n",
+        "    /// Second six.\n",
+        "    Second,\n",
+        "    /// Third.\n",
+        "    Third,\n",
+        "}\n",
+    );
+    let findings = context
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: oversized,
+        })
+        .expect("valid Rust should parse");
+    assert_eq!(
+        findings.len(),
+        1,
+        "only the oversized variant is reported: {findings:#?}"
+    );
+    assert_eq!(findings[0].line, 4);
+    assert_eq!(
+        findings[0].message,
+        "Rust variant `Kind::Second` owns 6 documentation comment lines; configured allowance is 5"
+    );
+}
+
+#[test]
+fn rust_tuple_field_docs_budget_against_the_field() {
+    let source = concat!(
+        "pub(crate) struct Pair(\n",
+        "    /// One.\n",
+        "    /// Two.\n",
+        "    /// Three.\n",
+        "    /// Four.\n",
+        "    /// Five.\n",
+        "    /// Six.\n",
+        "    #[allow(dead_code)]\n",
+        "    pub u8,\n",
+        "    /// Second.\n",
+        "    u16,\n",
+        ");\n",
+    );
+
+    let findings = capped_documentation(5)
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: source,
+        })
+        .expect("valid Rust should parse");
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "only the oversized tuple field is reported: {findings:#?}"
+    );
+    assert_eq!(findings[0].line, 2);
+    assert_eq!(
+        findings[0].message,
+        "Rust field `Pair.0` owns 6 documentation comment lines; configured allowance is 5"
+    );
+}
+
+#[test]
+fn rust_member_docs_respect_a_zero_line_documentation_ban() {
+    let source = concat!(
+        "pub(crate) struct Report {\n",
+        "    /// Banned.\n",
+        "    value: u8,\n",
+        "}\n",
+    );
+
+    let findings = capped_documentation(0)
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: source,
+        })
+        .expect("valid Rust should parse");
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "a banned member doc is still reported: {findings:#?}"
+    );
+    assert_eq!(
+        findings[0].message,
+        "Rust field `Report.value` owns 1 documentation comment lines; configured allowance is 0"
+    );
+}
+
+#[test]
+fn rust_member_narrative_uses_the_member_budget() {
+    let source = concat!(
+        "struct Report {\n",
+        "    // One.\n",
+        "    // Two.\n",
+        "    // Three.\n",
+        "    // Four.\n",
+        "    value: u8,\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+    assert_eq!(
+        rules,
+        ["comment-policy/member-comment-budget"],
+        "member narrative is budgeted on the member alone: {findings:#?}"
+    );
+    assert_eq!(
+        findings[0].message,
+        "Rust field `Report.value` owns 4 comment lines; allowance is 3"
+    );
+}
+
+#[test]
+fn rust_member_code_still_counts_toward_the_type_budget() {
+    let mut source = String::from(
+        "struct Wide {\n    // The first rationale line.\n    // The second rationale line.\n\n",
+    );
+    for field in 0..8 {
+        source.push_str(&format!("    f{field}: u8,\n"));
+    }
+    source.push_str("}\n");
+
+    let findings = analyze(Path::new("src/lib.rs"), &source).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "eight field rows keep the type's two rationale lines within its relative budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_nested_variant_field_docs_budget_against_the_inner_field() {
+    let source = concat!(
+        "pub(crate) enum Kind {\n",
+        "    /// Variant.\n",
+        "    Second {\n",
+        "        /// One.\n",
+        "        /// Two.\n",
+        "        /// Three.\n",
+        "        /// Four.\n",
+        "        /// Five.\n",
+        "        /// Six.\n",
+        "        x: u8,\n",
+        "    },\n",
+        "}\n",
+    );
+
+    let findings = capped_documentation(5)
+        .analyze_all(SourceFile {
+            path: Path::new("src/lib.rs"),
+            text: source,
+        })
+        .expect("valid Rust should parse");
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "only the inner field is reported: {findings:#?}"
+    );
+    assert_eq!(
+        findings[0].message,
+        "Rust field `Kind::Second.x` owns 6 documentation comment lines; configured allowance is 5"
     );
 }
