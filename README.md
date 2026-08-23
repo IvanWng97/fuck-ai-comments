@@ -33,24 +33,28 @@ and changed-owner attestation.
 
 ## Rules
 
-| Rule                             | Required policy                                                                                                                                   |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                  |
-| Type budget                      | Recognized type owners in Rust, Python, JavaScript/TypeScript, Kotlin, Objective-C, and Swift use the same relative narrative budget as functions |
-| Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, template, and TOML owners allow at most 3 total                                        |
-| Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                           |
-| File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                              |
-| Template budget                  | HTML, CSS, and Astro template owners get at most 3 narrative lines                                                                                |
-| Default absolute owner cap       | Comments using built-in relative or owner-capped policies cannot exceed 8 lines on function/type/file owners or 3 on leaf/template/TOML owners   |
-| Stale comment                    | Unchanged meaningful normalized text fails when its owning code or semantic role changes                                                          |
-| Reparented comment               | Unchanged meaningful normalized text fails when it moves to another owner                                                                         |
+| Rule                             | Required policy                                                                                                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                      |
+| Type budget                      | Recognized type owners in Rust, Python, JavaScript/TypeScript, Kotlin, Objective-C, and Swift use the same relative narrative budget as functions     |
+| Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, member, template, and TOML owners allow at most 3 total                                    |
+| Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                               |
+| Member budget                    | Rust struct, union, and tuple fields and enum variants are members with their own 3-line narrative budget; member docs never aggregate onto the type  |
+| File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                                  |
+| Template budget                  | HTML, CSS, and Astro template owners get at most 3 narrative lines                                                                                    |
+| Default absolute owner cap       | Comments using built-in relative or owner-capped policies cannot exceed 8 lines on function/type/file owners or 3 on leaf/member/template/TOML owners |
+| Stale comment                    | Unchanged meaningful normalized text fails when its owning code or semantic role changes                                                              |
+| Reparented comment               | Unchanged meaningful normalized text fails when it moves to another owner                                                                             |
 
 Function and type `code_lines` count physical rows assigned to that budget.
 Nested functions and types use their own budgets, while leaf code stays in its
 nearest function or type budget. File `code_lines` remain whole-file.
 Rust structs, enums, unions, traits, type aliases, and implementation blocks are
-type owners. Module headers and documentation on module declarations remain at
-file scope.
+type owners. Struct, union, and tuple fields and enum variants are member
+owners: each budgets its own comments under the same semantic categories, while
+its code rows still size the declaring type's relative budget. Member identities
+are parent-qualified (`Report.width`, `Kind::First`). Module headers and
+documentation on module declarations remain at file scope.
 
 Documentation is classified from syntax and attachment, not from a marker alone.
 The adapters recognize Python docstrings; attached Rust docs; attached JSDoc and
@@ -138,7 +142,7 @@ category accepts one mode:
 
 - `relative`: use the existing owner-relative and comment-block budgets;
 - `owner-capped`: skip relative budgets but retain the built-in absolute cap
-  for the owning function, type, file, leaf, template, or TOML key;
+  for the owning function, type, file, leaf, member, template, or TOML key;
 - `capped`: replace the relative and aggregate owner budgets for that semantic
   category with `max-lines` per owner; or
 - `unlimited`: skip static length budgets for that semantic category.
