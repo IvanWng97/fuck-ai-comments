@@ -11,6 +11,7 @@ mod identity;
 mod languages;
 mod model;
 mod policy;
+pub mod rules;
 
 pub use config::{PolicyConfigError, RepositoryConfig};
 pub use model::{AnalysisError, AnalysisProfile, Finding, SourceFile};

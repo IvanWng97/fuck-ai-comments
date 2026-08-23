@@ -14,6 +14,7 @@ use crate::policy::{
     OwnerSnapshot, ParsedFile, Span, configured_category_cap_findings, file_findings,
     owner_comment_cap_finding_with_policy,
 };
+use crate::rules;
 
 const TABLE_PATH_TOKEN_KIND: &str = "toml-table-path";
 
@@ -312,7 +313,7 @@ pub(crate) fn analyze_file(
             findings.push(Finding {
                 path: path.display().to_string(),
                 line: lines.first().copied().unwrap_or(owner.span.start_line),
-                rule: "comment-policy/leaf-comment-budget",
+                rule: rules::LEAF_COMMENT_BUDGET,
                 message: format!(
                     "{} comment lines own TOML key `{}`; allowance is {LEAF_COMMENT_MAX_LINES}",
                     lines.len(),

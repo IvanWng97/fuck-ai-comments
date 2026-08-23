@@ -13,13 +13,12 @@ use crate::identity::{
 use crate::languages;
 use crate::model::{AnalysisError, AnalysisProfile, Finding, OwnerKind, Selection, SourceFile};
 use crate::policy::{CommentSnapshot, OwnerSnapshot, ParsedFile, Span};
+use crate::rules;
 
 mod attestation_key;
 
 use attestation_key::AttestationKey;
 
-const STALE_RULE: &str = "comment-policy/comment-owner-changed";
-const REPARENTED_RULE: &str = "comment-policy/comment-reparented";
 const CHANGE_DIFF_ALGORITHM: Algorithm = Algorithm::Myers;
 const MAX_DIFF_TOKENS: usize = i32::MAX as usize - 1;
 
@@ -1200,7 +1199,7 @@ fn change_findings(
             findings.push(Finding {
                 path: after_file.path.display().to_string(),
                 line: new_comment.span.start_line,
-                rule: REPARENTED_RULE,
+                rule: rules::COMMENT_REPARENTED,
                 message: format!(
                     "unchanged comment moved from {} to {}; edit or delete it to attest the new ownership",
                     owner_label(&before.owners[old_comment.owner]),
@@ -1220,7 +1219,7 @@ fn change_findings(
             findings.push(Finding {
                 path: after_file.path.display().to_string(),
                 line: new_comment.span.start_line,
-                rule: STALE_RULE,
+                rule: rules::COMMENT_OWNER_CHANGED,
                 message: format!(
                     "{} or this comment's semantic role changed while its meaningful text did not; edit or delete it to attest that it remains true",
                     owner_label(new_owner)
