@@ -295,7 +295,7 @@ pub(crate) struct TreeInput<'input> {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CodeToken {
     event: CodeEvent,
-    pub(crate) kind: String,
+    pub(crate) kind: &'static str,
     pub(crate) text: String,
 }
 
@@ -307,18 +307,18 @@ enum CodeEvent {
 }
 
 impl CodeToken {
-    pub(crate) fn enter(kind: &str) -> Self {
+    pub(crate) fn enter(kind: &'static str) -> Self {
         Self {
             event: CodeEvent::Enter,
-            kind: kind.to_owned(),
+            kind,
             text: String::new(),
         }
     }
 
-    pub(crate) fn atom(kind: &str, text: &str) -> Self {
+    pub(crate) fn atom(kind: &'static str, text: &str) -> Self {
         Self {
             event: CodeEvent::Atom,
-            kind: kind.to_owned(),
+            kind,
             text: text.to_owned(),
         }
     }
@@ -327,10 +327,10 @@ impl CodeToken {
         self.event == CodeEvent::Atom
     }
 
-    pub(crate) fn leave(kind: &str) -> Self {
+    pub(crate) fn leave(kind: &'static str) -> Self {
         Self {
             event: CodeEvent::Leave,
-            kind: kind.to_owned(),
+            kind,
             text: String::new(),
         }
     }
@@ -426,21 +426,22 @@ pub(crate) fn tree_document(
     }
     let leaf_offset = type_offset + input.types.len();
     for (index, leaf) in input.leaves.iter().enumerate() {
+        let parent = input.ownership.leaf_parents[index]
+            .map(|parent| {
+                owner_snapshot_index(
+                    parent,
+                    input.functions.len(),
+                    input.types.len(),
+                    input.leaves.len(),
+                )
+            })
+            .or(Some(0));
         owners.push(OwnerSnapshot {
             kind: OwnerKind::Leaf,
             name: leaf.name.clone(),
             identity: identities.push_path([leaf.name.as_str()])?,
             span: leaf.span.clone(),
-            parent: input.ownership.leaf_parents[index]
-                .map(|parent| {
-                    owner_snapshot_index(
-                        parent,
-                        input.functions.len(),
-                        input.types.len(),
-                        input.leaves.len(),
-                    )
-                })
-                .or(Some(0)),
+            parent,
             code: code.get(leaf_offset + index).cloned().unwrap_or_default(),
         });
     }
@@ -790,9 +791,9 @@ fn leaf_findings(
                 line: first_line(&narrative_lines),
                 rule: "comment-policy/leaf-comment-budget",
                 message: format!(
-                    "{} comment lines own {language} leaf `{}`; allowance is {LEAF_COMMENT_MAX_LINES}",
-                    narrative_lines.len(),
-                    leaf.name
+                    "{language} leaf `{}` owns {} comment lines; allowance is {LEAF_COMMENT_MAX_LINES}",
+                    leaf.name,
+                    narrative_lines.len()
                 ),
             });
         }
