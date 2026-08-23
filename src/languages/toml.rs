@@ -315,9 +315,9 @@ pub(crate) fn analyze_file(
                 line: lines.first().copied().unwrap_or(owner.span.start_line),
                 rule: rules::LEAF_COMMENT_BUDGET,
                 message: format!(
-                    "{} comment lines own TOML key `{}`; allowance is {LEAF_COMMENT_MAX_LINES}",
-                    lines.len(),
-                    owner.name
+                    "TOML key `{}` owns {} comment lines; allowance is {LEAF_COMMENT_MAX_LINES}",
+                    owner.name,
+                    lines.len()
                 ),
             });
         }
