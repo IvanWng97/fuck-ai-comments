@@ -1,4 +1,5 @@
 const MODES = new Set(["all", "worktree", "staged", "base"]);
+const FORMATS = new Set(["text", "sarif"]);
 const UNSAFE_EXECUTABLE_PATH = /["\p{Cc}\u2028\u2029]/u;
 
 export function executableCommand(executable) {
@@ -8,7 +9,7 @@ export function executableCommand(executable) {
   return `"${executable}"`;
 }
 
-export function buildCheckArgumentsFromInputs(getInput) {
+export function buildCheckArgumentsFromInputs(getInput, format) {
   return buildCheckArguments({
     mode: getInput("mode", { required: true }),
     profile: getInput("profile", { required: true }),
@@ -16,6 +17,7 @@ export function buildCheckArgumentsFromInputs(getInput) {
     base: getInput("base"),
     head: getInput("head"),
     config: getInput("config"),
+    format,
   });
 }
 
@@ -26,9 +28,13 @@ export function buildCheckArguments({
   base,
   head,
   config,
+  format = "text",
 }) {
   if (!MODES.has(mode)) {
     throw new Error(`unsupported check mode: ${mode}`);
+  }
+  if (!FORMATS.has(format)) {
+    throw new Error(`unsupported report format: ${format}`);
   }
   if (mode === "base" && !base) {
     throw new Error("base is required when mode is base");
@@ -53,7 +59,7 @@ export function buildCheckArguments({
   if (config) {
     result.push("--config", config);
   }
-  result.push("--format", "json");
+  result.push("--format", format);
   result.push("--", path);
   return result;
 }

@@ -72,8 +72,10 @@ test("action metadata uses Node 24 and a committed bundle", async () => {
     "mode",
     "path",
     "profile",
+    "sarif-file",
     "version",
   ]);
+  assert.deepEqual(Object.keys(metadata.outputs), ["sarif-file"]);
 });
 
 test("workflow actions use reviewed commits with version comments", async () => {

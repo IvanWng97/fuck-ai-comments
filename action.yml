@@ -28,6 +28,13 @@ inputs:
   config:
     description: Optional path to a comment-policy TOML file
     required: false
+  sarif-file:
+    description: Optional workspace-relative path that receives a SARIF 2.1.0 report for github/codeql-action/upload-sarif
+    required: false
+
+outputs:
+  sarif-file:
+    description: Absolute path of the written SARIF report when sarif-file was requested
 
 runs:
   using: node24
