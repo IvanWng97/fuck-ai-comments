@@ -5,7 +5,25 @@ All notable changes to `fuck-ai-comments` are documented here. The project uses
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-08-20
+## [0.3.0] - 2026-08-23
+
+### Added
+
+- `check --format sarif` writes a SARIF 2.1.0 report with the full rule
+  registry, so findings upload to GitHub code scanning through
+  `github/codeql-action/upload-sarif` and pull requests surface only newly
+  introduced alerts.
+- The `sarif-file` Action input writes that report into the workspace and
+  exposes its path as the `sarif-file` output.
+- `fuck_ai_comments::rules` publishes stable rule identifiers with the
+  metadata shipped in machine-readable reports.
+
+### Changed
+
+- The Action no longer parses the JSON report or emits its own annotations; it
+  streams the text report under a GitHub problem matcher, so annotations follow
+  the platform's per-step limits and the complete finding list stays in the
+  step log.
 
 ### Changed
 

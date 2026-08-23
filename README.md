@@ -205,6 +205,9 @@ fuck-ai-comments check --all --config policy/comments.toml
 
 # Emit the stable, versioned report consumed by integrations.
 fuck-ai-comments check --all --format json
+
+# Emit SARIF 2.1.0 for GitHub code scanning or any SARIF consumer.
+fuck-ai-comments check --all --format sarif > comment-policy.sarif
 ```
 
 Pass a file or directory as the final argument to narrow the scope. Exit codes
@@ -218,8 +221,12 @@ resource-limit errors.
 
 `--format json` preserves those exit codes and writes one report containing
 `schemaVersion`, `filesScanned`, and sorted `findings` (`path`, `line`, `rule`,
-and `message`). Trusted-analysis failures (exit `2`) remain diagnostics on
-standard error instead of pretending to be a policy report.
+and `message`). `--format sarif` preserves them too and writes one SARIF 2.1.0
+run whose driver publishes every rule from `fuck_ai_comments::rules` with
+`shortDescription`, `fullDescription`, and `help`; each finding becomes an
+`error`-level result with one physical location. Trusted-analysis failures
+(exit `2`) remain diagnostics on standard error instead of pretending to be a
+policy report.
 
 Git is the authority for rename pairing; if supported additions and deletions
 remain unpaired, the CLI cannot prove ancestry and exits with code `2`.
@@ -256,16 +263,20 @@ Action invocation fails instead of silently running a clean-worktree scan that
 cannot detect stale comments.
 
 For pull requests, make the static baseline and changed-owner attestation two
-required steps in the same required job:
+required steps in the same required job, and publish the static findings to
+code scanning with GitHub's own `upload-sarif` step:
 
 ```yaml
 name: comment-policy
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   comments:
@@ -276,10 +287,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Enforce repository-wide comment budgets
+        id: budgets
         uses: IvanWng97/fuck-ai-comments@v0
         with:
           mode: all
+          sarif-file: comment-policy.sarif
+      - name: Publish comment budgets to code scanning
+        if: ${{ !cancelled() && steps.budgets.outputs.sarif-file }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.budgets.outputs.sarif-file }}
+          category: comment-policy
       - name: Enforce changed-owner attestation
+        if: github.event_name == 'pull_request'
         uses: IvanWng97/fuck-ai-comments@v0
         with:
           mode: base
@@ -289,14 +309,21 @@ jobs:
 ```
 
 Action inputs are `mode` (`all`, `worktree`, `staged`, or `base`), `profile`
-(`full` or `attestation`), `path`, `base`, `head`, `config`, and an exact CLI
-`version`.
+(`full` or `attestation`), `path`, `base`, `head`, `config`, `sarif-file`, and
+an exact CLI `version`; the `sarif-file` output is the absolute path of the
+written report.
 Inputs become an argv array; they are never concatenated into a shell command,
-and the Rust CLI is the profile-validation authority. The Action consumes the
-versioned JSON report, emits source-line error annotations, keeps the complete
-finding list in a folded log group, and fails the step once. GitHub limits a
-step to ten error annotations, so nine are reserved for source findings and the
-tenth is the failure summary. `mode: all` establishes or checks a static
+and the Rust CLI is the profile-validation authority. The Action streams the
+CLI's text report into the step log under a GitHub problem matcher, so findings
+become source-line annotations within the platform's per-step limit, the
+complete list stays in the log, and the step fails once with the CLI summary.
+With `sarif-file`, it also writes a SARIF 2.1.0 report; uploading it with
+`github/codeql-action/upload-sarif` turns every finding into a code scanning
+alert, and pull requests then fail only on alerts they introduce. Code scanning
+needs `security-events: write`, is free on public repositories, and requires
+GitHub Code Security on private ones; the `push` trigger keeps the default
+branch analyzed so pull-request comparisons have a baseline, and each upload in
+one run needs its own `category`. `mode: all` establishes or checks a static
 baseline; it does not replace `mode: base`, because a single valid comment can
 only be checked for drift by comparing revisions. Push and manual workflows
 must likewise pass an explicit before/after range for drift checks, or
