@@ -137,6 +137,105 @@ fn all_can_render_machine_readable_json_findings() {
     );
 }
 
+const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
+
+fn sarif_run(stdout: &[u8]) -> serde_json::Value {
+    let sarif: serde_json::Value =
+        serde_json::from_slice(stdout).expect("stdout should be one SARIF document");
+    assert_eq!(sarif["$schema"], SARIF_SCHEMA);
+    assert_eq!(sarif["version"], "2.1.0");
+    assert_eq!(sarif["runs"].as_array().map(Vec::len), Some(1));
+    sarif["runs"][0].clone()
+}
+
+#[test]
+fn all_renders_an_empty_sarif_run_when_clean() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    fs::write(root.path().join("clean.rs"), "const LIMIT: usize = 4;\n")
+        .expect("clean.rs should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "--format", "sarif", "."])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let run = sarif_run(&output.stdout);
+
+    assert_eq!(run["results"], serde_json::json!([]));
+    let driver = &run["tool"]["driver"];
+    assert_eq!(driver["name"], "fuck-ai-comments");
+    assert_eq!(driver["semanticVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        driver["informationUri"],
+        "https://github.com/IvanWng97/fuck-ai-comments"
+    );
+    let rules = driver["rules"]
+        .as_array()
+        .expect("every rule is published with the run");
+    assert_eq!(rules.len(), fuck_ai_comments::rules::ALL.len());
+    for (rule, descriptor) in rules.iter().zip(fuck_ai_comments::rules::ALL) {
+        assert_eq!(rule["id"], descriptor.id);
+        assert_eq!(rule["name"], descriptor.name);
+        assert_eq!(
+            rule["shortDescription"]["text"],
+            descriptor.short_description
+        );
+        assert_eq!(rule["fullDescription"]["text"], descriptor.full_description);
+        assert_eq!(rule["help"]["text"], descriptor.help);
+        assert_eq!(rule["help"]["markdown"], descriptor.help);
+        assert_eq!(rule["defaultConfiguration"]["level"], "error");
+        assert_eq!(rule["properties"]["problem.severity"], "error");
+    }
+}
+
+#[test]
+fn all_renders_sarif_results_with_rule_indexes_and_uri_locations() {
+    let root = TempDir::new().expect("temporary directory should be created");
+    let source = "// first\n// second\n// third\n// fourth\nconst LIMIT: usize = 4;\n";
+    fs::create_dir(root.path().join("nested")).expect("nested directory should be created");
+    fs::write(root.path().join("nested/z.rs"), source).expect("nested z.rs should be written");
+    fs::write(root.path().join("a.rs"), source).expect("a.rs should be written");
+
+    let output = command(&root)
+        .args(["check", "--all", "--format", "sarif", "."])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let run = sarif_run(&output.stdout);
+
+    let results = run["results"]
+        .as_array()
+        .expect("results should be an array");
+    assert_eq!(results.len(), 2);
+    let rule_index = fuck_ai_comments::rules::ALL
+        .iter()
+        .position(|rule| rule.id == "comment-policy/leaf-comment-budget")
+        .expect("the leaf budget rule is registered");
+    for (result, uri) in results.iter().zip(["a.rs", "nested/z.rs"]) {
+        assert_eq!(result["ruleId"], "comment-policy/leaf-comment-budget");
+        assert_eq!(result["ruleIndex"], rule_index);
+        assert_eq!(result["level"], "error");
+        assert!(
+            result["message"]["text"]
+                .as_str()
+                .is_some_and(|message| message.contains("allowance is 3")),
+            "unexpected result: {result:#}"
+        );
+        let locations = result["locations"]
+            .as_array()
+            .expect("results carry one physical location");
+        assert_eq!(locations.len(), 1);
+        let physical = &locations[0]["physicalLocation"];
+        assert_eq!(
+            physical["artifactLocation"]["uri"], uri,
+            "SARIF URIs use forward slashes on every platform"
+        );
+        assert_eq!(physical["region"]["startLine"], 1);
+    }
+}
+
 #[test]
 fn all_honors_an_unlimited_rustdoc_policy_from_the_repository_config() {
     let root = TempDir::new().expect("temporary directory should be created");

@@ -6,6 +6,7 @@ use tree_sitter::Node;
 use crate::config::{PolicyConfig, StaticPolicy};
 use crate::identity::{IdentityArena, IdentityId};
 use crate::model::{AnalysisError, Finding, OwnerKind, Selection};
+use crate::rules;
 
 const FUNCTION_COMMENT_ABSOLUTE_MAX: usize = 8;
 const FUNCTION_CODE_LINES_PER_COMMENT: usize = 4;
@@ -15,8 +16,6 @@ const FILE_CODE_LINES_PER_COMMENT: usize = 16;
 pub(crate) const LEAF_COMMENT_MAX_LINES: usize = 3;
 const MEMBER_COMMENT_MAX_LINES: usize = 3;
 const TEMPLATE_COMMENT_MAX_LINES: usize = 3;
-const OWNER_COMMENT_CAP_RULE: &str = "comment-policy/owner-comment-cap";
-const COMMENT_CATEGORY_CAP_RULE: &str = "comment-policy/comment-category-cap";
 
 #[cfg(test)]
 thread_local! {
@@ -594,7 +593,7 @@ pub(crate) fn template_findings(
     findings.push(Finding {
         path: path.display().to_string(),
         line: first_line(&lines),
-        rule: "comment-policy/template-comment-budget",
+        rule: rules::TEMPLATE_COMMENT_BUDGET,
         message: format!(
             "template owns {} comment lines; allowance is {TEMPLATE_COMMENT_MAX_LINES}",
             lines.len()
@@ -620,7 +619,7 @@ fn function_findings(
             ScopedOwner {
                 kind: OwnerKind::Function,
                 kind_label: "function",
-                budget_rule: "comment-policy/function-comment-budget",
+                budget_rule: rules::FUNCTION_COMMENT_BUDGET,
                 name: &function.name,
                 span: &function.span,
                 budget_code_lines: function.budget_code_lines,
@@ -649,7 +648,7 @@ fn type_findings(
             ScopedOwner {
                 kind: OwnerKind::Type,
                 kind_label: "type",
-                budget_rule: "comment-policy/type-comment-budget",
+                budget_rule: rules::TYPE_COMMENT_BUDGET,
                 name: &type_owner.name,
                 span: &type_owner.span,
                 budget_code_lines: type_owner.budget_code_lines,
@@ -717,7 +716,7 @@ fn scoped_owner_findings(
             findings.push(Finding {
                 path: path.display().to_string(),
                 line: first_line(&lines),
-                rule: "comment-policy/comment-block-budget",
+                rule: rules::COMMENT_BLOCK_BUDGET,
                 message: format!(
                     "{COMMENT_BLOCK_MIN_LINES}+-comment run inside {owner_label}; split the code or keep the local rationale below {COMMENT_BLOCK_MIN_LINES} lines"
                 ),
@@ -788,7 +787,7 @@ fn leaf_findings(
             findings.push(Finding {
                 path: path.display().to_string(),
                 line: first_line(&narrative_lines),
-                rule: "comment-policy/leaf-comment-budget",
+                rule: rules::LEAF_COMMENT_BUDGET,
                 message: format!(
                     "{} comment lines own {language} leaf `{}`; allowance is {LEAF_COMMENT_MAX_LINES}",
                     narrative_lines.len(),
@@ -843,7 +842,7 @@ fn member_findings(
             findings.push(Finding {
                 path: path.display().to_string(),
                 line: first_line(&narrative_lines),
-                rule: "comment-policy/member-comment-budget",
+                rule: rules::MEMBER_COMMENT_BUDGET,
                 message: format!(
                     "{owner_label} owns {} comment lines; allowance is {MEMBER_COMMENT_MAX_LINES}",
                     narrative_lines.len()
@@ -928,7 +927,7 @@ fn file_findings_with_lines(
             findings.push(Finding {
                 path: path.display().to_string(),
                 line: first_line(&lines),
-                rule: "comment-policy/comment-block-budget",
+                rule: rules::COMMENT_BLOCK_BUDGET,
                 message: format!(
                     "{COMMENT_BLOCK_MIN_LINES}+-comment run at file scope; keep rationale beside its owner or below {COMMENT_BLOCK_MIN_LINES} lines"
                 ),
@@ -943,7 +942,7 @@ fn file_findings_with_lines(
         findings.push(Finding {
             path: path.display().to_string(),
             line: first_line(&narrative_lines),
-            rule: "comment-policy/file-comment-budget",
+            rule: rules::FILE_COMMENT_BUDGET,
             message: format!(
                 "file scope owns {} comment lines for {code_lines} code lines; allowance is {allowance}",
                 narrative_lines.len()
@@ -980,7 +979,7 @@ pub(crate) fn owner_comment_cap_finding_with_policy(
     (lines.len() > allowance && relative_lines.len() <= allowance).then(|| Finding {
         path: path.display().to_string(),
         line: first_line(&lines),
-        rule: OWNER_COMMENT_CAP_RULE,
+        rule: rules::OWNER_COMMENT_CAP,
         message: format!(
             "{owner} owns {} statically budgeted comment lines; absolute allowance is {allowance}",
             lines.len()
@@ -1010,7 +1009,7 @@ pub(crate) fn configured_category_cap_findings(
             (lines.len() > allowance).then(|| Finding {
                 path: path.display().to_string(),
                 line: first_line(&lines),
-                rule: COMMENT_CATEGORY_CAP_RULE,
+                rule: rules::COMMENT_CATEGORY_CAP,
                 message: format!(
                     "{owner} owns {} {} comment lines; configured allowance is {allowance}",
                     lines.len(),
@@ -1173,7 +1172,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::Path;
 
-    use crate::{Finding, SourceFile, analyze_all};
+    use crate::{Finding, SourceFile, analyze_all, rules};
 
     use super::{
         Comment, CommentClassification, PhysicalCommentPositions, Span, comment_blocks,
@@ -1214,13 +1213,13 @@ mod tests {
                 Finding {
                     path: "src/lib.rs".to_owned(),
                     line: prefix_lines + 2,
-                    rule: "comment-policy/comment-block-budget",
+                    rule: rules::COMMENT_BLOCK_BUDGET,
                     message: "3+-comment run inside function `operation`; split the code or keep the local rationale below 3 lines".to_owned(),
                 },
                 Finding {
                     path: "src/lib.rs".to_owned(),
                     line: prefix_lines + 2,
-                    rule: "comment-policy/function-comment-budget",
+                    rule: rules::FUNCTION_COMMENT_BUDGET,
                     message: "function `operation` owns 3 comment lines for 3 code lines; allowance is 1".to_owned(),
                 },
             ]

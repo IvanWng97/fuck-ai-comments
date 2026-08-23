@@ -35,6 +35,10 @@ const ACTION_PINS = {
     sha: "fb8b3582c8e4def4969c97caa2f19720cb33a72f",
     version: "v7",
   },
+  "github/codeql-action/upload-sarif": {
+    sha: "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28",
+    version: "v4",
+  },
 };
 
 function pinnedAction(name) {
@@ -72,8 +76,10 @@ test("action metadata uses Node 24 and a committed bundle", async () => {
     "mode",
     "path",
     "profile",
+    "sarif-file",
     "version",
   ]);
+  assert.deepEqual(Object.keys(metadata.outputs), ["sarif-file"]);
 });
 
 test("workflow actions use reviewed commits with version comments", async () => {
@@ -318,8 +324,32 @@ test("required dogfood exercises the optimized release profile", async () => {
 
   assert.deepEqual(dogfood, {
     name: "Dogfood required comment policy",
+    id: "dogfood",
     if: "runner.os == 'Linux'",
-    run: "cargo run --release --locked -- check --all .",
+    run: [
+      "cargo build --release --locked",
+      "target/release/fuck-ai-comments check --all --format sarif . > comment-policy.sarif || test $? -eq 1",
+      "target/release/fuck-ai-comments check --all .",
+      "",
+    ].join("\n"),
+  });
+  assert.deepEqual(ci.jobs.rust.permissions, {
+    contents: "read",
+    "security-events": "write",
+  });
+  const upload = ci.jobs.rust.steps.find(
+    (step) => step.name === "Publish comment policy to code scanning",
+  );
+  assert.deepEqual(upload, {
+    name: "Publish comment policy to code scanning",
+    if: [
+      "runner.os == 'Linux'",
+      "&& (success() || steps.dogfood.outcome == 'failure')",
+      "&& hashFiles('comment-policy.sarif') != ''",
+      "&& (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)",
+    ].join(" "),
+    uses: pinnedAction("github/codeql-action/upload-sarif"),
+    with: { sarif_file: "comment-policy.sarif", category: "comment-policy" },
   });
 });
 

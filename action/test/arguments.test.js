@@ -46,7 +46,7 @@ test("constructs each explicit mode as an argv array", () => {
       "--profile",
       "full",
       "--format",
-      "json",
+      "text",
       "--",
       "source tree",
     ],
@@ -65,7 +65,7 @@ test("constructs each explicit mode as an argv array", () => {
       "--profile",
       "attestation",
       "--format",
-      "json",
+      "text",
       "--",
       ".",
     ],
@@ -78,7 +78,7 @@ test("constructs each explicit mode as an argv array", () => {
       base: "",
       head: "",
     }),
-    ["check", "--profile", "full", "--format", "json", "--", "."],
+    ["check", "--profile", "full", "--format", "text", "--", "."],
   );
   assert.deepEqual(
     buildCheckArguments({
@@ -97,7 +97,7 @@ test("constructs each explicit mode as an argv array", () => {
       "--profile",
       "attestation",
       "--format",
-      "json",
+      "text",
       "--",
       ".",
     ],
@@ -119,7 +119,7 @@ test("passes profile validation to the Rust CLI", () => {
       "--profile",
       "attestation",
       "--format",
-      "json",
+      "text",
       "--",
       ".",
     ],
@@ -132,7 +132,7 @@ test("passes profile validation to the Rust CLI", () => {
       base: "",
       head: "",
     }),
-    ["check", "--profile", "future-profile", "--format", "json", "--", "."],
+    ["check", "--profile", "future-profile", "--format", "text", "--", "."],
   );
 });
 
@@ -155,7 +155,7 @@ test("reads the Action profile input into the Rust CLI argv", () => {
       "--config",
       "policy/custom.toml",
       "--format",
-      "json",
+      "text",
       "--",
       "source tree",
     ],
@@ -184,5 +184,31 @@ test("rejects ambiguous mode inputs", () => {
         head: "",
       }),
     /only valid/u,
+  );
+});
+
+test("selects the SARIF report format on request", () => {
+  assert.deepEqual(
+    buildCheckArguments({
+      mode: "all",
+      profile: "full",
+      path: ".",
+      base: "",
+      head: "",
+      format: "sarif",
+    }),
+    ["check", "--all", "--profile", "full", "--format", "sarif", "--", "."],
+  );
+  assert.throws(
+    () =>
+      buildCheckArguments({
+        mode: "all",
+        profile: "full",
+        path: ".",
+        base: "",
+        head: "",
+        format: "json",
+      }),
+    /unsupported report format: json/u,
   );
 });

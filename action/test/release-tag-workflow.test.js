@@ -537,6 +537,7 @@ test("cargo-dist gates the compatibility tag on released Action E2E", async () =
         mode: "all",
         profile: "full",
         path: "${{ env.E2E_ROOT }}/static-violation",
+        "sarif-file": "static-violation.sarif",
       },
     },
     {
@@ -574,8 +575,19 @@ test("cargo-dist gates the compatibility tag on released Action E2E", async () =
       STATIC_VIOLATION_OUTCOME: "${{ steps.static-violation.outcome }}",
       STALE_ATTESTATION_OUTCOME: "${{ steps.stale-attestation.outcome }}",
       PARSE_ERROR_OUTCOME: "${{ steps.parse-error.outcome }}",
+      STATIC_VIOLATION_SARIF:
+        "${{ steps.static-violation.outputs.sarif-file }}",
     },
-    run: 'test "$CLEAN_OUTCOME" = success\ntest "$STATIC_VIOLATION_OUTCOME" = failure\ntest "$STALE_ATTESTATION_OUTCOME" = failure\ntest "$PARSE_ERROR_OUTCOME" = failure\n',
+    run: [
+      'test "$CLEAN_OUTCOME" = success',
+      'test "$STATIC_VIOLATION_OUTCOME" = failure',
+      'test "$STALE_ATTESTATION_OUTCOME" = failure',
+      'test "$PARSE_ERROR_OUTCOME" = failure',
+      'test -n "$STATIC_VIOLATION_SARIF"',
+      "test -s static-violation.sarif",
+      `jq -e '.version == "2.1.0" and (.runs[0].results | length == 1)' static-violation.sarif`,
+      "",
+    ].join("\n"),
   });
   assert.equal(job.steps.length, 7);
   assert.match(

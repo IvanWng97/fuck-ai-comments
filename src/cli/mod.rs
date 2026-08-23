@@ -2,6 +2,7 @@ mod cargo_context;
 mod check;
 mod git;
 pub(crate) mod safe_output;
+mod sarif;
 mod source;
 
 use std::io::{self, Write};
@@ -91,6 +92,7 @@ enum OutputFormat {
     #[default]
     Text,
     Json,
+    Sarif,
 }
 
 pub(crate) fn run(cli: Cli, output: &mut impl Write) -> Result<ExitCode> {
@@ -153,6 +155,7 @@ fn render_report(
     let write_result = match format {
         OutputFormat::Text => write_text_report(report, output),
         OutputFormat::Json => write_json_report(report, output),
+        OutputFormat::Sarif => sarif::write_sarif_report(report, output),
     };
     match write_result {
         Ok(()) => Ok(exit_code),
@@ -247,7 +250,7 @@ mod tests {
             files_scanned: 0,
         };
 
-        for format in [OutputFormat::Text, OutputFormat::Json] {
+        for format in [OutputFormat::Text, OutputFormat::Json, OutputFormat::Sarif] {
             let exit_code =
                 render_report(&report, format, &mut ErrorWriter(io::ErrorKind::BrokenPipe))
                     .expect("a closed output pipe should not fail the check");

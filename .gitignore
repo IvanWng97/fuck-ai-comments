@@ -2,3 +2,4 @@
 /node_modules/
 /lcov.info
 /.DS_Store
+/comment-policy.sarif

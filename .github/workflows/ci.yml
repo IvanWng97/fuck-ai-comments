@@ -18,6 +18,9 @@ jobs:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -38,8 +41,22 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Dogfood required comment policy
+        id: dogfood
         if: runner.os == 'Linux'
-        run: cargo run --release --locked -- check --all .
+        run: |
+          cargo build --release --locked
+          target/release/fuck-ai-comments check --all --format sarif . > comment-policy.sarif || test $? -eq 1
+          target/release/fuck-ai-comments check --all .
+      - name: Publish comment policy to code scanning
+        if: >-
+          runner.os == 'Linux'
+          && (success() || steps.dogfood.outcome == 'failure')
+          && hashFiles('comment-policy.sarif') != ''
+          && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+        with:
+          sarif_file: comment-policy.sarif
+          category: comment-policy
       - name: Verify distributable package
         if: runner.os == 'Linux'
         run: |
