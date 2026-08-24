@@ -3277,3 +3277,97 @@ fn rust_new_field_doc_activates_the_member_budget_only() {
         "the new member doc is budgeted on the member, not the type: {findings:#?}"
     );
 }
+
+#[test]
+fn rust_literal_field_edit_stales_only_that_row_and_the_const_doc() {
+    let before = concat!(
+        "/// Table of wire facts.\n",
+        "const FOUR: Desc = Desc {\n",
+        "    // Why a is 1.\n",
+        "    a: 1,\n",
+        "    // Why b is 2.\n",
+        "    b: 2,\n",
+        "};\n",
+    );
+    let after = concat!(
+        "/// Table of wire facts.\n",
+        "const FOUR: Desc = Desc {\n",
+        "    // Why a is 1.\n",
+        "    a: 1,\n",
+        "    // Why b is 2.\n",
+        "    b: 3,\n",
+        "};\n",
+    );
+
+    let (findings, lines) = stale_lines("src/lib.rs", before, after);
+
+    assert_eq!(
+        lines,
+        [1, 5],
+        "the edited row and the const doc go stale; the sibling row does not: {findings:#?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.line == 5 && finding.message.contains("member `FOUR.b`")),
+        "literal member attestations name the const-qualified field: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_literal_row_insertion_does_not_stale_sibling_rows() {
+    let before = concat!(
+        "const FOUR: Desc = Desc {\n",
+        "    // Why a is 1.\n",
+        "    a: 1,\n",
+        "    // Why c is 3.\n",
+        "    c: 3,\n",
+        "};\n",
+    );
+    let after = concat!(
+        "const FOUR: Desc = Desc {\n",
+        "    // Why a is 1.\n",
+        "    a: 1,\n",
+        "    // Why b is 2.\n",
+        "    b: 2,\n",
+        "    // Why c is 3.\n",
+        "    c: 3,\n",
+        "};\n",
+    );
+
+    let (findings, lines) = stale_lines("src/lib.rs", before, after);
+
+    assert_eq!(
+        lines,
+        Vec::<usize>::new(),
+        "inserting a row leaves the untouched rows attested: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_same_literal_field_in_different_consts_keeps_separate_identities() {
+    let before = concat!(
+        "const FOUR: Desc = Desc {\n",
+        "    // Shared wording.\n",
+        "    a: 1,\n",
+        "};\n",
+        "const FIVE: Desc = Desc {\n",
+        "    // Shared wording.\n",
+        "    a: 1,\n",
+        "};\n",
+    );
+    let after = concat!(
+        "const FOUR: Desc = Desc {\n",
+        "    // Shared wording.\n",
+        "    a: 1,\n",
+        "};\n",
+        "const FIVE: Desc = Desc {\n",
+        "    // Shared wording.\n",
+        "    a: 5,\n",
+        "};\n",
+    );
+
+    let (findings, lines) = stale_lines("src/lib.rs", before, after);
+
+    assert_eq!(lines, [6], "only FIVE.a changed: {findings:#?}");
+}
