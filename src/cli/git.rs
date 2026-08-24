@@ -616,36 +616,7 @@ impl Repository {
     }
 
     fn diff_changes(&self, request: DiffRequest<'_>) -> Result<Vec<FileChange>> {
-        let mut arguments = vec![
-            OsString::from("diff"),
-            OsString::from("--raw"),
-            OsString::from("-z"),
-            OsString::from("--no-ext-diff"),
-            OsString::from("--no-textconv"),
-            OsString::from("--find-renames=1%"),
-            OsString::from("-B"),
-            OsString::from(format!("-l{GIT_EXHAUSTIVE_RENAME_LIMIT}")),
-            OsString::from("--no-abbrev"),
-        ];
-        let target = match request {
-            DiffRequest::Worktree { head } => {
-                arguments.push(OsString::from(head.as_str()));
-                DiffTarget::Worktree
-            }
-            DiffRequest::Index { head } => {
-                arguments.push(OsString::from("--cached"));
-                if let Some(head) = head {
-                    arguments.push(OsString::from(head.as_str()));
-                }
-                DiffTarget::Index
-            }
-            DiffRequest::Commits { base, head } => {
-                arguments.push(OsString::from(base.as_str()));
-                arguments.push(OsString::from(head.as_str()));
-                DiffTarget::Commit
-            }
-        };
-
+        let (arguments, target) = diff_arguments(request);
         let output = self.git(arguments.iter().map(OsString::as_os_str))?;
         parse_raw_changes(&output, target)
     }
@@ -1139,6 +1110,40 @@ impl ObjectId {
     fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Builds the `git diff --raw` invocation whose rename pairing the analysis trusts.
+fn diff_arguments(request: DiffRequest<'_>) -> (Vec<OsString>, DiffTarget) {
+    let mut arguments = vec![
+        OsString::from("diff"),
+        OsString::from("--raw"),
+        OsString::from("-z"),
+        OsString::from("--no-ext-diff"),
+        OsString::from("--no-textconv"),
+        OsString::from("--find-renames=1%"),
+        OsString::from("-B"),
+        OsString::from(format!("-l{GIT_EXHAUSTIVE_RENAME_LIMIT}")),
+        OsString::from("--no-abbrev"),
+    ];
+    let target = match request {
+        DiffRequest::Worktree { head } => {
+            arguments.push(OsString::from(head.as_str()));
+            DiffTarget::Worktree
+        }
+        DiffRequest::Index { head } => {
+            arguments.push(OsString::from("--cached"));
+            if let Some(head) = head {
+                arguments.push(OsString::from(head.as_str()));
+            }
+            DiffTarget::Index
+        }
+        DiffRequest::Commits { base, head } => {
+            arguments.push(OsString::from(base.as_str()));
+            arguments.push(OsString::from(head.as_str()));
+            DiffTarget::Commit
+        }
+    };
+    (arguments, target)
 }
 
 fn parse_raw_changes(output: &[u8], target: DiffTarget) -> Result<Vec<FileChange>> {
@@ -1896,12 +1901,31 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DiffTarget, ObjectId, Repository, Status, parse_blob_batch, parse_raw_changes,
-        parse_status, run_git_at,
+        DiffRequest, DiffTarget, ObjectId, Repository, Status, diff_arguments, parse_blob_batch,
+        parse_raw_changes, parse_status, run_git_at,
     };
 
     const OLD_ID: &str = "1111111111111111111111111111111111111111";
     const NEW_ID: &str = "2222222222222222222222222222222222222222";
+
+    #[test]
+    fn diff_arguments_pin_exhaustive_rename_detection_to_the_git_default_limit() {
+        // Git silently degrades renames to add/delete pairs above its exhaustive limit,
+        // so the CLI passes the default explicitly instead of inheriting local config.
+        let (arguments, target) = diff_arguments(DiffRequest::Index { head: None });
+        let arguments: Vec<_> = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect();
+
+        assert!(matches!(target, DiffTarget::Index));
+        assert!(
+            arguments.contains(&"--find-renames=1%".into()),
+            "{arguments:?}"
+        );
+        assert!(arguments.contains(&"-l1000".into()), "{arguments:?}");
+        assert_eq!(arguments.last().map(AsRef::as_ref), Some("--cached"));
+    }
 
     #[test]
     fn raw_parser_rejects_inconsistent_status_metadata() {
