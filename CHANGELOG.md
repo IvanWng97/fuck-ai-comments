@@ -5,6 +5,8 @@ All notable changes to `fuck-ai-comments` are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-23
+
 ### Fixed
 
 - Field initializers of a struct literal that is a `const` or `static` value
