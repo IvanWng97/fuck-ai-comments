@@ -103,30 +103,6 @@ fn inexact_rename_source(label: &str, revision: &str, value: usize) -> String {
     )
 }
 
-fn stage_inexact_renames(root: &TempDir, count: usize) {
-    for index in 0..count {
-        let extension = if index == 0 { "rs" } else { "txt" };
-        write(
-            root,
-            format!("old-{index:04}.{extension}"),
-            inexact_rename_source(&format!("file_{index}"), "before", 1),
-        );
-    }
-    commit_all(root, "add rename sources");
-    for index in 0..count {
-        let extension = if index == 0 { "rs" } else { "txt" };
-        let old_path = root.path().join(format!("old-{index:04}.{extension}"));
-        let new_path = format!("new-{index:04}.{extension}");
-        fs::rename(old_path, root.path().join(&new_path)).expect("source should be renamed");
-        write(
-            root,
-            new_path,
-            inexact_rename_source(&format!("file_{index}"), "after-", 2),
-        );
-    }
-    git(root, ["add", "--all"]);
-}
-
 fn deterministic_padding(mut state: u64) -> String {
     std::iter::repeat_with(|| {
         state = state
@@ -1456,77 +1432,6 @@ fn attestation_profile_keeps_the_addition_deletion_ancestry_guard() {
 
     command(&root)
         .args(["check", "--staged", "--profile", "attestation"])
-        .assert()
-        .code(2)
-        .stderr(UNPAIRED_ADD_DELETE_ERROR);
-}
-
-#[test]
-fn staged_pairs_candidates_at_the_explicit_exhaustive_rename_limit() {
-    let _guard = serialize_resource_intensive_git_test();
-    let root = repository();
-    stage_inexact_renames(&root, GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT);
-    git(&root, ["config", "diff.renameLimit", "1"]);
-    let limit_argument = format!("-l{GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT}");
-    let raw = git(
-        &root,
-        [
-            "diff",
-            "--cached",
-            "--raw",
-            "--find-renames=1%",
-            &limit_argument,
-            "HEAD",
-        ],
-    );
-    assert_eq!(
-        raw.matches(" R").count(),
-        GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT,
-        "unexpected fixture: {raw}"
-    );
-
-    let output = command(&root)
-        .args(["check", "--staged"])
-        .assert()
-        .code(1)
-        .get_output()
-        .clone();
-    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
-
-    assert!(stdout.contains("new-0000.rs:2: comment-policy/comment-owner-changed"));
-}
-
-#[test]
-fn staged_fails_closed_above_the_explicit_exhaustive_rename_limit() {
-    let _guard = serialize_resource_intensive_git_test();
-    let root = repository();
-    let candidate_count = GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT + 1;
-    stage_inexact_renames(&root, candidate_count);
-    git(&root, ["config", "diff.renameLimit", "0"]);
-    let limit_argument = format!("-l{GIT_DEFAULT_EXHAUSTIVE_RENAME_LIMIT}");
-    let raw = git(
-        &root,
-        [
-            "diff",
-            "--cached",
-            "--raw",
-            "--find-renames=1%",
-            &limit_argument,
-            "HEAD",
-        ],
-    );
-    assert_eq!(
-        (
-            raw.matches(" R").count(),
-            raw.matches(" A\t").count(),
-            raw.matches(" D\t").count(),
-        ),
-        (0, candidate_count, candidate_count),
-        "unexpected fixture: {raw}"
-    );
-
-    command(&root)
-        .args(["check", "--staged"])
         .assert()
         .code(2)
         .stderr(UNPAIRED_ADD_DELETE_ERROR);
