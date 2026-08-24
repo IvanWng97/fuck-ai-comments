@@ -33,18 +33,18 @@ and changed-owner attestation.
 
 ## Rules
 
-| Rule                             | Required policy                                                                                                                                       |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                      |
-| Type budget                      | Recognized type owners in Rust, Python, JavaScript/TypeScript, Kotlin, Objective-C, and Swift use the same relative narrative budget as functions     |
-| Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, member, template, and TOML owners allow at most 3 total                                    |
-| Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                               |
-| Member budget                    | Rust struct, union, and tuple fields and enum variants are members with their own 3-line narrative budget; member docs never aggregate onto the type  |
-| File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                                  |
-| Template budget                  | HTML, CSS, and Astro template owners get at most 3 narrative lines                                                                                    |
-| Default absolute owner cap       | Comments using built-in relative or owner-capped policies cannot exceed 8 lines on function/type/file owners or 3 on leaf/member/template/TOML owners |
-| Stale comment                    | Unchanged meaningful normalized text fails when its owning code or semantic role changes                                                              |
-| Reparented comment               | Unchanged meaningful normalized text fails when it moves to another owner                                                                             |
+| Rule                             | Required policy                                                                                                                                                                            |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Function budget                  | At most `min(8, max(1, code_lines / 4))` narrative comment lines                                                                                                                           |
+| Type budget                      | Recognized type owners in Rust, Python, JavaScript/TypeScript, Kotlin, Objective-C, and Swift use the same relative narrative budget as functions                                          |
+| Function/type/file comment block | Three or more consecutive narrative-only lines fail; leaf, member, template, and TOML owners allow at most 3 total                                                                         |
+| Leaf budget                      | Constants, statics, and equivalent leaves get at most 3 narrative lines                                                                                                                    |
+| Member budget                    | Rust struct, union, and tuple fields, enum variants, and const/static struct-literal fields are members with their own 3-line narrative budget; member docs never aggregate onto the owner |
+| File budget                      | At most `min(8, max(2, code_lines / 16))` file-level narrative lines                                                                                                                       |
+| Template budget                  | HTML, CSS, and Astro template owners get at most 3 narrative lines                                                                                                                         |
+| Default absolute owner cap       | Comments using built-in relative or owner-capped policies cannot exceed 8 lines on function/type/file owners or 3 on leaf/member/template/TOML owners                                      |
+| Stale comment                    | Unchanged meaningful normalized text fails when its owning code or semantic role changes                                                                                                   |
+| Reparented comment               | Unchanged meaningful normalized text fails when it moves to another owner                                                                                                                  |
 
 Function and type `code_lines` count physical rows assigned to that budget.
 Nested functions and types use their own budgets, while leaf code stays in its
@@ -53,8 +53,12 @@ Rust structs, enums, unions, traits, type aliases, and implementation blocks are
 type owners. Struct, union, and tuple fields and enum variants are member
 owners: each budgets its own comments under the same semantic categories, while
 its code rows still size the declaring type's relative budget. Member identities
-are parent-qualified (`Report.width`, `Kind::First`). Module headers and
-documentation on module declarations remain at file scope.
+are parent-qualified (`Report.width`, `Kind::First`). Field initializers of a
+struct literal that is a `const` or `static` value, directly or through
+single-value wrappers such as `Some(..)`, `Box::new(..)`, or `&`, are members
+of that leaf (`FOUR.a`, `NESTED.inner.a`); rows inside array, tuple, or
+multi-argument literals have no stable identity and stay with the leaf. Module
+headers and documentation on module declarations remain at file scope.
 
 Documentation is classified from syntax and attachment, not from a marker alone.
 The adapters recognize Python docstrings; attached Rust docs; attached JSDoc and

@@ -88,6 +88,7 @@ struct RustContextFrame {
     is_ordered_field_declaration_list: bool,
     ordered_field_count: usize,
     member_scope_pushed: bool,
+    literal_value: bool,
     inner_rustdocs_allowed: bool,
     namespace_before: Option<IdentityId>,
     callable_pushed: bool,
@@ -525,6 +526,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                     &mut context,
                     &mut private_module_depth,
                 );
+                let literal_value = is_literal_value(node, frames.last());
                 let member_scope_pushed =
                     record_member(node, source, &mut frames, &mut context, &mut member_scopes);
                 let parent = frames.last();
@@ -621,6 +623,7 @@ fn rust_context(root: Node<'_>, source: &str) -> Result<RustContext, AnalysisErr
                         == "ordered_field_declaration_list",
                     ordered_field_count: 0,
                     member_scope_pushed,
+                    literal_value,
                     inner_rustdocs_allowed: node.kind() == "source_file" || is_module_body,
                     namespace_before,
                     callable_pushed,
@@ -754,6 +757,37 @@ fn record_member(
             }
             return false;
         }
+        "const_item" | "static_item" => {
+            let Some(name) = node.child_by_field_name("name") else {
+                return false;
+            };
+            member_scopes.push(node_text(name, source).to_owned());
+            return true;
+        }
+        "field_initializer" | "shorthand_field_initializer" => {
+            let in_literal_value = frames.last().is_some_and(|frame| frame.literal_value);
+            let name = if node.kind() == "field_initializer" {
+                node.child_by_field_name("field")
+            } else {
+                node.named_child(0)
+            };
+            let Some((scope, name)) = member_scopes.last().filter(|_| in_literal_value).zip(name)
+            else {
+                return false;
+            };
+            let field = node_text(name, source);
+            let qualified = format!("{scope}.{field}");
+            context.members.insert(
+                node.id(),
+                RustMemberDraft {
+                    role: MemberRole::Field,
+                    name: qualified.clone(),
+                    segment: format!("field:{field}"),
+                },
+            );
+            member_scopes.push(qualified);
+            return true;
+        }
         _ => {}
     }
     let Some(frame) = frames
@@ -778,6 +812,30 @@ fn record_member(
         );
     }
     false
+}
+
+/// Whether `node` sits in a const or static value position whose struct-literal
+/// fields can be members: only single-value wrappers keep field identities unique.
+fn is_literal_value(node: Node<'_>, parent: Option<&RustContextFrame>) -> bool {
+    if matches!(node.kind(), "const_item" | "static_item") {
+        return true;
+    }
+    if !parent.is_some_and(|frame| frame.literal_value) {
+        return false;
+    }
+    match node.kind() {
+        "struct_expression"
+        | "field_initializer_list"
+        | "field_initializer"
+        | "shorthand_field_initializer"
+        | "reference_expression"
+        | "parenthesized_expression"
+        | "arguments" => true,
+        "call_expression" => node
+            .child_by_field_name("arguments")
+            .is_some_and(|arguments| arguments.named_child_count() == 1),
+        _ => false,
+    }
 }
 
 fn pop_scope(

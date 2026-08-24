@@ -3668,3 +3668,228 @@ fn rust_nested_variant_field_docs_budget_against_the_inner_field() {
         "Rust field `Kind::Second.x` owns 6 documentation comment lines; configured allowance is 5"
     );
 }
+
+const LITERAL_ROWS: &str = concat!(
+    "pub(crate) struct Desc {\n",
+    "    a: u8,\n",
+    "    b: u8,\n",
+    "    c: u8,\n",
+    "    d: u8,\n",
+    "}\n",
+    "\n",
+    "pub(crate) const FOUR: Desc = Desc {\n",
+    "    // Why a is 1.\n",
+    "    a: 1,\n",
+    "    // Why b is 2.\n",
+    "    b: 2,\n",
+    "    // Why c is 3.\n",
+    "    c: 3,\n",
+    "    // Why d is 4.\n",
+    "    d: 4,\n",
+    "};\n",
+);
+
+#[test]
+fn rust_const_literal_field_comments_budget_against_each_field() {
+    let findings = analyze(Path::new("src/lib.rs"), LITERAL_ROWS).expect("valid Rust should parse");
+
+    assert!(
+        findings.is_empty(),
+        "one rationale line per literal field never aggregates onto the const: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_oversized_literal_field_comment_reports_only_that_field() {
+    let source = concat!(
+        "pub(crate) struct Desc {\n",
+        "    a: u8,\n",
+        "    b: u8,\n",
+        "}\n",
+        "\n",
+        "pub(crate) const PAIR: Desc = Desc {\n",
+        "    // Why a is 1.\n",
+        "    a: 1,\n",
+        "    // Why b is 2, line one.\n",
+        "    // Why b is 2, line two.\n",
+        "    // Why b is 2, line three.\n",
+        "    // Why b is 2, line four.\n",
+        "    b: 2,\n",
+        "};\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+    assert_eq!(
+        rules,
+        ["comment-policy/member-comment-budget"],
+        "only the oversized literal field is reported: {findings:#?}"
+    );
+    assert_eq!(findings[0].line, 9);
+    assert_eq!(
+        findings[0].message,
+        "Rust field `PAIR.b` owns 4 comment lines; allowance is 3"
+    );
+}
+
+#[test]
+fn rust_shorthand_literal_field_comments_budget_against_that_field() {
+    let source = concat!(
+        "pub(crate) struct Desc {\n",
+        "    a: u8,\n",
+        "}\n",
+        "\n",
+        "pub(crate) const A: u8 = 1;\n",
+        "\n",
+        "pub(crate) const ONE: Desc = Desc {\n",
+        "    // Shorthand rationale one.\n",
+        "    // Shorthand rationale two.\n",
+        "    // Shorthand rationale three.\n",
+        "    // Shorthand rationale four.\n",
+        "    a,\n",
+        "};\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(
+        findings[0].message,
+        "Rust field `ONE.a` owns 4 comment lines; allowance is 3"
+    );
+}
+
+#[test]
+fn rust_nested_literal_field_comments_budget_against_the_inner_field() {
+    let source = concat!(
+        "pub(crate) struct Desc {\n",
+        "    a: u8,\n",
+        "}\n",
+        "\n",
+        "pub(crate) struct Outer {\n",
+        "    inner: Option<Desc>,\n",
+        "    tag: u8,\n",
+        "}\n",
+        "\n",
+        "pub(crate) const NESTED: Outer = Outer {\n",
+        "    inner: Some(Desc {\n",
+        "        // Nested rationale one.\n",
+        "        // Nested rationale two.\n",
+        "        // Nested rationale three.\n",
+        "        // Nested rationale four.\n",
+        "        a: 1,\n",
+        "    }),\n",
+        "    // Tag rationale.\n",
+        "    tag: 9,\n",
+        "};\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(
+        findings[0].message,
+        "Rust field `NESTED.inner.a` owns 4 comment lines; allowance is 3"
+    );
+}
+
+#[test]
+fn rust_function_local_literal_comments_stay_in_the_function_budget() {
+    let source = concat!(
+        "pub(crate) struct Desc {\n",
+        "    a: u8,\n",
+        "    b: u8,\n",
+        "    c: u8,\n",
+        "    d: u8,\n",
+        "}\n",
+        "\n",
+        "pub(crate) fn build() -> Desc {\n",
+        "    Desc {\n",
+        "        // Function-local line one.\n",
+        "        a: 1,\n",
+        "        // Function-local line two.\n",
+        "        b: 2,\n",
+        "        // Function-local line three.\n",
+        "        c: 3,\n",
+        "        // Function-local line four.\n",
+        "        d: 4,\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+    assert_eq!(
+        rules,
+        ["comment-policy/function-comment-budget"],
+        "literal fields inside a function cannot escape its budget: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_array_literal_rows_still_aggregate_onto_the_const() {
+    let source = concat!(
+        "pub(crate) struct Row {\n",
+        "    name: u8,\n",
+        "}\n",
+        "\n",
+        "pub(crate) const TABLE: [Row; 2] = [\n",
+        "    Row {\n",
+        "        // Row one rationale.\n",
+        "        // Row one detail.\n",
+        "        name: 1,\n",
+        "    },\n",
+        "    Row {\n",
+        "        // Row two rationale.\n",
+        "        // Row two detail.\n",
+        "        name: 2,\n",
+        "    },\n",
+        "];\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+    assert_eq!(
+        rules,
+        ["comment-policy/leaf-comment-budget"],
+        "array rows have no stable identity, so they stay on the const: {findings:#?}"
+    );
+}
+
+#[test]
+fn rust_literal_base_and_const_docs_stay_with_the_const() {
+    let source = concat!(
+        "pub(crate) struct Desc {\n",
+        "    a: u8,\n",
+        "    b: u8,\n",
+        "}\n",
+        "\n",
+        "pub(crate) const DEFAULT: Desc = Desc { a: 0, b: 0 };\n",
+        "\n",
+        "/// Const doc one.\n",
+        "/// Const doc two.\n",
+        "pub(crate) const ONE: Desc = Desc {\n",
+        "    // Why a is 1.\n",
+        "    a: 1,\n",
+        "    // Base rationale one.\n",
+        "    // Base rationale two.\n",
+        "    ..DEFAULT\n",
+        "};\n",
+    );
+
+    let findings = analyze(Path::new("src/lib.rs"), source).expect("valid Rust should parse");
+
+    let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+    assert_eq!(
+        rules,
+        ["comment-policy/leaf-comment-budget"],
+        "the const keeps its own docs and the base-initializer rationale: {findings:#?}"
+    );
+    assert_eq!(
+        findings[0].message,
+        "Rust leaf `ONE` owns 4 comment lines; allowance is 3"
+    );
+}
