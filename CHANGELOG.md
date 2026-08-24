@@ -5,6 +5,14 @@ All notable changes to `fuck-ai-comments` are documented here. The project uses
 
 ## [Unreleased]
 
+### Fixed
+
+- Field initializers of a struct literal that is a `const` or `static` value
+  are now member owners (`FOUR.a`, `NESTED.inner.a`), so one line of rationale
+  per row of a data table no longer aggregates onto the enclosing leaf (#46).
+  Rows inside array, tuple, or multi-argument literals stay with the leaf
+  because they have no stable identity.
+
 ## [0.3.0] - 2026-08-23
 
 ### Added
