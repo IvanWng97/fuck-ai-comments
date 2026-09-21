@@ -1904,6 +1904,40 @@ fn regrouped_anonymous_preference_chain_fails_closed_through_the_public_change_s
 }
 
 #[test]
+fn closure_closing_line_with_a_second_closure_is_not_an_ambiguous_change() {
+    let before = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn verify() {\n",
+            "    retry(|| async {\n",
+            "        if attempt == 0 {\n",
+            "            // A real PostgreSQL error aborts this transaction after its write.\n",
+            "            abort();\n",
+            "        }\n",
+            "        Ok(())\n",
+            "    }).await.map_err(|e| anyhow::anyhow!(e.message))?;\n",
+            "}\n",
+        ),
+    };
+    let after = SourceFile {
+        path: Path::new("src/lib.rs"),
+        text: concat!(
+            "fn verify() {\n",
+            "    retry(|| async {\n",
+            "        if attempt == 0 {\n",
+            "            abort();\n",
+            "        }\n",
+            "        Ok(())\n",
+            "    }).await.map_err(|e| anyhow::anyhow!(e.message))?;\n",
+            "}\n",
+        ),
+    };
+
+    analyze_change(before, after)
+        .expect("a shared closing line must not abort comment analysis");
+}
+
+#[test]
 fn format_only_owner_move_does_not_stale_its_comment() {
     let before = SourceFile {
         path: Path::new("src/lib.rs"),

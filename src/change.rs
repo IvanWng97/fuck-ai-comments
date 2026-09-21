@@ -709,7 +709,11 @@ fn exact_same_line_owner_pairs(
         let after_span = &after.owners[after_index].span;
         let before_extent = owner_line_extent(before_span, before_line)?;
         let after_extent = owner_line_extent(after_span, after_line)?;
-        if before_extent != after_extent {
+        // Deleting a comment above this line moves the byte offset inside the
+        // owner. The unchanged columns on the anchor line are the identity.
+        if before_extent.line_start != after_extent.line_start
+            || before_extent.line_end != after_extent.line_end
+        {
             return None;
         }
         exact_pair_count += usize::from(direct_owner_code_is_exact(
