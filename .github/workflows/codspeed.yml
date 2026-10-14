@@ -33,7 +33,7 @@ jobs:
       - name: Build benchmarks
         run: cargo codspeed build --locked -m simulation -m memory --bench analysis
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5
+        uses: CodSpeedHQ/action@f842b9a3ffe213dbb81768fd7f7eeb4dfcf1c369 # v5
         env:
           # CodSpeed installs Valgrind; apt hooks must not prompt or restart the hosted runner.
           DEBIAN_FRONTEND: noninteractive
